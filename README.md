@@ -36,6 +36,27 @@ db foreach row {
 rename db {}
 ~~~
 
+Bound Variables
+---------------
+
+SQL queries executed via the "extended_query" method or those build on it
+(allrows, foreach, onecolumn), support tdbc-style bound variables, which are
+much safer than interpolating values into the SQL string (a frequent source of
+SQL injection vulnerabilities), and also much faster becuase they allow a
+prepared statement to be reused for the same query with different parameters.
+A ":" followed by a sequence of alphanumeric characters names a scalar variable
+whose value will be sent to the server for that input parameter.
+
+Binary Transport for Some Types
+-------------------------------
+
+Parameters sent to and column data returned by the server (using
+"extended_query" and derived methods) are transported in database-native binary
+format for integer, floating point and bytea types.  This helps performance
+somewhat, avoiding the conversion to string and back, and in particular makes
+storing and retrieving binary data (like the contents of images) efficient and
+safe, with no need to transform the binary data to base64 or similar encoding.
+
 Connecting Over Unix Domain Sockets
 -----------------------------------
 
