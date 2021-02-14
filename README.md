@@ -39,7 +39,7 @@ rename db {}
 Bound Variables
 ---------------
 
-SQL queries executed via the "extended_query" method or those build on it
+SQL queries executed via the "extended_query" method or those derived from it
 (allrows, foreach, onecolumn), support tdbc-style bound variables, which are
 much safer than interpolating values into the SQL string (a frequent source of
 SQL injection vulnerabilities), and also much faster becuase they allow a
