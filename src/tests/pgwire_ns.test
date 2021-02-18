@@ -1,0 +1,177 @@
+package require tcltest
+namespace import ::tcltest::*
+
+package require pgwire_ns
+#puts "db: [exec ping -c 1 db]"
+package require unix_sockets
+
+#set connect {
+#	unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]
+#}
+set connect {
+	socket db 5432
+}
+
+test pgwire_ns-1.1 {Construct instance} -setup { #<<<
+	set dbchan	[try $connect]
+} -body {
+	pgwire_ns create pg $dbchan pagila postgres insecure
+	llength [info command pg]
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan
+} -result 1
+#>>>
+test pgwire_ns-1.2 {simple_query_dict} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg simple_query_dict row {select title from film where film_id=259} {
+		set title	[dict get $row title]
+	}
+	set title
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan row title
+} -result {DUCK RACER}
+#>>>
+test pgwire_ns-1.3 {onecolumn} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg onecolumn {select title from film where film_id=259}
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan
+} -result {DUCK RACER}
+#>>>
+test pgwire_ns-2.1 {allrows -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg allrows -as lists {select release_year,title from film where film_id=286}
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan
+} -result {{2006 {ENOUGH RAGING}}}
+#>>>
+test pgwire_ns-2.2 {allrows -as lists, no -columnsvariable, 1 row, many columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	set rows	[pg allrows -as lists {select * from film where film_id=286}]
+
+	llength [lindex $rows 0]
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan rows
+} -result 14
+#>>>
+test pgwire_ns-3.1 {allrows -as dicts, 1 row, 2 columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg allrows -as dicts {select release_year,title from film where film_id=286}
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan
+} -result {{release_year 2006 title {ENOUGH RAGING}}}
+#>>>
+test pgwire_ns-3.2 {allrows -as dicts, 1 row, many columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	set rows	[pg allrows -as dicts {select * from film where film_id=286}]
+	list [dict get [lindex $rows 0] title] [dict keys [lindex $rows 0]]
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan rows
+} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext}}
+#>>>
+test pgwire_ns-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg foreach -as lists row {select release_year,title from film where film_id=286} {
+		set res	[lindex $row 1]
+	}
+	set res
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan row
+} -result {ENOUGH RAGING}
+#>>>
+test pgwire_ns-4.2 {allrows -as lists, with -columnsvariable, 1 row, many columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg foreach -as lists -columnsvariable cols row {select * from film where film_id=286} {
+		set res	[lindex $row [lsearch -exact $cols title]]
+	}
+	set res
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan row cols
+} -result {ENOUGH RAGING}
+#>>>
+test pgwire_ns-5.1 {foreach -as dicts, 1 row, 2 columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg foreach -as dicts row {select release_year,title from film where film_id=286} {
+		set res	[dict get $row title]
+	}
+	set res
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan row
+} -result {ENOUGH RAGING}
+#>>>
+test pgwire_ns-5.2 {foreach -as dicts, 1 row, many columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire_ns create pg $dbchan pagila postgres insecure
+} -body {
+	pg foreach -as dicts row {select * from film where film_id=286} {
+		set res	[dict get $row title]
+	}
+	set res
+} -cleanup {
+	catch {rename pg {}}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan row res
+} -result {ENOUGH RAGING}
+#>>>
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

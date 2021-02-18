@@ -19,7 +19,7 @@ namespace eval ::tdbc::pgwire {
 }
 
 oo::class create ::tdbc::pgwire::connection { #<<<
-	superclass ::pgwire ::tdbc::connection
+	superclass ::tdbc::connection
 
 	variable {*}{
 		host
@@ -29,13 +29,11 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 		password
 
 		socket
-		transaction_status
-		ready_for_query
 	}
 
 	constructor args { #<<<
 		if {[llength $args] == 2 && [lindex $args 0] eq "-attach"} {
-			next {*}$args
+			::pgwire create pg {*}$args
 		} else {
 			if {![catch {package require parse_args}]} {
 				parse_args::parse_args $args {
@@ -71,45 +69,46 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 				}
 			}
 
-			next
+			::pgwire create pg
 
 			my _reconnect
 		}
+	}
+
+	#>>>
+	destructor { #<<<
+		puts stderr "In connection destructor"
+		foreach stmt [my statements] {
+			puts stderr "Deleting dependent statement ($stmt)"
+			$stmt destroy
+		}
+		if {[self next] ne ""} next
 	}
 
 	#>>>
 	method detach {} { #<<<
-		foreach stmt [my statements] {
-			$stmt destroy
-		}
-		next
-	}
-
-	#>>>
-
-	method _connection_lost {} { #<<<
-		if {$transaction_status eq "I"} {
-			# Attempt a reconnect
-			close $socket
-			unset socket
-			my _reconnect
-		} else {
-			next
+		if {[info object isa object pg]} {
+			puts stderr "tdbc::pgwire::detach, detaching pg"
+			foreach stmt [my statements] {
+				$stmt destroy
+			}
+			pg detach
 		}
 	}
 
 	#>>>
+
 	method _reconnect {} { #<<<
 		if {[info exists socket] && $socket in [chan names]} {
 			error "Already connected"
 		}
-		set chan	[socket $host $port]
+		set socket	[socket $host $port]
 
 		try {
-			my connect $chan $db $user $password
+			pg connect $socket $db $user $password
 		} on error {errmsg options} {
-			if {$chan in [chan names]} {
-				close $chan
+			if {$socket in [chan names]} {
+				close $socket
 			}
 			return -options $options $errmsg
 		}
@@ -117,7 +116,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 
 	#>>>
 	method primarykeys tableName { #<<<
-		tailcall my allrows {
+		tailcall pg allrows {
 			select
 				xtable.table_schema			as tableSchema,
 				xtable.table_name			as tableName,
@@ -166,7 +165,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 			}
 		}
 
-		my allrows {
+		pg allrows {
 			select
 				rc.constraint_catalog			as foreignConstraintCatalog,
 				rc.constraint_schema			as foreignConstraintSchema,
@@ -218,6 +217,15 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	#>>>
 
 	forward statementCreate ::tdbc::pgwire::statement create
+	forward begintransaction pg begintransaction
+	forward rollback pg rollback
+	forward commit pg commit
+	forward allrows pg allrows
+	forward foreach pg foreach
+	forward onecolumn pg onecolumn
+	forward prepare_statement pg prepare_statement
+	forward close_statement pg close_statement
+	forward extended_query pg extended_query
 }
 
 #>>>
@@ -232,6 +240,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		execute_lambda
 		makerow_vars
 		makerow_dict
+		makerow_dict_no_nulls
 		makerow_list
 	}
 

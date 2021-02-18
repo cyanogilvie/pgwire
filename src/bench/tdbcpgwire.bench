@@ -1,0 +1,49 @@
+if {"bench" ni [info commands bench]} {
+	package require bench
+	namespace import bench::*
+}
+
+
+tcl::tm::path add [file join [file dirname [file dirname [file normalize [info script]]]] tm]
+package require pgwire
+package require tdbc::pgwire
+package require tdbc::postgres
+
+proc main {} {
+bench tdbcpgwire-4.1 {prepared statement allrows} -setup { #<<<
+	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+
+	set film_id	286
+	set q		{select title from film where film_id=:film_id}
+	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
+	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
+} -compare {
+	tdbc_postgres {
+		[dict get $stmts tdbc_postgres] allrows
+	}
+} -cleanup {
+	dict for {k v} $stmts {
+		if {[info object isa object $v]} {
+			$v destroy
+		}
+	}
+	foreach obj {tdbc_pgwire tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain stmts k v film_id q
+} -result {{title {ENOUGH RAGING}}}
+#>>>
+
+if 0 {
+	tdbc_pgwire {
+		[dict get $stmts tdbc_pgwire] allrows
+	}
+}
+}
+
+main
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

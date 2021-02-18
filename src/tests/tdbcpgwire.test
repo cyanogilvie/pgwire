@@ -1,0 +1,32 @@
+package require tcltest
+namespace import ::tcltest::*
+
+package require tdbc::pgwire
+
+test tdbcpgwire-1.1 {Construct instance} -body { #<<<
+	tdbc::pgwire::connection create tdbcpgwire -db pagila -user postgres -password insecure -host db -port 5432
+	info object isa object tdbcpgwire
+} -cleanup {
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+} -result 1
+#>>>
+test tdbcpgwire-10.1 {Construct statement} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire -db pagila -user postgres -password insecure -host db -port 5432
+} -body {
+	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+	set film_id	286
+	$stmt allrows
+} -cleanup {
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	unset -nocomplain stmt film_id
+} -result {{title {ENOUGH RAGING}}}
+#>>>
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

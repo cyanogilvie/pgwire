@@ -1,0 +1,34 @@
+version: "3.9"
+services:
+    db:
+        build: sampledb
+        volumes:
+            - run:/run
+            - data:/data
+        environment:
+            POSTGRES_PASSWORD: insecure
+            PGDATA: /data
+            PGHOST: /run/postgresql
+        ports:
+            - "5432"
+        healthcheck:
+            test: ["CMD", "psql", "-U", "postgres", "-d", "pagila", "-c", "select count(*) from actor"]
+            interval: 1s
+            timeout: 1s
+            retries: 1
+            start_period: 1s
+    pgwire:
+        build: pgwire
+        depends_on:
+            db:
+                condition: service_healthy
+        volumes:
+            - ./src:/src
+            - run:/run
+        environment:
+            POSTGRES_PASSWORD: insecure
+            PGHOST: /run/postgresql
+volumes:
+    data:
+    run:
+# vim: expandtab

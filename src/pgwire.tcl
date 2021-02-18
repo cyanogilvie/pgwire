@@ -1,181 +1,3 @@
-if 0 { # Testing script <<<
-package require pgwire
-source [file join [ns_info home] repo/tm/pgwire-3.0.0.tm]
-
-parse_args [tdbc_connstr dbnew] {
-	-host		{-required}
-	-port		{-default 5432}
-	-user		{-required}
-	-password	{-required}
-	-db			{-required}
-}
-
-set site	rubylane
-set limit	50
-set q {select shopname,userid,shopnickname,shopstatus from shops where shoptype=:site order by userid desc limit :limit}
-#set q {select * from shops where shoptype=:site order by userid desc limit :limit}
-set chan	[socket $host $port]
-#chan push $chan pgwire::tapchan
-try {
-	pgwire create pg $chan $db $user $password
-	log_duration "simple_query_dict" {
-		pg simple_query_dict row $q {
-			rl_log notice "simple_query_dict shopnickname: [dict get $row shopnickname]"
-		}
-	}
-	log_duration "simple_query_list" {
-		pg simple_query_list row $q {
-			rl_log notice "simple_query_list shopnickname: [lindex $row 0]"
-		}
-	}
-	log_duration "tdbc::postgres" {
-		db each row $q {
-			rl_log notice "tdbc::postgres shopnickname: [dict get $row shopnickname]"
-		}
-	}
-	set foo	"Foo:"
-	log_duration "extended_query" {
-		pg extended_query $q {
-			rl_log notice "linking field_names: ($field_names)"
-			upvar 1 {*}$field_names
-		} {
-			uplevel 1 {
-				rl_log notice "---------------- $foo extended_query shopnickname: $shopnickname"
-			}
-		}
-	}
-	log_duration "extended_query, second" {
-		pg extended_query $q {
-			upvar 1 {*}$field_names
-		} {
-			uplevel 1 {
-				rl_log notice "extended_query shopnickname: $shopnickname"
-			}
-		}
-	}
-	log_duration "extended_query, allrows list" {
-		set res	[pg extended_query $q {
-			set varlist	[lmap {f d} $field_names {
-				format {$%s} $d
-			}]
-			set __onrow "lappend acc \[list [join $varlist]\]"
-		} {
-			try $__onrow
-		}]
-		rl_log notice "extended_query allrows list: ($res)"
-	}
-	log_duration "extended_query, allrows dict" {
-		set res	[pg extended_query $q {
-			set parts	{}
-			foreach {f d} $field_names {
-				append parts "[list $f] \[set [list $d]\] "
-			}
-			set __onrow "lappend acc \[dict create $parts\]"
-		} {
-			try $__onrow
-		}]
-		rl_log notice "extended_query allrows dict: ($res)"
-	}
-	log_duration "pgwire allrows dict" {
-		set res	[pg allrows -as dicts $q]
-		rl_log notice "pgwire allrows dict: ($res)"
-	}
-	log_duration "pgwire allrows list" {
-		set res	[pg allrows -as lists $q]
-		rl_log notice "pgwire allrows list: ($res)"
-	}
-	log_duration "pgwire foreach dict" {
-		pg foreach -as dicts r $q {
-			rl_log notice "userid [dict get $r userid]: [dict get $r shopname]"
-		}
-	}
-	log_duration "pgwire foreach list" {
-		pg foreach -as lists r $q {
-			rl_log notice "userid [lindex $r 1]: [lindex $r 0]"
-		}
-	}
-	if 0 {
-	log_duration "extended_query, select *" {
-		pg extended_query {select * from shops where userid=:userid} {
-			upvar 1 {*}$field_names
-		} {
-			uplevel 1 {
-				rl_log notice "extended_query shopnickname: $shopnickname"
-			}
-		}
-	}
-	}
-	rl_log notice "simple_query_dict: [timerate {
-		pg simple_query_dict row $q {}
-	}]"
-	rl_log notice "simple_query_list: [timerate {
-		pg simple_query_list row $q {}
-	}]"
-	rl_log notice "tdbc::postgres each: [timerate {
-		db each row $q {dict get $row shopnickname}
-	}]"
-	rl_log notice "tdbc::postgres allrows: [timerate {
-		db allrows $q
-	}]"
-	rl_log notice "extended_query foreach [timerate {
-		pg extended_query $q {
-			upvar 1 {*}$field_names
-		} {
-			uplevel 1 {
-				set shopnickname
-			}
-		}
-	}]"
-	rl_log notice "extended_query allrows list [timerate {
-		pg extended_query $q {
-			set varlist	[lmap {f d} $field_names {
-				format {$%s} $d
-			}]
-			set __onrow "lappend acc \[list [join $varlist]\]"
-		} {
-			try $__onrow
-		}
-	}]"
-	rl_log notice "extended_query allrows dict [timerate {
-		pg extended_query $q {
-			set parts	{}
-			foreach {f d} $field_names {
-				append parts "[list $f] \[set [list $d]\] "
-			}
-			set __onrow "lappend acc \[dict create $parts\]"
-		} {
-			try $__onrow
-		}
-	}]"
-	rl_log notice "pgwire allrows dict [timerate {
-		pg allrows -as dicts $q
-	}]"
-	rl_log notice "pgwire allrows list [timerate {
-		pg allrows -as lists $q
-	}]"
-	rl_log notice "pgwire foreach dict [timerate {
-		pg foreach -as dicts r $q {
-			dict get $r userid
-		}
-	}]"
-	rl_log notice "pgwire foreach list [timerate {
-		pg foreach -as lists r $q {
-			lindex $r 0
-		}
-	}]"
-} finally {
-	if {[info object isa object pg]} {
-		rl_log notice "destroying pg"
-		pg destroy
-	}
-	if {[info exists chan] && $chan in [chan names]} {
-		rl_log notice "closing chan: ($chan)"
-		close $chan
-	}
-}
-}
-#>>>
-
 package require Thread
 
 if {[info object isa object ::pgwire]} {
@@ -186,9 +8,9 @@ if {[namespace exists ::pgwire]} {
 	namespace delete ::pgwire
 }
 namespace eval ::pgwire { #<<<
-	if {[info commands ::rl_log] ne ""} {
+	if {[info commands ::ns_log] ne ""} {
 		proc log {lvl msg} {
-			rl_log $lvl $msg
+			ns_log $lvl $msg
 		}
 	} else {
 		proc log {lvl msg} {
@@ -326,6 +148,7 @@ namespace eval ::pgwire { #<<<
 #>>>
 
 set ::pgwire::accelerators	0
+if 1 {
 try {
 	package require critcl
 } on ok ver {
@@ -346,6 +169,257 @@ try {
 			#include <string.h>
 		}
 		critcl::ccommand ::pgwire::c_makerow {cdata interp objc objv} { //<<<
+			const char* restrict		data = NULL;
+			int							data_len;
+			Tcl_Obj**					c_types;
+			int							c_types_len;
+			const uint16_t*	restrict	rformats = NULL;
+			int							rformats_len;
+			Tcl_Encoding				encoding;
+			int							i;
+			const char* restrict		p = NULL;
+			const char* restrict		e = NULL;
+			uint16_t					colcount;
+			Tcl_Obj*					row = NULL;
+			int							retcode = TCL_OK;
+			static const char* types[] = {
+				"bool",
+				"int1",
+				"smallint",
+				"int2",
+				"int4",
+				"integer",
+				"bigint",
+				"int8",
+				"bytea",
+				"float4",
+				"float8",
+				"varchar",
+				"text",
+				(char*)NULL
+			};
+			int type_idx;
+			enum {
+				TYPE_BOOL,
+				TYPE_INT1,
+				TYPE_SMALLINT,
+				TYPE_INT2,
+				TYPE_INT4,
+				TYPE_INTEGER,
+				TYPE_BIGINT,
+				TYPE_INT8,
+				TYPE_BYTEA,
+				TYPE_FLOAT4,
+				TYPE_FLOAT8,
+				TYPE_VARCHAR,
+				TYPE_TEXT
+			};
+			static const char* formats[] = {
+				"dicts",
+				"lists",
+				"dicts_no_nulls",
+				(char*)NULL
+			};
+			int format;
+			enum {
+				FORMAT_DICTS,
+				FORMAT_LISTS,
+				FORMAT_DICTS_NO_NULLS
+			};
+
+			if (objc != 6) {
+				Tcl_WrongNumArgs(interp, 1, objv, "data c_types rformats tcl_encoding format");
+				return TCL_ERROR;
+			}
+
+			p = data = Tcl_GetByteArrayFromObj(objv[1], &data_len);
+			e = p + data_len;
+			if (Tcl_ListObjGetElements(interp, objv[2], &c_types_len, &c_types) != TCL_OK)
+				return TCL_ERROR;
+			rformats = (const uint16_t* restrict)Tcl_GetByteArrayFromObj(objv[3], &rformats_len);
+			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
+				return TCL_ERROR;
+			if (Tcl_GetIndexFromObj(interp, objv[5], formats, "format", TCL_EXACT, &format) != TCL_OK)
+				return TCL_ERROR;
+
+			if (c_types_len % 2 != 0) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("c_types must be an even number of elements"));
+				return TCL_ERROR;
+			}
+
+			if (rformats_len-2 != c_types_len) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("rformats must be two bytes long for each column, plus 2 bytes, have %d for %d columns", rformats_len, c_types_len/2));
+				return TCL_ERROR;
+			}
+
+			if (data_len < 4) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short"));
+				return TCL_ERROR;
+			}
+
+			colcount = bswap_16(*(uint16_t*)p); p+=2;
+			if (colcount != c_types_len/2) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+				return TCL_ERROR;
+			}
+
+			{
+				const int	rslots = colcount * (format == FORMAT_DICTS ? 2 : 1);
+				Tcl_Obj**	rowv = NULL;
+				int			c;		/* col num */
+				int			rs;		/* rowv slot */
+				Tcl_Obj*	nullobj = NULL;
+
+				rowv = ckalloc(sizeof(Tcl_Obj*)*rslots);
+
+				Tcl_IncrRefCount(nullobj = Tcl_NewObj());	/* TODO: store a static null obj in an interp AssocData */
+
+				/* Zero the pointers, so that we don't leak partial rows of Tcl_Objs on error */
+				memset(rowv, 0, sizeof(Tcl_Obj*) * rslots);
+
+				for (i=0, c=1, rs=0; i<c_types_len; i+=2, c++) {
+					const int collen = bswap_32(*(uint32_t*)p);
+
+					p += 4;
+
+					if (collen == -1) {
+						/* NULL */
+						switch (format) {
+							case FORMAT_DICTS_NO_NULLS:
+								Tcl_IncrRefCount(rowv[rs++] = c_types[i]);
+								// Falls through
+							case FORMAT_LISTS:
+								Tcl_IncrRefCount(rowv[rs++] = nullobj);
+						}
+						continue;
+					}
+
+					if (e-p < collen) {
+						Tcl_SetObjResult(interp, Tcl_ObjPrintf("Insufficient data for column %d: need %d but %ld remain", i/2, collen, e-p));
+						retcode = TCL_ERROR;
+						goto done;
+					}
+
+					if (format == FORMAT_DICTS || format == FORMAT_DICTS_NO_NULLS) {
+						Tcl_IncrRefCount(rowv[rs++] = c_types[i]);
+					}
+
+					/* rformats[c] is byteswapped (big endian), but 0 is still 0 in either byte order */
+					if (rformats[c] == 0) {
+						/* Text */
+						Tcl_DString		utf8;
+
+						Tcl_DStringInit(&utf8);
+
+						Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
+						Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
+						Tcl_DStringFree(&utf8);
+					} else {
+						/* Binary */
+						if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, c_types[i+1], types, "type", TCL_EXACT, &type_idx)))
+							goto done;
+
+						switch (type_idx) {
+							case TYPE_BOOL:
+								// TODO: check that this is in fact 1 byte
+								// TODO: instead of Tcl_NewBooleanObj, ref a static true or false obj?
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewBooleanObj(*p != 0));
+								break;
+							case TYPE_INT1:
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(*p));	// Signed?
+								break;
+							case TYPE_SMALLINT:
+							case TYPE_INT2:
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_16(*(uint16_t*)p)));	// Signed?
+								break;
+							case TYPE_INT4:
+							case TYPE_INTEGER:
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_32(*(int32_t*)p)));	// Signed?
+								break;
+							case TYPE_BIGINT:
+							case TYPE_INT8:
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_64(*(uint64_t*)p)));	// Signed?
+								break;
+							case TYPE_BYTEA:
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj(p, collen));
+								break;
+							case TYPE_FLOAT4:
+								{
+									char buf[4];
+									*(uint32_t*)buf = bswap_32(*(uint32_t*)p);
+									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(float*)buf));
+								}
+								break;
+							case TYPE_FLOAT8:
+								{
+									char buf[8];
+									*(uint64_t*)buf = bswap_64(*(uint64_t*)p);
+									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(double*)buf));
+								}
+								break;
+							case TYPE_VARCHAR:
+							case TYPE_TEXT:
+								{
+									Tcl_DString		utf8;
+
+									Tcl_DStringInit(&utf8);
+
+									Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
+									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
+									Tcl_DStringFree(&utf8);
+								}
+								break;
+							default:
+								Tcl_SetObjResult(interp, Tcl_ObjPrintf("Unrecognised type \"%s\" for column \"%s\"", Tcl_GetString(c_types[i+1]), Tcl_GetString(c_types[i])));
+								retcode = TCL_ERROR;
+								goto done;
+						}
+					}
+					p += collen;
+				}
+
+				Tcl_SetObjResult(interp, Tcl_NewListObj(rs, rowv));
+
+done:
+				while (--rs >= 0) {
+					if (rowv[rs] != NULL) {
+						Tcl_DecrRefCount(rowv[rs]);
+						rowv[rs] = NULL;
+					}
+				}
+				if (nullobj) {
+					Tcl_DecrRefCount(nullobj); nullobj = NULL;
+				}
+				if (rowv) {
+					ckfree(rowv); rowv = NULL;
+				}
+				return retcode;
+			}
+		}
+		#>>>
+
+		# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
+		critcl::load
+	}
+	# With a little help from my friends (c) >>>
+	set ::pgwire::accelerators	1
+}
+} else {
+try {
+	package require tcc4tcl
+} on ok ver {
+	::pgwire::log notice "Have tcc4tcl $ver"
+	set cc	[tcc4tcl::new]
+	# With a little help from my friends (c) <<<
+	#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
+	$cc add_include_path /usr/include
+	$cc ccode {
+		#include <byteswap.h>
+		#include <stdint.h>
+		#include <string.h>
+
+		int c_makerow(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
+		{
 			const char* restrict		data = NULL;
 			int							data_len;
 			Tcl_Obj**					c_types;
@@ -550,7 +624,7 @@ try {
 
 				Tcl_SetObjResult(interp, Tcl_NewListObj(rs, rowv));
 
-done:
+	done:
 				while (--rs >= 0) {
 					if (rowv[rs] != NULL) {
 						Tcl_DecrRefCount(rowv[rs]);
@@ -566,13 +640,20 @@ done:
 				return retcode;
 			}
 		}
-		#>>>
-
-		# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
-		critcl::load
+		//>>>
 	}
+
+	#::pgwire::log notice "tcc c code: [$cc code]"
+
+	$cc linktclcommand ::pgwire::c_makerow c_makerow
+
+	::pgwire::log notice "build tcc accelerators: [timerate {
+		$cc go
+	} 1 1]"
+
 	# With a little help from my friends (c) >>>
 	set ::pgwire::accelerators	1
+}
 }
 
 oo::class create ::pgwire {
@@ -1001,12 +1082,18 @@ oo::class create ::pgwire {
 		} else {
 			set severity	[dict get $fields Severity]
 		}
-		return -level 2 -code error -errorcode [list PGWIRE ERROR $severity $fields] "Postgres error: [dict get $fields Message]"
+		if {[dict exists $fields Code]} {
+			set code		[dict get $fields Code]
+		} else {
+			set code		unknown
+		}
+		return -level 2 -code error -errorcode [list PGWIRE ErrorResponse $severity $code $fields] "Postgres error: [dict get $fields Message]"
 	}
 
 	#>>>
 	method NoticeResponse fields { #<<<
 		# forward to get notices
+		::pgwire::log warning "Postgres NoticeResponse:\n\t[join [lmap {k v} $fields {format {%20s: %s} $k $v}] \n\t]"
 	}
 
 	#>>>
@@ -1039,18 +1126,31 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method _get_string {data ofs_var} { #<<<
-		upvar 1 $ofs_var i
-		set idx	[string first \u0 $data $i]
-		if {$idx == -1} {
-			throw unterminated_string "No null terminator found"
+	if {[catch {binary scan foo\u0bar C* _str}] == 0 && $_str eq "foo"} {
+		method _get_string {data ofs_var} { # Use TIP586's binary scan c-string support <<<
+			upvar 1 $ofs_var i
+			if {[binary scan C* $data string] == 0} {
+				throw unterminated_string "No null terminator found"
+			}
+			set i	[expr {$i + [string length $string] + 1}]
+			set string
 		}
-		set string	[string range $data $i [expr {$idx - 1}]]
-		set i		[expr {$idx + 1}]
-		set string
-	}
 
-	#>>>
+		#>>>
+	} else {
+		method _get_string {data ofs_var} { #<<<
+			upvar 1 $ofs_var i
+			set idx	[string first \u0 $data $i]
+			if {$idx == -1} {
+				throw unterminated_string "No null terminator found"
+			}
+			set string	[string range $data $i [expr {$idx - 1}]]
+			set i		[expr {$idx + 1}]
+			set string
+		}
+
+		#>>>
+	}
 	method read_one_message {} { #<<<
 		while 1 {
 			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
@@ -1322,6 +1422,13 @@ oo::class create ::pgwire {
 				switch -glob -- $tok {
 					:* - $* - @* {
 						set name	[string range $tok 1 end]
+						if {[regexp {^[0-9]+$} $name]} {
+							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+							# to be parameters from us, but refer to the argument of functions).  Not
+							# watertight, but would require a SQL-dialect aware parser to do properly.
+							append compiled $tok
+							continue
+						}
 						if {![dict exists $params_assigned $name]} {
 							set id	[incr seq]
 							dict set params_assigned $name id		$id
@@ -1332,7 +1439,10 @@ oo::class create ::pgwire {
 						append compiled \$$id
 					}
 					; {
-						error "Multiple statements are not supported"
+						#error "Multiple statements are not supported"
+						# These may be within a function definition or similar.  Build it here and let
+						# the backend sort out whether it will accept it
+						append compiled $tok
 					}
 					default {
 						append compiled $tok
@@ -1671,32 +1781,8 @@ oo::class create ::pgwire {
 					#>>>
 				} on error {errmsg options} {
 					set rethrow	[list -options $options $errmsg]
-					::pgwire::log error "Error during execute: $options"
-					if {[info exists socket] && $socket in [chan names]} {
-						while 1 {
-							if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
-							incr len -4	;# len includes itself
-
-							switch -exact -- $msgtype {
-								Z { # ReadyForQuery <<<
-									set data	[read $socket $len]
-									if {[eof $socket]} {my connection_lost}
-									binary scan $data a transaction_status
-									set ready_for_query	1
-									break
-									#>>>
-								}
-
-								Z - R - E - S - K - C - D - T - t - 1 - 2 - n - s {
-									# Eat these while waiting for the Sync response
-									if {$len > 0} {read $socket $len}
-									if {[eof $socket]} {my connection_lost}
-								}
-
-								default {my default_message_handler $msgtype $len}
-							}
-						}
-					}
+					#::pgwire::log error "Error during execute: $options"
+					my skip_to_sync
 				}
 
 				if {[info exists rethrow]} {
@@ -1729,35 +1815,7 @@ oo::class create ::pgwire {
 				set close_payload	S[encoding convertto $tcl_encoding $stmt_name]\u0
 				puts -nonewline $socket [binary format aIa* C [+ 4 [string length $close_payload]] $close_payload]S\u0\u0\u0\u4
 				flush $socket
-				# Close and Sync responses <<<
-				while 1 {
-					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
-					incr len -4	;# len includes itself
-
-					switch -exact -- $msgtype {
-						3 { # CloseComplete <<<
-							#>>>
-						}
-
-						Z { # ReadyForQuery <<<
-							set data	[read $socket $len]
-							if {[eof $socket]} {my connection_lost}
-							binary scan $data a transaction_status
-							set ready_for_query	1
-							break
-							#>>>
-						}
-
-						Z - R - E - S - K - C - D - T - t - 1 - 2 - n - s {
-							set data	[if {$len > 0} {read $socket $len}]
-							if {[eof $socket]} {my connection_lost}
-							# Eat these while waiting for the Sync response
-						}
-
-						default {my default_message_handler $msgtype $len}
-					}
-				}
-				#>>>
+				my skip_to_sync
 			}
 			return -options $options $errmsg
 		}
@@ -1871,6 +1929,9 @@ oo::class create ::pgwire {
 	method rollback         {} { if {$transaction_status ne "I"} {tailcall my simple_query_list rollback} }
 	method commit           {} { if {$transaction_status ne "I"} {tailcall my simple_query_list commit} }
 	method simple_query_dict {rowdict sql on_row} { #<<<
+		if {!$ready_for_query} {
+			error "Re-entrant query while another is processing: $sql"
+		}
 		upvar 1 $rowdict row
 		package require tdbc
 		set quoted	{}
@@ -1878,6 +1939,13 @@ oo::class create ::pgwire {
 			switch -glob -- $tok {
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
+					if {[regexp {^[0-9]+$} $name]} {
+						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+						# to be parameters from us, but refer to the argument of functions).  Not
+						# watertight, but would require a SQL-dialect aware parser to do properly.
+						append compiled $tok
+						continue
+					}
 					set exists	[uplevel 1 [list info exists $name]]
 					if {$exists} {
 						set value	[uplevel 1 [list set $name]]
@@ -1888,7 +1956,7 @@ oo::class create ::pgwire {
 				}
 
 				; {
-					error "Multiple statements are not supported"
+					append compiled $tok
 				}
 
 				default {
@@ -1918,6 +1986,9 @@ oo::class create ::pgwire {
 
 	#>>>
 	method simple_query_list {rowlist sql on_row} { #<<<
+		if {!$ready_for_query} {
+			error "Re-entrant query while another is processing: $sql"
+		}
 		upvar 1 $rowlist row
 		package require tdbc
 		set quoted	{}
@@ -1925,6 +1996,13 @@ oo::class create ::pgwire {
 			switch -glob -- $tok {
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
+					if {[regexp {^[0-9]+$} $name]} {
+						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+						# to be parameters from us, but refer to the argument of functions).  Not
+						# watertight, but would require a SQL-dialect aware parser to do properly.
+						append compiled $tok
+						continue
+					}
 					set exists	[uplevel 1 [list info exists $name]]
 					if {$exists} {
 						set value	[uplevel 1 [list set $name]]
@@ -1935,7 +2013,7 @@ oo::class create ::pgwire {
 				}
 
 				; {
-					error "Multiple statements are not supported"
+					append compiled $tok
 				}
 
 				default {
@@ -2013,7 +2091,7 @@ oo::class create ::pgwire {
 					if {[dict exists $encodings_map $value]} {
 						set tcl_encoding	[dict get $encodings_map $value]
 					} else {
-						log warning "No tcl encoding equivalent defined for \"$value\""
+						::pgwire::log warning "No tcl encoding equivalent defined for \"$value\""
 						set tcl_encoding	ascii
 					}
 				}
@@ -2021,10 +2099,7 @@ oo::class create ::pgwire {
 			}
 			A { # NotificationResponse <<<
 				set data	[read $socket $len]
-				if {[eof $socket]} {
-					my destroy
-					throw {PG CONNECTION LOST} "Server closed connection"
-				}
+				if {[eof $socket]} {my connection_lost}
 				binary scan $data I pid
 				set i 4
 
@@ -2057,6 +2132,9 @@ oo::class create ::pgwire {
 
 	#>>>
 	method extended_query {sql variant_setup {max_rows_per_batch 0}} { #<<<
+		if {!$ready_for_query} {
+			error "Re-entrant query while another is processing: $sql"
+		}
 		if {![dict exists $prepared $sql]} { # Prepare statement <<<
 			package require tdbc
 			set stmt_name	[incr name_seq]
@@ -2070,6 +2148,13 @@ oo::class create ::pgwire {
 				switch -glob -- $tok {
 					:* - $* - @* {
 						set name	[string range $tok 1 end]
+						if {[regexp {^[0-9]+$} $name]} {
+							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+							# to be parameters from us, but refer to the argument of functions).  Not
+							# watertight, but would require a SQL-dialect aware parser to do properly.
+							append compiled $tok
+							continue
+						}
 						if {![dict exists $params_assigned $name]} {
 							set id	[incr seq]
 							dict set params_assigned $name id		$id
@@ -2080,7 +2165,10 @@ oo::class create ::pgwire {
 						append compiled \$$id
 					}
 					; {
-						error "Multiple statements are not supported"
+						#error "Multiple statements are not supported"
+						# These may be within a function definition or similar.  Build it here and let
+						# the backend sort out whether it will accept it
+						append compiled $tok
 					}
 					default {
 						append compiled $tok
@@ -2164,6 +2252,7 @@ oo::class create ::pgwire {
 							binary scan [read $socket $len] SI* count parameter_type_oids
 							if {[eof $socket]} {my connection_lost}
 
+							#::pgwire::log notice "ParameterDescription, $count params, type oids: $parameter_type_oids, params_assigned: ($params_assigned)"
 							set build_params	{
 								set pdesc		{}
 								set pformats	{}
@@ -2225,6 +2314,7 @@ oo::class create ::pgwire {
 
 							append makerow_vars	{binary scan [read $socket 2] S col_count} \n
 							append makerow_dict	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
+							append makerow_dict_no_nulls	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
 							append makerow_list	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
 
 							set data	[read $socket $len]
@@ -2297,6 +2387,7 @@ oo::class create ::pgwire {
 								set makerow_prefix	"binary scan \[read \$socket 4\] I collen\n"
 								append makerow_vars $makerow_prefix "if {\$collen == -1} {unset -nocomplain [list $myname]} else [list $setvar]\n"
 								append makerow_dict $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]}\n"
+								append makerow_dict_no_nulls $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]} else {dict set row [list $field_name] {}}\n"
 								append makerow_list $makerow_prefix "if {\$collen == -1} {lappend row {}} else {lappend row \[$set_res\]}\n"
 							}
 
@@ -2304,8 +2395,10 @@ oo::class create ::pgwire {
 							#>>>
 						}
 						n { # NoData <<<
+							set rformats		[binary format Su 0]
 							set makerow_vars	{}
 							set makerow_dict	{}
+							set makerow_dict_no_nulls	{}
 							set makerow_list	{}
 							set c_types			{}
 							break
@@ -2440,7 +2533,7 @@ oo::class create ::pgwire {
 						#>>>
 					} on error {errmsg options} {
 						set rethrow	[list -options $options $errmsg]
-						::pgwire::log error "Error during execute: $options"
+						#::pgwire::log error "Error during execute: $options"
 						my skip_to_sync
 					}
 
@@ -2458,6 +2551,7 @@ oo::class create ::pgwire {
 				#	- $execute: script to run to execute the statement
 				#	- $makerow_vars
 				#	- $makerow_dict
+				#	- $makerow_dict_no_nulls
 				#	- $makerow_list
 				#	- $cached
 				#	- $heat - how frequently this prepared statement has been used recently, relative to others
@@ -2467,14 +2561,19 @@ oo::class create ::pgwire {
 					execute				$execute \
 					makerow_vars		$makerow_vars \
 					makerow_dict		$makerow_dict \
+					makerow_dict_no_nulls		$makerow_dict_no_nulls \
 					makerow_list		$makerow_list \
 					cached				$cached \
 					heat				0 \
 				]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
-				::pgwire::log error "Error preparing statement, closing and syncing: [dict get $options -errorinfo]"
-				my skip_to_sync
+				::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
+				if {[info exists socket]} {
+					puts -nonewline $socket S\u0\u0\u0\u4
+					flush $socket
+					my skip_to_sync
+				}
 				return -options $options $errmsg
 			}
 			#>>>
@@ -2513,9 +2612,10 @@ oo::class create ::pgwire {
 				#writefile /tmp/e.tcl $e
 			}
 			uplevel 1 [list apply $e $socket $max_rows_per_batch]
+		} trap {PGWIRE ErrorResponse} {errmsg options} {
+			return -code error -errorcode [dict get $options -errorcode] $errmsg
 		} on error {errmsg options} {
-			::pgwire::log error "Error in execution phase of extended query: [dict get $options -errorinfo]"
-			my skip_to_sync
+			#::pgwire::log error "Error in execution phase of extended query: [dict get $options -errorinfo]"
 			return -options $options $errmsg
 		}
 	}
@@ -2800,6 +2900,8 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+
+	method transaction_status {} { set transaction_status }
 }
 
 # vim: foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

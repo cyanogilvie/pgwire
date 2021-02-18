@@ -197,7 +197,7 @@ namespace eval ::pgwire_ns {
 				flush $socket
 			}
 			AuthenticationCleartextPassword	{} {
-				my PasswordMessage [encoding convertto [dict get $state $socket tcl_encoding] $password]
+				PasswordMessage [encoding convertto [dict get $state $socket tcl_encoding] $password]
 				flush $socket
 			}
 
@@ -330,89 +330,6 @@ namespace eval ::pgwire_ns {
 	}
 
 	#>>>
-	proc begintransaction socket { tailcall simple_query_list $socket begin }
-	proc rollback socket { #<<<
-		variable state
-		if {[dict get $state $socket transaction_status] ne "I"} {tailcall simple_query_list $socket rollback}
-	}
-
-	#>>>
-	proc commit socket { #<<<
-		variable state
-		if {[dict get $state $socket transaction_status] ne "I"} {tailcall simple_query_list $socket commit}
-	}
-
-	#>>>
-	proc _error {socket msg} { #<<<
-		destroy $socket
-		throw {PGWIRE FATAL} $msg
-	}
-
-	#>>>
-	proc connection_lost socket { #<<<
-		destroy $socket
-		throw {PG CONNECTION LOST} "Server closed connection"
-	}
-
-	#>>>
-	proc PasswordMessage {socket password} { #<<<
-		variable state
-		set payload	[encoding convertto [dict get $state $socket tcl_encoding] $password]\u0
-		puts -nonewline $socket [binary format aIa* p [+ 4 [string length $payload]] $payload]
-	}
-
-	#>>>
-	proc Terminate socket { #<<<
-		#::pgwire::log notice "Sending Terminate"
-		puts -nonewline $socket X\u0\u0\u0\u4
-	}
-
-	#>>>
-	proc Query {socket sql} { #<<<
-		variable state
-		set payload	[encoding convertto [dict get $state $socket tcl_encoding] $sql]\u0
-		puts -nonewline $socket [binary format aIa* Q [+ 4 [string length $payload]] $payload]
-	}
-
-	#>>>
-	proc val {socket str} { # Quote a SQL value <<<
-		variable state
-		if {
-			[dict exists $state $socket server_params standard_conforming_strings] &&
-			[dict get $state $socket server_params standard_conforming_strings] eq "on"
-		} {
-			return '[string map {' ''} $str]'
-		} else {
-			return '[string map {' '' \\ \\\\} $str]'
-		}
-	}
-
-	#>>>
-	proc name str { # Quote a SQL identifier <<<
-		return \"[string map {"\"" "\"\"" "\\" "\\\\"} $str]\"
-	}
-
-	#>>>
-	proc ErrorResponse {socket fields} { #<<<
-		if {[dict exists $fields SeverityNL]} {
-			set severity	[dict get $fields SeverityNL]
-		} else {
-			set severity	[dict get $fields Severity]
-		}
-		return -level 2 -code error -errorcode [list PGWIRE ERROR $severity $fields] "Postgres error: [dict get $fields Message]"
-	}
-
-	#>>>
-	proc NoticeResponse {socket fields} { #<<<
-		# forward to get notices
-	}
-
-	#>>>
-	proc NotificationResponse {socket pid channel payload} { #<<<
-		# forward this to get notification pushes
-	}
-
-	#>>>
 	# Try to find a suitable md5 command <<<
 	if {![catch {package require hash}]} {
 		proc _md5_hex bytes {
@@ -479,6 +396,44 @@ namespace eval ::pgwire_ns {
 	}
 
 	#>>>
+	proc ErrorResponse {socket fields} { #<<<
+		if {[dict exists $fields SeverityNL]} {
+			set severity	[dict get $fields SeverityNL]
+		} else {
+			set severity	[dict get $fields Severity]
+		}
+		if {[dict exists $fields Code]} {
+			set code		[dict get $fields Code]
+		} else {
+			set code		unknown
+		}
+		return -level 2 -code error -errorcode [list PGWIRE ErrorResponse $severity $code $fields] "Postgres error: [dict get $fields Message]"
+	}
+
+	#>>>
+	proc NoticeResponse {socket fields} { #<<<
+		# forward to get notices
+		::pgwire::log warning "Postgres NoticeResponse:\n\t[join [lmap {k v} $fields {format {%20s: %s} $k $v}] \n\t]"
+	}
+
+	#>>>
+	proc NotificationResponse {socket pid channel payload} { #<<<
+		# forward this to get notification pushes
+	}
+
+	#>>>
+	proc _error {socket msg} { #<<<
+		destroy $socket
+		throw {PGWIRE FATAL} $msg
+	}
+
+	#>>>
+	proc connection_lost socket { #<<<
+		destroy $socket
+		throw {PG CONNECTION LOST} "Server closed connection"
+	}
+
+	#>>>
 	if {[catch {binary scan foo\u0bar C* _str}] == 0 && $_str eq "foo"} {
 		proc _get_string {data ofs_var} { # Use TIP586's binary scan c-string support <<<
 			upvar 1 $ofs_var i
@@ -520,7 +475,7 @@ namespace eval ::pgwire_ns {
 			try {
 				dict get $msgtypes backend $msgtype
 			} trap {TCL LOOKUP DICT} {errmsg options} {
-				my _error "Invalid msgtype: \"$msgtype\", [binary encode hex $msgtype], probably a sync issue, abandoning connection"
+				_error $socket  "Invalid msgtype: \"$msgtype\", [binary encode hex $msgtype], probably a sync issue, abandoning connection"
 			} on ok messagename {}
 
 			# Parse message <<<
@@ -766,9 +721,114 @@ namespace eval ::pgwire_ns {
 	}
 
 	#>>>
+	proc sync socket { #<<<
+		variable state
+		puts -nonewline $socket S\u0\u0\u0\u4
+		flush $socket
+		while 1 {
+			if {[binary scan [read $socket 5] aI msgtype len] != 2} {connection_lost $socket}
+			incr len -4
+			if {$msgtype eq "Z"} { # ReadyForQuery
+				if {[binary scan [read $socket $len] a transaction_status] != 1} {connection_lost $socket}
+				dict set state $socket transaction_status $transaction_status
+				dict set state $socket ready_for_query 1
+				break
+			} else {
+				default_message_handler $socket $msgtype $len
+			}
+		}
+		set transaction_status
+	}
 
+	#>>>
+	proc skip_to_sync socket { #<<<
+		variable state
+		if {$socket in [chan names]} {
+			while 1 {
+				if {[binary scan [read $socket 5] aI msgtype len] != 2} {connection_lost $socket}
+				incr len -4	;# len includes itself
+
+				switch -exact -- $msgtype {
+					Z { # ReadyForQuery <<<
+						set data	[read $socket $len]
+						if {[eof $socket]} {connection_lost $socket}
+						binary scan $data a transaction_status
+						dict set state $socket transaction_status $transaction_status
+						dict set state $socket ready_for_query 1
+						break
+						#>>>
+					}
+
+					Z - R - E - S - K - C - D - T - t - 1 - 2 - n - s {
+						# Eat these while waiting for the Sync response
+						if {$len > 0} {read $socket $len}
+						if {[eof $socket]} {connection_lost $socket}
+					}
+
+					default {default_message_handler $socket $msgtype $len}
+				}
+			}
+		}
+	}
+
+	#>>>
+	proc Terminate socket { #<<<
+		#::pgwire::log notice "Sending Terminate"
+		puts -nonewline $socket X\u0\u0\u0\u4
+	}
+
+	#>>>
+	proc PasswordMessage {socket password} { #<<<
+		variable state
+		set payload	[encoding convertto [dict get $state $socket tcl_encoding] $password]\u0
+		puts -nonewline $socket [binary format aIa* p [+ 4 [string length $payload]] $payload]
+	}
+
+	#>>>
+	proc Query {socket sql} { #<<<
+		variable state
+		set payload	[encoding convertto [dict get $state $socket tcl_encoding] $sql]\u0
+		puts -nonewline $socket [binary format aIa* Q [+ 4 [string length $payload]] $payload]
+	}
+
+	#>>>
+
+	proc val {socket str} { # Quote a SQL value <<<
+		variable state
+		if {
+			[dict exists $state $socket server_params standard_conforming_strings] &&
+			[dict get $state $socket server_params standard_conforming_strings] eq "on"
+		} {
+			return '[string map {' ''} $str]'
+		} else {
+			return '[string map {' '' \\ \\\\} $str]'
+		}
+	}
+
+	#>>>
+	proc name str { # Quote a SQL identifier <<<
+		return \"[string map {"\"" "\"\"" "\\" "\\\\"} $str]\"
+	}
+
+	#>>>
+	proc begintransaction socket { tailcall simple_query_list $socket begin }
+	proc rollback socket { #<<<
+		variable state
+		if {[dict get $state $socket transaction_status] ne "I"} {tailcall simple_query_list $socket rollback}
+	}
+
+	#>>>
+	proc commit socket { #<<<
+		variable state
+		if {[dict get $state $socket transaction_status] ne "I"} {tailcall simple_query_list $socket commit}
+	}
+
+	#>>>
 	proc simple_query_dict {socket rowdict sql on_row} { #<<<
 		variable state
+		if {![dict get $state $socket ready_for_query]} {
+			error "Re-entrant query while another is processing: $sql"
+		}
 		upvar 1 $rowdict row
 		package require tdbc
 		set quoted	{}
@@ -776,6 +836,13 @@ namespace eval ::pgwire_ns {
 			switch -glob -- $tok {
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
+					if {[regexp {^[0-9]+$} $name]} {
+						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+						# to be parameters from us, but refer to the argument of functions).  Not
+						# watertight, but would require a SQL-dialect aware parser to do properly.
+						append compiled $tok
+						continue
+					}
 					set exists	[uplevel 1 [list info exists $name]]
 					if {$exists} {
 						set value	[uplevel 1 [list set $name]]
@@ -786,7 +853,7 @@ namespace eval ::pgwire_ns {
 				}
 
 				; {
-					error "Multiple statements are not supported"
+					append compiled $tok
 				}
 
 				default {
@@ -817,6 +884,9 @@ namespace eval ::pgwire_ns {
 	#>>>
 	proc simple_query_list {socket rowlist sql on_row} { #<<<
 		variable state
+		if {![dict get $state $socket ready_for_query]} {
+			error "Re-entrant query while another is processing: $sql"
+		}
 		upvar 1 $rowlist row
 		package require tdbc
 		set quoted	{}
@@ -824,6 +894,13 @@ namespace eval ::pgwire_ns {
 			switch -glob -- $tok {
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
+					if {[regexp {^[0-9]+$} $name]} {
+						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+						# to be parameters from us, but refer to the argument of functions).  Not
+						# watertight, but would require a SQL-dialect aware parser to do properly.
+						append compiled $tok
+						continue
+					}
 					set exists	[uplevel 1 [list info exists $name]]
 					if {$exists} {
 						set value	[uplevel 1 [list set $name]]
@@ -860,6 +937,7 @@ namespace eval ::pgwire_ns {
 	proc default_message_handler {socket msgtype len} { #<<<
 		variable state
 		variable encodings_map
+		variable errorfields
 
 		switch -exact -- $msgtype {
 			E - N { # ErrorResponse / NoticeResponse <<<
@@ -923,10 +1001,7 @@ namespace eval ::pgwire_ns {
 			}
 			A { # NotificationResponse <<<
 				set data	[read $socket $len]
-				if {[eof $socket]} {
-					my destroy $socket
-					throw {PG CONNECTION LOST} "Server closed connection"
-				}
+				if {[eof $socket]} {connection_lost $socket}
 				binary scan $data I pid
 				set i 4
 
@@ -958,59 +1033,11 @@ namespace eval ::pgwire_ns {
 	}
 
 	#>>>
-	proc sync socket { #<<<
-		variable state
-		puts -nonewline $socket S\u0\u0\u0\u4
-		flush $socket
-		while 1 {
-			if {[binary scan [read $socket 5] aI msgtype len] != 2} {connection_lost $socket}
-			incr len -4
-			if {$msgtype eq "Z"} { # ReadyForQuery
-				if {[binary scan [read $socket $len] a transaction_status] != 1} {connection_lost $socket}
-				dict set state $socket transaction_status $transaction_status
-				dict set state $socket ready_for_query 1
-				break
-			} else {
-				default_message_handler $socket $msgtype $len
-			}
-		}
-		set transaction_status
-	}
-
-	#>>>
-	proc skip_to_sync socket { #<<<
-		variable state
-		if {$socket in [chan names]} {
-			while 1 {
-				if {[binary scan [read $socket 5] aI msgtype len] != 2} {connection_lost $socket}
-				incr len -4	;# len includes itself
-
-				switch -exact -- $msgtype {
-					Z { # ReadyForQuery <<<
-						set data	[read $socket $len]
-						if {[eof $socket]} {connection_lost $socket}
-						binary scan $data a transaction_status
-						dict set state $socket transaction_status $transaction_status
-						dict set state $socket ready_for_query 1
-						break
-						#>>>
-					}
-
-					Z - R - E - S - K - C - D - T - t - 1 - 2 - n - s {
-						# Eat these while waiting for the Sync response
-						if {$len > 0} {read $socket $len}
-						if {[eof $socket]} {connection_lost $socket}
-					}
-
-					default {default_message_handler $socket $msgtype $len}
-				}
-			}
-		}
-	}
-
-	#>>>
 	proc extended_query {socket sql variant_setup {max_rows_per_batch 0}} { #<<<
 		variable state
+		if {![dict get $state $socket ready_for_query]} {
+			error "Re-entrant query while another is processing: $sql"
+		}
 		if {![dict exists $state $socket prepared $sql]} { # Prepare statement <<<
 			package require tdbc
 			set name_seq	[dict get $state $socket name_seq]
@@ -1026,6 +1053,13 @@ namespace eval ::pgwire_ns {
 				switch -glob -- $tok {
 					:* - $* - @* {
 						set name	[string range $tok 1 end]
+						if {[regexp {^[0-9]+$} $name]} {
+							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+							# to be parameters from us, but refer to the argument of functions).  Not
+							# watertight, but would require a SQL-dialect aware parser to do properly.
+							append compiled $tok
+							continue
+						}
 						if {![dict exists $params_assigned $name]} {
 							set id	[incr seq]
 							dict set params_assigned $name id		$id
@@ -1036,7 +1070,10 @@ namespace eval ::pgwire_ns {
 						append compiled \$$id
 					}
 					; {
-						error "Multiple statements are not supported"
+						#error "Multiple statements are not supported"
+						# These may be within a function definition or similar.  Build it here and let
+						# the backend sort out whether it will accept it
+						append compiled $tok
 					}
 					default {
 						append compiled $tok
@@ -1183,6 +1220,7 @@ namespace eval ::pgwire_ns {
 
 							append makerow_vars	{binary scan [read $socket 2] S col_count} \n
 							append makerow_dict	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
+							append makerow_dict_no_nulls	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
 							append makerow_list	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
 
 							set data	[read $socket $len]
@@ -1255,6 +1293,7 @@ namespace eval ::pgwire_ns {
 								set makerow_prefix	"binary scan \[read \$socket 4\] I collen\n"
 								append makerow_vars $makerow_prefix "if {\$collen == -1} {unset -nocomplain [list $myname]} else [list $setvar]\n"
 								append makerow_dict $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]}\n"
+								append makerow_dict_no_nulls $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]} else {dict set row [list $field_name] {}}\n"
 								append makerow_list $makerow_prefix "if {\$collen == -1} {lappend row {}} else {lappend row \[$set_res\]}\n"
 							}
 
@@ -1262,8 +1301,10 @@ namespace eval ::pgwire_ns {
 							#>>>
 						}
 						n { # NoData <<<
+							set rformats		[binary format Su 0]
 							set makerow_vars	{}
 							set makerow_dict	{}
+							set makerow_dict_no_nulls	{}
 							set makerow_list	{}
 							set c_types			{}
 							break
@@ -1415,6 +1456,7 @@ namespace eval ::pgwire_ns {
 				#	- $execute: script to run to execute the statement
 				#	- $makerow_vars
 				#	- $makerow_dict
+				#	- $makerow_dict_no_nulls
 				#	- $makerow_list
 				#	- $cached
 				#	- $heat - how frequently this prepared statement has been used recently, relative to others
@@ -1424,14 +1466,19 @@ namespace eval ::pgwire_ns {
 					execute				$execute \
 					makerow_vars		$makerow_vars \
 					makerow_dict		$makerow_dict \
+					makerow_dict_no_nulls		$makerow_dict_no_nulls \
 					makerow_list		$makerow_list \
 					cached				$cached \
 					heat				0 \
 				]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
-				::pgwire::log error "Error preparing statement, closing and syncing: [dict get $options -errorinfo]"
-				skip_to_sync $socket
+				::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
+				if {[info exists socket]} {
+					puts -nonewline $socket S\u0\u0\u0\u4
+					flush $socket
+					skip_to_sync $socket
+				}
 				return -options $options $errmsg
 			}
 			#>>>
@@ -1470,9 +1517,10 @@ namespace eval ::pgwire_ns {
 				#writefile /tmp/e.tcl $e
 			}
 			uplevel 1 [list apply $e $socket $max_rows_per_batch]
+		} trap {PGWIRE ErrorResponse} {errmsg options} {
+			return -code error -errorcode [dict get $options -errorcode] $errmsg
 		} on error {errmsg options} {
-			::pgwire::log error "Error in execution phase of extended query: [dict get $options -errorinfo]"
-			skip_to_sync $socket
+			#::pgwire::log error "Error in execution phase of extended query: [dict get $options -errorinfo]"
 			return -options $options $errmsg
 		}
 	}
@@ -1759,6 +1807,8 @@ namespace eval ::pgwire_ns {
 	}
 
 	#>>>
+
+	proc transaction_status socket { variable state; dict get $state $socket transaction_status }
 }
 
-# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+# vim: foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
