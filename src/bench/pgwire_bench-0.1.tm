@@ -75,10 +75,12 @@ proc _run_if_set script { #<<<
 
 #>>>
 proc _verify_res {variant retcodes expected match_mode got options} { #<<<
+	variable current_bench
+
 	if {[dict get $options -code] ni $retcodes} {
-		bench::output error "Error: $got"
-		throw [list BENCH BAD_CODE $variant $retcodes [dict get $options -code]] \
-			"$variant: Expected codes [list $retcodes], got [dict get $options -code]"
+		bench::output error "Error: $got\n[dict get $options -errorinfo]"
+		throw [list BENCH BAD_CODE $current_bench $variant $retcodes [dict get $options -code]] \
+			"$current_bench/$variant: Expected codes [list $retcodes], got [dict get $options -code]"
 	}
 
 	switch -- $match_mode {
@@ -91,8 +93,8 @@ proc _verify_res {variant retcodes expected match_mode got options} { #<<<
 		}
 	}
 
-	throw [list BENCH BAD_RESULT $variant $match_mode $expected $got] \
-		"$variant: Expected ($match_mode): -----------\n$expected\nGot: ----------\n$got"
+	throw [list BENCH BAD_RESULT $current_bench $variant $match_mode $expected $got] \
+		"$current_bench/$variant: Expected ($match_mode): -----------\n$expected\nGot: ----------\n$got"
 }
 
 #>>>
@@ -119,6 +121,7 @@ proc bench {name desc args} { #<<<
 	variable run
 	variable skipped
 	variable output
+	variable current_bench
 
 	# -target_cv		- Run until the coefficient of variation is below this, up to -max_time
 	# -max_time 		- Maximum number of seconds to keep running while the cv is converging
@@ -172,6 +175,7 @@ proc bench {name desc args} { #<<<
 
 	set variant_stats {}
 
+	set current_bench $name
 	_run_if_set $opts(-setup)
 	try {
 		dict for {variant script} $opts(-compare) {
@@ -278,6 +282,7 @@ proc bench {name desc args} { #<<<
 		lappend run $name $desc $variant_stats
 	} finally {
 		_run_if_set $opts(-cleanup)
+		unset current_bench
 	}
 }; namespace export bench
 
@@ -474,8 +479,10 @@ proc run_benchmarks {dir args} { #<<<
 		} trap {TCL LOOKUP SUBCOMMAND} {errmsg options} {
 			puts $options
 			apply $output error "Invalid display mode: \"$display_mode\""
+			exit 1
 		} trap {TCL WRONGARGS} {errmsg options} {
 			apply $output error "Invalid display mode params: $errmsg"
+			exit 1
 		}
 	}
 }

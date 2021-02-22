@@ -41,6 +41,12 @@ proc main {} {
 		}
 	} on ok {} {
 		exit 0
+	} trap {BENCH BAD_RESULT} {errmsg options} {
+		puts stderr $errmsg
+		exit 1
+	} trap {BENCH BAD_CODE} {errmsg options} {
+		puts stderr $errmsg
+		exit 1
 	} trap {BENCH INVALID_ARG} {errmsg options} {
 		puts stderr $errmsg
 		exit 1
