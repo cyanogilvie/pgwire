@@ -527,7 +527,6 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		tcl_encoding
 		c_types
 		rowcount
-
 	}
 
 	constructor {stmt args} { #<<<

@@ -170,6 +170,23 @@ Select 500 rows from a table with 82 columns:
    tdbc_postgres | 9543.500 cv:15.1%
 ~~~
 
+TDBC API
+--------
+
+A TDBC API implementation is available in the package tdbcpgwire.  The allrows
+and foreach methods on the connection instance provide the best performance,
+with the similar methods on the prepared statement object being slower, and the
+direct resultset manipulation being slowest.  Since prepared statements are
+implicitly cached, there should be no reason to explicitly manage them, but
+the API for that is supported for compatibility with other drivers.
+
+Status
+------
+
+The "extended_query" method of the pgwire class (and methods derived from this)
+are fairly well covered by the tests, but test coverage of the TDBC shim is
+less complete.  Feedback and bug reports welcome!
+
 License
 -------
 
