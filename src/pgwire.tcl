@@ -1562,14 +1562,16 @@ oo::class create ::pgwire {
 						#>>>
 					}
 					T { # RowDescription <<<
-						set makerow_vars	{}
-						set makerow_dict	{}
-						set makerow_list	{}
+						set makerow_vars			"set o 0\n"
+						set makerow_dict			"set o 0\n"
+						set makerow_dict_no_nulls	"set o 0\n"
+						set makerow_list			"set o 0\n"
 						set colnum	0
 
-						append makerow_vars	{binary scan [read $socket 2] S col_count} \n
-						append makerow_dict	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
-						append makerow_list	{binary scan [read $socket 2] S col_count} \n {set row {}} \n
+						append makerow_vars				{binary scan $data @${o}S col_count; incr o 2} \n
+						append makerow_dict				{binary scan $data @${o}S col_count; incr o 2} \n {set row {}} \n
+						append makerow_dict_no_nulls	{binary scan $data @${o}S col_count; incr o 2} \n {set row {}} \n
+						append makerow_list				{binary scan $data @${o}S col_count; incr o 2} \n {set row {}} \n
 
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
@@ -1606,29 +1608,36 @@ oo::class create ::pgwire {
 								set type_name	[dict get $type_oids $type_oid]
 								set colfmt		\u0\u1	;# binary
 								append setvar [switch -glob -- $type_name {
-									bool	{format {set %s [expr {[read $socket $collen] eq "\u1"}]} [list $myname]}
-									int1	{format {binary scan [read $socket $collen] c %s} [list $myname]}
+									bool	{format {binary scan $data @${o}c %s} [list $myname]}
+									int1	{format {binary scan $data @${o}c %s} [list $myname]}
 									smallint -
-									int2	{format {binary scan [read $socket $collen] S %s} [list $myname]}
+									int2	{format {binary scan $data @${o}S %s} [list $myname]}
 									int4 -
-									integer	{format {binary scan [read $socket $collen] I %s} [list $myname]}
+									integer	{format {binary scan $data @${o}I %s} [list $myname]}
 									bigint -
-									int8	{format {binary scan [read $socket $collen] W %s} [list $myname]}
-									bytea	{format {set %s [read $socket $collen]} [list $myname]}
-									float4	{format {binary scan [read $socket $collen] R %s} [list $myname]}
-									float8	{format {binary scan [read $socket $collen] Q %s} [list $myname]}
+									int8	{format {binary scan $data @${o}W %s} [list $myname]}
+									bytea	{format {binary scan $data @${o}a %s} [list $myname]}
+									float4	{format {binary scan $data @${o}R %s} [list $myname]}
+									float8	{format {binary scan $data @${o}Q %s} [list $myname]}
 									default {
-										#format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
 										set colfmt		\u0\u0	;# text
 										set type_name	text
-										format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
+										format {set %s [if {$collen == 0} {
+											return -level 0 {}
+										} else {
+											encoding convertfrom %s [string range $data $o [+ $o $collen -1]]
+										}]} [list $myname] [list $tcl_encoding]
 									}
 								}]
 
 								append rformats	$colfmt
 								lappend c_types $field_name $type_name
 							} else {
-								format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
+								append setvar	[format {set %s [if {$collen == 0} {
+									return -level 0 {}
+								} else {
+									encoding convertfrom %s [string range $data $o [+ $o $collen -1]]
+								}]} [list $myname] [list $tcl_encoding]]
 								append rformats	\u0\u0	;# text
 								lappend c_types $field_name text
 							}
@@ -1637,10 +1646,11 @@ oo::class create ::pgwire {
 								set set_res	"$setvar; set [list $myname]"
 							}
 
-							set makerow_prefix	"binary scan \[read \$socket 4\] I collen\n"
-							append makerow_vars $makerow_prefix "if {\$collen == -1} {unset -nocomplain [list $myname]} else [list $setvar]\n"
-							append makerow_dict $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]}\n"
-							append makerow_list $makerow_prefix "if {\$collen == -1} {lappend row {}} else {lappend row \[$set_res\]}\n"
+							set makerow_prefix	"binary scan \$data @\${o}I collen; incr o 4\n"
+							append makerow_vars $makerow_prefix "if {\$collen == -1} {unset -nocomplain [list $myname]} else {$setvar\nincr o \$collen\n}\n"
+							append makerow_dict $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]\nincr o \$collen\n}\n"
+							append makerow_dict_no_nulls $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]\nincr o \$collen\n} else {dict set row [list $field_name] {}}\n"
+							append makerow_list $makerow_prefix "if {\$collen == -1} {lappend row {}} else {lappend row \[$set_res\]\nincr o \$collen\n}\n"
 						}
 
 						break
@@ -1649,6 +1659,7 @@ oo::class create ::pgwire {
 					n { # NoData <<<
 						set makerow_vars	{}
 						set makerow_dict	{}
+						set makerow_dict_no_nulls	{}
 						set makerow_list	{}
 						set c_types			{}
 						break
@@ -1665,18 +1676,11 @@ oo::class create ::pgwire {
 
 			set execute [string map [list \
 				%desc%				$desc \
-				%build_params%		$build_params \
 				%stmt_name%			[list $stmt_name] \
 				%field_names%		[list $field_names] \
 				%rformats%			[list $rformats] \
 				%c_types%			[list $c_types] \
 			] {%desc%
-  				switch -exact -- [llength $args] {
-					0 {}
-					1 {set param_values	[lindex $args 0]}
-					default {error "Wrong number of args, must be socket portalname max_rows_per_batch ?param_values?"}
-				}
-
 				my variable tcl_encoding
 				my variable transaction_status
 				my variable ready_for_query
@@ -1684,13 +1688,6 @@ oo::class create ::pgwire {
 
 				set c_types		%c_types%
 
-				# Build params <<<
-				%build_params%
-				# Build params >>>
-
-				# Bind statment $stmt_name, default portal
-				# Execute $max_rows_per_batch
-				# Sync
 				set ready_for_query	0
 				set rformats	%rformats%
 				set enc_portal	[encoding convertto $tcl_encoding $portal_name]
@@ -1699,6 +1696,9 @@ oo::class create ::pgwire {
 				#::pgwire::log notice "Executing portal: ($portal_name)"
 				if {$bind} {
 					set bindmsg		$enc_portal\u0$enc_stmt\u0$parameters$rformats
+					# Bind statment $stmt_name, default portal
+					# Execute $max_rows_per_batch
+					# Flush
 					puts -nonewline $socket [binary format \
 						{ \
 							aIa* \
@@ -1711,6 +1711,8 @@ oo::class create ::pgwire {
 					]
 				} else {
 					# Continue an open portal
+					# Execute $max_rows_per_batch
+					# Flush
 					puts -nonewline $socket [binary format \
 						{ \
 							aIa*I \
@@ -1831,10 +1833,12 @@ oo::class create ::pgwire {
 			dict create \
 				field_names			$field_names \
 				socket				$socket \
-				execute_lambda		[list {socket portal_name max_rows_per_batch bind args} $execute [self namespace]] \
+				execute_lambda		[list {socket portal_name max_rows_per_batch bind parameters} $execute [self namespace]] \
 				makerow_vars		$makerow_vars \
 				makerow_dict		$makerow_dict \
-				makerow_list		$makerow_list
+				makerow_dict_no_nulls	$makerow_dict_no_nulls \
+				makerow_list		$makerow_list \
+				build_params		$build_params
 			#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 		} on error {errmsg options} { #<<<
 			::pgwire::log error "Error preparing statement, closing and syncing: [dict get $options -errorinfo]"
@@ -2348,6 +2352,7 @@ oo::class create ::pgwire {
 						T { # RowDescription <<<
 							set makerow_vars	{}
 							set makerow_dict	{}
+							set makerow_dict_no_nulls	{}
 							set makerow_list	{}
 							set colnum	0
 

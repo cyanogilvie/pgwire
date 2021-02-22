@@ -39,6 +39,34 @@ bench tdbcpgwire-4.1 {prepared statement allrows} -setup { #<<<
 	unset -nocomplain stmts k v film_id q
 } -result {{title {ENOUGH RAGING}}}
 #>>>
+bench tdbcpgwire-4.2 {prepared statement allrows} -setup { #<<<
+	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+
+	set q		{select * from film}
+	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
+	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
+} -compare {
+	tdbc_pgwire {
+		llength [[dict get $stmts tdbc_pgwire] allrows]
+	}
+	tdbc_postgres {
+		llength [[dict get $stmts tdbc_postgres] allrows]
+	}
+} -cleanup {
+	dict for {k v} $stmts {
+		if {[info object isa object $v]} {
+			$v destroy
+		}
+	}
+	foreach obj {tdbc_pgwire tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain stmts k v film_id q
+} -result 1000
+#>>>
 bench tdbcpgwire-20.1 {resultset allrows} -setup { #<<<
 	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure

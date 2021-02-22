@@ -215,15 +215,16 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	#>>>
 
 	forward statementCreate ::tdbc::pgwire::statement create
-	forward begintransaction pg begintransaction
-	forward rollback pg rollback
-	forward commit pg commit
-	forward allrows pg allrows
-	forward foreach pg foreach
-	forward onecolumn pg onecolumn
-	forward prepare_statement pg prepare_statement
-	forward close_statement pg close_statement
-	forward extended_query pg extended_query
+	forward begintransaction	pg begintransaction
+	forward rollback			pg rollback
+	forward commit				pg commit
+	forward allrows				pg allrows
+	forward foreach				pg foreach
+	forward onecolumn			pg onecolumn
+	forward prepare_statement	pg prepare_statement
+	forward close_statement		pg close_statement
+	forward extended_query		pg extended_query
+	forward skip_to_sync		pg skip_to_sync
 }
 
 #>>>
@@ -240,6 +241,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		makerow_dict
 		makerow_dict_no_nulls
 		makerow_list
+		build_params
 	}
 
 	constructor {instance sqlcode} { #<<<
@@ -276,7 +278,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		set args	[::tdbc::ParseConvenienceArgs $args opts]
 		switch -exact -- [llength $args] {
 			0 {}
-			1 {lassign $args dict}
+			1 {lassign $args param_values}
 			default {
 				return -code error -errorcode [concat $generalError wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
@@ -284,24 +286,27 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 		}
 
+		try $build_params
+
 		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-		lassign [if {[info exists dict]} {
-			coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch $dict
-		} else {
-			uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket "" $max_rows_per_batch 1 {*}$args]
-		}] \
+		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
 			columns rformats tcl_encoding c_types
 
 		try {
+			set acc	{}
 			switch -exact -- [dict get $opts -as] {
 				dicts {
 					while 1 {
 						set msg	[portal]
+						#::pgwire::log notice "portal yielded: $msg"
 						switch -exact -- [lindex $msg 0] {
 							DataRow {
-								try $makerow_dict
+								set data	[read $socket [lindex $msg 1]]
 								if {[eof $socket]} {unset socket; $con connection_lost}
+								if {$::pgwire::accelerators} {
+									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
+								} else $makerow_dict
 								lappend acc $row
 							}
 							PortalSuspended {
@@ -325,8 +330,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 						set msg	[portal]
 						switch -exact -- [lindex $msg 0] {
 							DataRow {
-								try $makerow_list
+								set data	[read $socket [lindex $msg 1]]
 								if {[eof $socket]} {unset socket; $con connection_lost}
+								if {$::pgwire::accelerators} {
+									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+								} else $makerow_list
 								lappend acc $row
 							}
 							PortalSuspended {
@@ -337,7 +345,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 							}
 							CommandComplete {
 								set msg	[lindex $msg 1]
-								::pgwire::log notice "Got CommandComplete: \"$msg\""
+								#::pgwire::log notice "Got CommandComplete: \"$msg\""
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -367,7 +375,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		set args	[::tdbc::ParseConvenienceArgs $args opts]
 		switch -exact -- [llength $args] {
 			2 {lassign $args row_varname script}
-			3 {lassign $args row_varname dict script}
+			3 {lassign $args row_varname param_values script}
 			default {
 				return -code error -errorcode [concat $generalError wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
@@ -375,13 +383,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 		}
 
+		try $build_params
+
 		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-		lassign [if {[info exists dict]} {
-			coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch $dict
-		} else {
-			uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket "" $max_rows_per_batch 1 {*}$args]
-		}] \
+		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
 			columns rformats tcl_encoding c_types
 
 		upvar 1 $row_varname row
@@ -393,8 +399,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 						set msg	[portal]
 						switch -exact -- [lindex $msg 0] {
 							DataRow {
-								try $makerow_dict
+								set data	[read $socket [lindex $msg 1]]
 								if {[eof $socket]} {unset socket; $con connection_lost}
+								if {$::pgwire::accelerators} {
+									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
+								} else $makerow_dict
 								try {
 									uplevel 1 $script
 								} on continue {} {
@@ -436,8 +445,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 						set msg	[portal]
 						switch -exact -- [lindex $msg 0] {
 							DataRow {
-								try $makerow_list
+								set data	[read $socket [lindex $msg 1]]
 								if {[eof $socket]} {unset socket; $con connection_lost}
+								if {$::pgwire::accelerators} {
+									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
+								} else $makerow_dict
 								try {
 									uplevel 1 $script
 								} on continue {} {
@@ -466,7 +478,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 							}
 							CommandComplete {
 								set msg	[lindex $msg 1]
-								::pgwire::log notice "Got CommandComplete: \"$msg\""
+								#::pgwire::log notice "Got CommandComplete: \"$msg\""
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -497,6 +509,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	method execute_lambda {} {set execute_lambda}
 	method socket {} {set socket}
 	method con {} {set con}
+	method makerow_def format { set makerow_$format }
+	method build_params {} { set build_params }
 }
 
 #>>>
@@ -513,6 +527,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		tcl_encoding
 		c_types
 		rowcount
+
 	}
 
 	constructor {stmt args} { #<<<
@@ -528,10 +543,28 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set rowdata		{}
 		set rowcount	0
 
+		if {!$::pgwire::accelerators} {
+			# No accelerator support, rewrite our nextdict and nextlist methods to use the statement-specific
+			# Tcl row builder script compiled by the prepare statement step
+			foreach format {dict list} {
+				lassign [info class definition [self class] next$format] method_args method_body
+				oo::objdefine [self] method next$format $method_args [regsub {\# makerow_start.*\# makerow_end} $method_body [string map [list \
+					%makerow% [$stmt makerow_def $format] \
+				] {
+					%makerow%
+				}]]
+				#::pgwire::log notice "rewrote [self]::next$format body: [lindex [info object definition [self] next$format] 1]"
+			}
+			# Transcribe the variables defined to be visible in methods from the class to this instance or the
+			# rewritten method won't see them
+			oo::objdefine [self] variable {*}[info class variables [self class]]
+		}
+
 		set socket			[$stmt socket]
 		set con				[$stmt con]
 		set execute_lambda	[$stmt execute_lambda]
-		lassign [uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 1 {*}$args]] \
+		try [$stmt build_params]
+		lassign [coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 1 $parameters] \
 			columns rformats tcl_encoding c_types
 		#::pgwire::log notice "Got initial data from portal:\n\t[join [lmap v {columns rformats tcl_encoding c_types} {format {%15s: %s} $v [if {$v eq "rformats"} {regexp -all -inline .. [binary encode hex [set $v]]} else {set $v}]}] \n\t]"
 		set open	1
@@ -578,58 +611,39 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 	#>>>
 	method columns {} {set columns}
 	method rowcount {} {set rowcount}
-	method nextdict rowvar { #<<<
-		upvar 1 $rowvar row
+	# nextdict and nextlist methods <<<
+	foreach format {dict list} {
+		method next$format rowvar [string map [list \
+			%format%	$format \
+		] {
+			upvar 1 $rowvar row
 
-		if {[llength $rowdata] == 0} {
-			#::pgwire::log notice "nextdict out of data, open: $open"
-			if {$open} {
-				my _read_next_batch
+			if {[llength $rowdata] == 0} {
+				#::pgwire::log notice "nextdict out of data, open: $open"
+				if {$open} {
+					my _read_next_batch
+				}
+				# Re-check $open here again, _read_next_batch may have changed it
+				if {!$open} {
+					#::pgwire::log notice "portal closed, returning 0"
+					return 0
+				}
 			}
-			# Re-check $open here again, _read_next_batch may have changed it
-			if {!$open} {
-				#::pgwire::log notice "portal closed, returning 0"
-				return 0
+
+			set rowdata	[lassign $rowdata data]
+			#::pgwire::log notice "Popped data: [string length $data], [llength $rowdata] rows remain"
+			if {[llength $rowdata] == 0 && $open} {
+				#::pgwire::log notice "Drained waiting batch, still open"
+				# Dispatch this here to hide some of the latency in going to the server while our caller processes this row
+				lassign [coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 0 {}] \
+					columns rformats tcl_encoding c_types
 			}
-		}
 
-		set rowdata	[lassign $rowdata data]
-		#::pgwire::log notice "Popped data: [string length $data], [llength $rowdata] rows remain"
-		if {[llength $rowdata] == 0 && $open} {
-			#::pgwire::log notice "Drained waiting batch, still open"
-			# Dispatch this here to hide some of the latency in going to the server while our caller processes this row
-			lassign [uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 0]] \
-				columns rformats tcl_encoding c_types
-		}
-
-		# TODO: Tcl makerow fallback when the accelerator is not available
-		set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
-		return 1
-	}
-
-	#>>>
-	method nextlist rowvar { #<<<
-		upvar 1 $rowvar row
-
-		if {[llength $rowdata] == 0} {
-			if {$open} {
-				my _read_next_batch
-			}
-			# Re-check $open here again, _read_next_batch may have changed it
-			if {!$open} {
-				return 0
-			}
-		}
-
-		set rowdata	[lassign $rowdata data]
-		if {[llength $rowdata] == 0 && $open} {
-			lassign [uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize {*}$args]] \
-				columns rformats tcl_encoding c_types
-		}
-
-		# TODO: Tcl makerow fallback when the accelerator is not available
-		set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
-		return 1
+			# makerow_start
+			set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding %format%s]
+			# makerow_end
+			return 1
+		}]
 	}
 
 	#>>>
