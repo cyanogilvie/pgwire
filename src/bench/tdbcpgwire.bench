@@ -19,6 +19,9 @@ bench tdbcpgwire-4.1 {prepared statement allrows} -setup { #<<<
 	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
 	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
 } -compare {
+	tdbc_pgwire {
+		[dict get $stmts tdbc_pgwire] allrows
+	}
 	tdbc_postgres {
 		[dict get $stmts tdbc_postgres] allrows
 	}
@@ -36,12 +39,61 @@ bench tdbcpgwire-4.1 {prepared statement allrows} -setup { #<<<
 	unset -nocomplain stmts k v film_id q
 } -result {{title {ENOUGH RAGING}}}
 #>>>
+bench tdbcpgwire-20.1 {resultset allrows} -setup { #<<<
+	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
-if 0 {
-	tdbc_pgwire {
-		[dict get $stmts tdbc_pgwire] allrows
+	set q		{select * from film}
+	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
+	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
+} -compare {
+	tdbc_postgres {
+		set res			{}
+		set count		0
+		set resultset	[[dict get $stmts tdbc_postgres] execute]
+		while {[$resultset nextdict row]} {
+			incr count
+			if {![dict exists $row film_id]} {
+				::pgwire::log error "No film_id in row: ($row)"
+				continue
+			}
+			if {[dict get $row film_id] == 286} {
+				lappend res	[dict get $row title]
+			}
+		}
+		list $count [$resultset rowcount] $res
 	}
-}
+	tdbc_pgwire {
+		set res			{}
+		set count		0
+		set resultset	[[dict get $stmts tdbc_pgwire] execute]
+		while {[$resultset nextdict row]} {
+			incr count
+			if {![dict exists $row film_id]} {
+				::pgwire::log error "No film_id in row: ($row)"
+				continue
+			}
+			if {[dict get $row film_id] == 286} {
+				lappend res	[dict get $row title]
+			}
+		}
+		list $count [$resultset rowcount] $res
+	}
+} -cleanup {
+	dict for {k v} $stmts {
+		if {[info object isa object $v]} {
+			$v destroy
+		}
+	}
+	foreach obj {tdbc_pgwire tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain stmts k v q res count stmt resultset row
+} -result {1000 1000 {{ENOUGH RAGING}}}
+#>>>
+
 }
 
 main

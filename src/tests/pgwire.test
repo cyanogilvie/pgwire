@@ -218,4 +218,18 @@ test pgwire-5.2 {foreach -as dicts, 1 row, many columns} -setup { #<<<
 } -result {ENOUGH RAGING}
 #>>>
 
+set std_setup {
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+}
+
+test pgwire-10.1 {NotificationResponse} -setup $std_setup -body {
+} -cleanup {
+	rename pg {}
+} -result {}
+#>>>
+
+::tcltest::cleanupTests
+return
+
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

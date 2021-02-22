@@ -3,8 +3,10 @@ namespace import ::tcltest::*
 
 package require tdbc::pgwire
 
+set connargs	{-db pagila -user postgres -password insecure -host db -port 5432}
+
 test tdbcpgwire-1.1 {Construct instance} -body { #<<<
-	tdbc::pgwire::connection create tdbcpgwire -db pagila -user postgres -password insecure -host db -port 5432
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
 	info object isa object tdbcpgwire
 } -cleanup {
 	if {[info object isa object tdbcpgwire]} {
@@ -13,20 +15,59 @@ test tdbcpgwire-1.1 {Construct instance} -body { #<<<
 } -result 1
 #>>>
 test tdbcpgwire-10.1 {Construct statement} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire -db pagila -user postgres -password insecure -host db -port 5432
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
 } -body {
 	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
 	set film_id	286
 	$stmt allrows
 } -cleanup {
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
 	if {[info exists stmt] && [info object isa object $stmt]} {
 		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
 	}
 	unset -nocomplain stmt film_id
 } -result {{title {ENOUGH RAGING}}}
 #>>>
+test tdbcpgwire-20.1 {Resultset} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	rename ::pgwire::log _tmplog
+	proc ::pgwire::log {lvl msg} {
+		puts stderr "tdbcpgwire-20.1 $lvl: $msg"
+	}
+} -body {
+	set res			{}
+	set count		0
+	set stmt		[tdbcpgwire prepare {select * from film}]
+	set resultset	[$stmt execute]
+	while {[$resultset nextdict row]} {
+		incr count
+		if {![dict exists $row film_id]} {
+			::pgwire::log error "No film_id in row: ($row)"
+			continue
+		}
+		if {[dict get $row film_id] == 286} {
+			lappend res	[dict get $row title]
+		}
+	}
+	list $count [$resultset rowcount] $res
+} -cleanup {
+	foreach v {resultset stmt} {
+		if {[info exists $v] && [info object isa object [set $v]]} {
+			[set $v] destroy
+		}
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt res count
+	catch {rename ::pgwire::log {}}
+	rename _tmplog ::pgwire::log
+} -result {1000 1000 {{ENOUGH RAGING}}}
+#>>>
+
+::tcltest::cleanupTests
+return
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

@@ -77,9 +77,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 
 	#>>>
 	destructor { #<<<
-		puts stderr "In connection destructor"
 		foreach stmt [my statements] {
-			puts stderr "Deleting dependent statement ($stmt)"
 			$stmt destroy
 		}
 		if {[self next] ne ""} next
@@ -245,6 +243,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	}
 
 	constructor {instance sqlcode} { #<<<
+		if {"::tcl::mathop" ni [namespace path]} {
+			namespace path [list {*}[namespace path] {*}{
+				::tcl::mathop
+			}]
+		}
 		set con	$instance
 
 		if {[self next] ne ""} next
@@ -281,12 +284,14 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 		}
 
+		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-		if {[info exists dict]} {
-			coroutine portal apply $execute_lambda $socket "" 0 $dict
+		lassign [if {[info exists dict]} {
+			coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch $dict
 		} else {
-			uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket "" 0]
-		}
+			uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket "" $max_rows_per_batch 1 {*}$args]
+		}] \
+			columns rformats tcl_encoding c_types
 
 		try {
 			switch -exact -- [dict get $opts -as] {
@@ -298,6 +303,16 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 								try $makerow_dict
 								if {[eof $socket]} {unset socket; $con connection_lost}
 								lappend acc $row
+							}
+							PortalSuspended {
+								set executemsg	[lindex $msg 1]
+								# Execute portal
+								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
+								flush $socket
+							}
+							CommandComplete {
+								set msg	[lindex $msg 1]
+								#::pgwire::log notice "Got CommandComplete: \"$msg\""
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -313,6 +328,16 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 								try $makerow_list
 								if {[eof $socket]} {unset socket; $con connection_lost}
 								lappend acc $row
+							}
+							PortalSuspended {
+								set executemsg	[lindex $msg 1]
+								# Execute portal
+								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
+								flush $socket
+							}
+							CommandComplete {
+								set msg	[lindex $msg 1]
+								::pgwire::log notice "Got CommandComplete: \"$msg\""
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -341,8 +366,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 		set args	[::tdbc::ParseConvenienceArgs $args opts]
 		switch -exact -- [llength $args] {
-			3 {lassign $args row_varname script}
-			4 {lassign $args row_varname dict script}
+			2 {lassign $args row_varname script}
+			3 {lassign $args row_varname dict script}
 			default {
 				return -code error -errorcode [concat $generalError wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
@@ -350,11 +375,14 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 		}
 
-		if {[info exists dict]} {
-			coroutine portal apply $execute_lambda $socket "" 0 $dict
+		set max_rows_per_batch	0
+		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+		lassign [if {[info exists dict]} {
+			coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch $dict
 		} else {
-			uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket "" 0]
-		}
+			uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket "" $max_rows_per_batch 1 {*}$args]
+		}] \
+			columns rformats tcl_encoding c_types
 
 		upvar 1 $row_varname row
 
@@ -375,7 +403,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 									while 1 {
 										set msg	[portal]
 										switch -exact -- [lindex $msg 0] {
-											DataRow {
+											DataRow  - PortalSuspended - CommandComplete {
 											# Read and discard messages after the break / return / error
 												read $socket [lindex $msg 1]
 												if {[eof $socket]} {unset socket; $con connection_lost}
@@ -386,6 +414,16 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 									}
 									break
 								}
+							}
+							PortalSuspended {
+								set executemsg	[lindex $msg 1]
+								# Execute portal
+								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
+								flush $socket
+							}
+							CommandComplete {
+								set msg	[lindex $msg 1]
+								#::pgwire::log notice "Got CommandComplete: \"$msg\""
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -420,6 +458,16 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 									break
 								}
 							}
+							PortalSuspended {
+								set executemsg	[lindex $msg 1]
+								# Execute portal
+								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
+								flush $socket
+							}
+							CommandComplete {
+								set msg	[lindex $msg 1]
+								::pgwire::log notice "Got CommandComplete: \"$msg\""
+							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
 						}
@@ -446,11 +494,142 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 	#>>>
 	forward resultSetCreate ::tdbc::pgwire::resultset create
+	method execute_lambda {} {set execute_lambda}
+	method socket {} {set socket}
+	method con {} {set con}
 }
 
 #>>>
 oo::class create ::tdbc::pgwire::resultset { #<<<
+	variable {*}{
+		socket
+		con
+		batchsize
+		rowdata
+		execute_lambda
+		open
+		columns
+		rformats
+		tcl_encoding
+		c_types
+		rowcount
+	}
+
 	constructor {stmt args} { #<<<
+		#::pgwire::log notice "Constructing resultset, stmt: ($stmt), args: ($args)"
+		if {"::tcl::mathop" ni [namespace path]} {
+			namespace path [list {*}[namespace path] {*}{
+				::tcl::mathop
+			}]
+		}
+		if {[self next] ne ""} next
+
+		set batchsize	100
+		set rowdata		{}
+		set rowcount	0
+
+		set socket			[$stmt socket]
+		set con				[$stmt con]
+		set execute_lambda	[$stmt execute_lambda]
+		lassign [uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 1 {*}$args]] \
+			columns rformats tcl_encoding c_types
+		#::pgwire::log notice "Got initial data from portal:\n\t[join [lmap v {columns rformats tcl_encoding c_types} {format {%15s: %s} $v [if {$v eq "rformats"} {regexp -all -inline .. [binary encode hex [set $v]]} else {set $v}]}] \n\t]"
+		set open	1
+		my _read_next_batch
+	}
+
+	#>>>
+	destructor { #<<<
+		if {[info exists socket] && $socket in [chan names]} {
+			set close_payload	P[encoding convertto $tcl_encoding [self]]\u0
+			puts -nonewline $socket [binary format aIa* C [+ 4 [string length $close_payload]] $close_payload]
+			flush $socket
+		}
+		if {[self next] ne ""} next
+	}
+
+	#>>>
+	method _read_next_batch {} { #<<<
+		#::pgwire::log notice "_read_next_batch"
+		while 1 {
+			set msg	[portal]
+			#::pgwire::log notice "_read_next_batch portal returned [lindex $msg 0]"
+			switch -exact -- [lindex $msg 0] {
+				DataRow {
+					lappend rowdata [read $socket [lindex $msg 1]]
+					if {[eof $socket]} {unset socket; $con connection_lost}
+				}
+				PortalSuspended {
+					incr rowcount	$batchsize
+				}
+				CommandComplete {
+					#::pgwire::log notice "Got CommandComplete: \"[lindex $msg 1]\""
+					incr rowcount	[lindex [lindex $msg 1] end]
+					set open		0
+				}
+				finished {
+					break
+				}
+				default {error "Unexpected msg \"$msg\" from portal coroutine"}
+			}
+		}
+	}
+
+	#>>>
+	method columns {} {set columns}
+	method rowcount {} {set rowcount}
+	method nextdict rowvar { #<<<
+		upvar 1 $rowvar row
+
+		if {[llength $rowdata] == 0} {
+			#::pgwire::log notice "nextdict out of data, open: $open"
+			if {$open} {
+				my _read_next_batch
+			}
+			# Re-check $open here again, _read_next_batch may have changed it
+			if {!$open} {
+				#::pgwire::log notice "portal closed, returning 0"
+				return 0
+			}
+		}
+
+		set rowdata	[lassign $rowdata data]
+		#::pgwire::log notice "Popped data: [string length $data], [llength $rowdata] rows remain"
+		if {[llength $rowdata] == 0 && $open} {
+			#::pgwire::log notice "Drained waiting batch, still open"
+			# Dispatch this here to hide some of the latency in going to the server while our caller processes this row
+			lassign [uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 0]] \
+				columns rformats tcl_encoding c_types
+		}
+
+		# TODO: Tcl makerow fallback when the accelerator is not available
+		set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
+		return 1
+	}
+
+	#>>>
+	method nextlist rowvar { #<<<
+		upvar 1 $rowvar row
+
+		if {[llength $rowdata] == 0} {
+			if {$open} {
+				my _read_next_batch
+			}
+			# Re-check $open here again, _read_next_batch may have changed it
+			if {!$open} {
+				return 0
+			}
+		}
+
+		set rowdata	[lassign $rowdata data]
+		if {[llength $rowdata] == 0 && $open} {
+			lassign [uplevel 1 [list coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize {*}$args]] \
+				columns rformats tcl_encoding c_types
+		}
+
+		# TODO: Tcl makerow fallback when the accelerator is not available
+		set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+		return 1
 	}
 
 	#>>>

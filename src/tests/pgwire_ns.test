@@ -174,4 +174,7 @@ test pgwire_ns-5.2 {foreach -as dicts, 1 row, many columns} -setup { #<<<
 } -result {ENOUGH RAGING}
 #>>>
 
+::tcltest::cleanupTests
+return
+
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

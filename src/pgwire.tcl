@@ -253,7 +253,7 @@ try {
 			}
 
 			if (data_len < 4) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short"));
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
 				return TCL_ERROR;
 			}
 
@@ -1130,6 +1130,7 @@ oo::class create ::pgwire {
 		method _get_string {data ofs_var} { # Use TIP586's binary scan c-string support <<<
 			upvar 1 $ofs_var i
 			if {[binary scan C* $data string] == 0} {
+				#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 				throw unterminated_string "No null terminator found"
 			}
 			set i	[expr {$i + [string length $string] + 1}]
@@ -1142,6 +1143,7 @@ oo::class create ::pgwire {
 			upvar 1 $ofs_var i
 			set idx	[string first \u0 $data $i]
 			if {$idx == -1} {
+				#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 				throw unterminated_string "No null terminator found"
 			}
 			set string	[string range $data $i [expr {$idx - 1}]]
@@ -1574,10 +1576,12 @@ oo::class create ::pgwire {
 
 						binary scan $data S fields_per_row
 						set i	2
+						set c_types		{}
 						set rformats	[binary format Su $fields_per_row]
 						for {set c 0} {$c < $fields_per_row} {incr c} {
 							set idx	[string first \u0 $data $i]
 							if {$idx == -1} {
+								#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 								throw unterminated_string "No null terminator found"
 							}
 							set field_name	[string range $data $i [- $idx 1]]
@@ -1613,18 +1617,20 @@ oo::class create ::pgwire {
 									bytea	{format {set %s [read $socket $collen]} [list $myname]}
 									float4	{format {binary scan [read $socket $collen] R %s} [list $myname]}
 									float8	{format {binary scan [read $socket $collen] Q %s} [list $myname]}
-									varchar -
-									text	{
+									default {
 										#format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
-										set colfmt	\u0\u0	;# text
+										set colfmt		\u0\u0	;# text
+										set type_name	text
 										format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
 									}
 								}]
 
 								append rformats	$colfmt
+								lappend c_types $field_name $type_name
 							} else {
 								format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
 								append rformats	\u0\u0	;# text
+								lappend c_types $field_name text
 							}
 
 							if {![regexp "^set [list $myname] \\\[(.*)\\\]$" $setvar - set_res]} {
@@ -1644,6 +1650,7 @@ oo::class create ::pgwire {
 						set makerow_vars	{}
 						set makerow_dict	{}
 						set makerow_list	{}
+						set c_types			{}
 						break
 						#>>>
 					}
@@ -1662,6 +1669,7 @@ oo::class create ::pgwire {
 				%stmt_name%			[list $stmt_name] \
 				%field_names%		[list $field_names] \
 				%rformats%			[list $rformats] \
+				%c_types%			[list $c_types] \
 			] {%desc%
   				switch -exact -- [llength $args] {
 					0 {}
@@ -1674,6 +1682,8 @@ oo::class create ::pgwire {
 				my variable ready_for_query
 				set field_names	%field_names%
 
+				set c_types		%c_types%
+
 				# Build params <<<
 				%build_params%
 				# Build params >>>
@@ -1685,37 +1695,53 @@ oo::class create ::pgwire {
 				set rformats	%rformats%
 				set enc_portal	[encoding convertto $tcl_encoding $portal_name]
 				set enc_stmt	[encoding convertto $tcl_encoding %stmt_name%]
-				set bindmsg		$enc_portal\u0$enc_stmt\u0$parameters$rformats
 				set executemsg	$enc_portal\u0
-				puts -nonewline $socket [binary format \
-					{ \
-						aIa* \
-						aIa*I \
-						a* \
-					} \
-						B [+ 4 [string length $bindmsg]] $bindmsg \
-						E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch \
-						S\u0\u0\u0\u4 \
-				]
+				#::pgwire::log notice "Executing portal: ($portal_name)"
+				if {$bind} {
+					set bindmsg		$enc_portal\u0$enc_stmt\u0$parameters$rformats
+					puts -nonewline $socket [binary format \
+						{ \
+							aIa* \
+							aIa*I \
+							a* \
+						} \
+							B [+ 4 [string length $bindmsg]] $bindmsg \
+							E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch \
+							H\u0\u0\u0\u4 \
+					]
+				} else {
+					# Continue an open portal
+					puts -nonewline $socket [binary format \
+						{ \
+							aIa*I \
+							a* \
+						} \
+							E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch \
+							H\u0\u0\u0\u4 \
+					]
+				}
 				flush $socket
 				#set rtt_start	[clock microseconds]
-				yield	;# Attempt to hide some of the setup time in the first RTT to the server
+				yield [list [dict keys $field_names] $rformats $tcl_encoding $c_types]	;# Attempt to hide some of the setup time in the first RTT to the server
 
 				try {
-					# Bind responses <<<
-					while 1 {
-						if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
-						#if {[info exists rtt_start]} {
-						#	::pgwire::log notice "server RTT: [format %.6f [expr {([clock microseconds] - $rtt_start)/1e6}]]"
-						#}
-						incr len -4	;# len includes itself
-						if {$msgtype eq 2} break else {my default_message_handler $msgtype $len}
+					if {$bind} {
+						# Bind responses <<<
+						while 1 {
+							if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+							incr len -4	;# len includes itself
+							#if {[info exists rtt_start]} {
+							#	::pgwire::log notice "server RTT: [format %.6f [expr {([clock microseconds] - $rtt_start)/1e6}]]"
+							#}
+							if {$msgtype eq 2} break else {my default_message_handler $msgtype $len}
+						}
+						#>>>
 					}
-					#>>>
 					# Execute responses <<<
 					while 1 {
 						if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
 						incr len -4	;# len includes itself
+						#::pgwire::log notice "prepared statement \"%stmt_name%\" read msg \"$msgtype\", len: $len"
 						if {$msgtype eq "D"} { # DataRow <<<
 							yield [list DataRow $len]
 							#>>>
@@ -1726,22 +1752,28 @@ oo::class create ::pgwire {
 									if {[eof $socket]} {my connection_lost}
 									set idx	[string first "\u0" $data]
 									if {$idx == -1} {
+										#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 										throw unterminated_string "No null terminator found"
 									}
 									set message	[string range $data 0 [- $idx 1]]
-									# TODO: report this somehow?
-									#yield [list CommandComplete $message]
+									puts -nonewline $socket S\u0\u0\u0\u4
+									flush $socket
+									my read_to_sync
+									yield [list CommandComplete $message]
 									break
 									#>>>
 								}
 								I { # EmptyQueryResponse <<<
+									puts -nonewline $socket S\u0\u0\u0\u4
+									flush $socket
+									my read_to_sync
 									break
 									#>>>
 								}
 								s { # PortalSuspended <<<
-									# Execute unnamed portal
-									puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch]H\u0\u0\u0\u4
-									flush $socket
+									# TODO: wait for ReadyForQuery?
+									yield [list PortalSuspended $executemsg]
+									break
 									#>>>
 								}
 								G { # CopyInResponse <<<
@@ -1758,30 +1790,26 @@ oo::class create ::pgwire {
 									#error "CopyOutResponse not supported yet"
 									#>>>
 								}
+								ErrorResponse { #<<<
+									puts -nonewline $socket S\u0\u0\u0\u4
+									flush $socket
+									try {
+										my default_message_handler $msgtype $len
+									} finally {
+										my skip_to_sync
+									}
+									#>>>
+								}
 								default {my default_message_handler $msgtype $len}
 							}
-						}
-					}
-					#>>>
-					# Sync response <<<
-					while 1 {
-						if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
-						incr len -4	;# len includes itself
-
-						switch -exact -- $msgtype {
-							Z { # ReadyForQuery <<<
-								if {![binary scan [read $socket $len] a transaction_status] == 1} {my connection_lost}
-								set ready_for_query	1
-								break
-								#>>>
-							}
-							default {my default_message_handler $msgtype $len}
 						}
 					}
 					#>>>
 				} on error {errmsg options} {
 					set rethrow	[list -options $options $errmsg]
 					#::pgwire::log error "Error during execute: $options"
+					puts -nonewline $socket S\u0\u0\u0\u4
+					flush $socket
 					my skip_to_sync
 				}
 
@@ -1803,7 +1831,7 @@ oo::class create ::pgwire {
 			dict create \
 				field_names			$field_names \
 				socket				$socket \
-				execute_lambda		[list {socket portal_name max_rows_per_batch args} $execute [self namespace]] \
+				execute_lambda		[list {socket portal_name max_rows_per_batch bind args} $execute [self namespace]] \
 				makerow_vars		$makerow_vars \
 				makerow_dict		$makerow_dict \
 				makerow_list		$makerow_list
@@ -1823,9 +1851,7 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method sync {} { #<<<
-		puts -nonewline $socket S\u0\u0\u0\u4
-		flush $socket
+	method read_to_sync {} { #<<<
 		while 1 {
 			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
 			incr len -4
@@ -1838,6 +1864,13 @@ oo::class create ::pgwire {
 			}
 		}
 		set transaction_status
+	}
+
+	#>>>
+	method sync {} { #<<<
+		puts -nonewline $socket S\u0\u0\u0\u4
+		flush $socket
+		my read_to_sync
 	}
 
 	#>>>
@@ -2040,6 +2073,7 @@ oo::class create ::pgwire {
 		switch -exact -- $msgtype {
 			E - N { # ErrorResponse / NoticeResponse <<<
 				set data	[read $socket $len]
+				#::pgwire::log notice "len: ($len), data: [string length $data]"
 				if {[eof $socket]} {my connection_lost}
 
 				set i	0
@@ -2051,6 +2085,7 @@ oo::class create ::pgwire {
 
 					set idx	[string first "\u0" $data $i]
 					if {$idx == -1} {
+						#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 						throw unterminated_string "No null terminator found"
 					}
 					set string	[string range $data $i [- $idx 1]]
@@ -2075,6 +2110,7 @@ oo::class create ::pgwire {
 
 				set idx	[string first "\u0" $data $i]
 				if {$idx == -1} {
+					#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 					throw unterminated_string "No null terminator found"
 				}
 				set param	[string range $data $i [- $idx 1]]
@@ -2082,6 +2118,7 @@ oo::class create ::pgwire {
 
 				set idx	[string first "\u0" $data $i]
 				if {$idx == -1} {
+					#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 					throw unterminated_string "No null terminator found"
 				}
 				set value	[string range $data $i [- $idx 1]]
@@ -2105,6 +2142,7 @@ oo::class create ::pgwire {
 
 				set idx	[string first "\u0" $data $i]
 				if {$idx == -1} {
+					#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 					throw unterminated_string "No null terminator found"
 				}
 				set channel	[string range $data $i [- $idx 1]]
@@ -2112,6 +2150,7 @@ oo::class create ::pgwire {
 
 				set idx	[string first "\u0" $data $i]
 				if {$idx == -1} {
+					#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 					throw unterminated_string "No null terminator found"
 				}
 				set payload	[string range $data $i [- $idx 1]]
@@ -2327,6 +2366,7 @@ oo::class create ::pgwire {
 							for {set c 0} {$c < $fields_per_row} {incr c} {
 								set idx	[string first \u0 $data $i]
 								if {$idx == -1} {
+									#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 									throw unterminated_string "No null terminator found"
 								}
 								set field_name	[string range $data $i [- $idx 1]]
@@ -2362,12 +2402,9 @@ oo::class create ::pgwire {
 										bytea	{format {set %s [read $socket $collen]} [list $myname]}
 										float4	{format {binary scan [read $socket $collen] R %s} [list $myname]}
 										float8	{format {binary scan [read $socket $collen] Q %s} [list $myname]}
-										varchar -
-										text	{
-											format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
-										}
 										default	{
-											set colfmt	\u0\u0	;# text
+											set colfmt		\u0\u0	;# text
+											set type_name	text
 											format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list $tcl_encoding]
 										}
 									}]
@@ -2479,6 +2516,7 @@ oo::class create ::pgwire {
 										if {[eof $socket]} {my connection_lost}
 										set idx	[string first "\u0" $data]
 										if {$idx == -1} {
+											#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
 											throw unterminated_string "No null terminator found"
 										}
 										set message	[string range $data 0 [- $idx 1]]
