@@ -178,7 +178,7 @@ try {
 		critcl::ccommand ::pgwire::c_makerow {cdata interp objc objv} { //<<<
 			const char* restrict		data = NULL;
 			int							data_len;
-			Tcl_Obj**					c_types;
+			Tcl_Obj**					c_types = NULL;
 			int							c_types_len;
 			const uint16_t*	restrict	rformats = NULL;
 			int							rformats_len;
@@ -271,7 +271,7 @@ try {
 			}
 
 			{
-				const int	rslots = colcount * (format == FORMAT_DICTS ? 2 : 1);
+				const int	rslots = colcount * (format == FORMAT_LISTS ? 1 : 2);
 				Tcl_Obj**	rowv = NULL;
 				int			c;		/* col num */
 				int			rs;		/* rowv slot */
@@ -520,7 +520,7 @@ try {
 			}
 
 			{
-				const int	rslots = colcount * (format == FORMAT_DICTS ? 2 : 1);
+				const int	rslots = colcount * (format == FORMAT_LISTS ? 1 : 2);
 				Tcl_Obj**	rowv = NULL;
 				int			c;		/* col num */
 				int			rs;		/* rowv slot */
