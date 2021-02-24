@@ -1,5 +1,6 @@
 package require tcltest
 namespace import ::tcltest::*
+::tcltest::loadTestedCommands
 
 package require pgwire_ns
 #puts "db: [exec ping -c 1 db]"

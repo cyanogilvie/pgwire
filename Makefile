@@ -1,10 +1,10 @@
 all:
 	make -C src
 
-test:
+test: all
 	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)"
 
-benchmark:
+benchmark: all
 	docker-compose run --rm pgwire benchmark TESTFLAGS="$(TESTFLAGS)"
 
 clean:

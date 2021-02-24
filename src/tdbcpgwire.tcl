@@ -86,7 +86,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	#>>>
 	method detach {} { #<<<
 		if {[info object isa object pg]} {
-			puts stderr "tdbc::pgwire::detach, detaching pg"
+			#puts stderr "tdbc::pgwire::detach, detaching pg"
 			foreach stmt [my statements] {
 				$stmt destroy
 			}
@@ -225,6 +225,9 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward close_statement		pg close_statement
 	forward extended_query		pg extended_query
 	forward skip_to_sync		pg skip_to_sync
+	forward tcl_encoding		pg tcl_encoding
+	forward transaction_status	pg transaction_status
+	forward ready_for_query		pg ready_for_query
 }
 
 #>>>
@@ -286,13 +289,15 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 		}
 
-		try $build_params
+		try $build_params on ok parameters {}
 
 		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
 		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
-			columns rformats tcl_encoding c_types
+			columns rformats c_types
 
+		set tcl_encoding	[$con tcl_encoding]
+		set need_sync	1
 		try {
 			set acc	{}
 			switch -exact -- [dict get $opts -as] {
@@ -318,6 +323,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 							CommandComplete {
 								set msg	[lindex $msg 1]
 								#::pgwire::log notice "Got CommandComplete: \"$msg\""
+								set need_sync	0
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -346,6 +352,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 							CommandComplete {
 								set msg	[lindex $msg 1]
 								#::pgwire::log notice "Got CommandComplete: \"$msg\""
+								set need_sync	0
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -364,6 +371,10 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 
 		if {[llength [info commands portal]] > 0} {rename portal {}}
+		if {$need_sync} {
+			puts -nonewline $socket S\u0\u0\u0\u4
+			flush $socket
+		}
 		$con skip_to_sync
 		return -options $o $r
 	}
@@ -383,12 +394,12 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 		}
 
-		try $build_params
+		try $build_params on ok parameters {}
 
 		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
 		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
-			columns rformats tcl_encoding c_types
+			columns rformats c_types
 
 		upvar 1 $row_varname row
 
@@ -515,6 +526,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 #>>>
 oo::class create ::tdbc::pgwire::resultset { #<<<
+	superclass ::tdbc::resultset
+
 	variable {*}{
 		socket
 		con
@@ -530,6 +543,14 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 	}
 
 	constructor {stmt args} { #<<<
+		switch -exact -- [llength $args] {
+			0 {}
+			1 {set param_values	[lindex $args 0]}
+			default {
+				error "Too many arguments, must be stmt ?param_values?"
+			}
+		}
+
 		#::pgwire::log notice "Constructing resultset, stmt: ($stmt), args: ($args)"
 		if {"::tcl::mathop" ni [namespace path]} {
 			namespace path [list {*}[namespace path] {*}{
@@ -538,7 +559,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		}
 		if {[self next] ne ""} next
 
-		set batchsize	100
+		set batchsize	1000
 		set rowdata		{}
 		set rowcount	0
 
@@ -562,10 +583,11 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set socket			[$stmt socket]
 		set con				[$stmt con]
 		set execute_lambda	[$stmt execute_lambda]
-		try [$stmt build_params]
+		set tcl_encoding	[$con tcl_encoding]
+		try [$stmt build_params] on ok parameters {}
 		lassign [coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 1 $parameters] \
-			columns rformats tcl_encoding c_types
-		#::pgwire::log notice "Got initial data from portal:\n\t[join [lmap v {columns rformats tcl_encoding c_types} {format {%15s: %s} $v [if {$v eq "rformats"} {regexp -all -inline .. [binary encode hex [set $v]]} else {set $v}]}] \n\t]"
+			columns rformats c_types
+		#::pgwire::log notice "Got initial data from portal:\n\t[join [lmap v {columns rformats c_types} {format {%15s: %s} $v [if {$v eq "rformats"} {regexp -all -inline .. [binary encode hex [set $v]]} else {set $v}]}] \n\t]"
 		set open	1
 		my _read_next_batch
 	}
@@ -595,8 +617,15 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 					incr rowcount	$batchsize
 				}
 				CommandComplete {
-					#::pgwire::log notice "Got CommandComplete: \"[lindex $msg 1]\""
-					incr rowcount	[lindex [lindex $msg 1] end]
+					set rest	[lindex $msg 1]
+					#::pgwire::log notice "Got CommandComplete: \"$rest\""
+					switch -exact -- [lindex $rest 0] {
+						SAVEPOINT -
+						RELEASE {}
+						default {
+							incr rowcount	[lindex $rest end]
+						}
+					}
 					set open		0
 				}
 				finished {
@@ -623,19 +652,19 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 					my _read_next_batch
 				}
 				# Re-check $open here again, _read_next_batch may have changed it
-				if {!$open} {
+				if {!$open && [llength $rowdata] == 0} {
 					#::pgwire::log notice "portal closed, returning 0"
 					return 0
 				}
 			}
 
-			set rowdata	[lassign $rowdata data]
+			set rowdata	[lassign $rowdata[unset rowdata] data]
 			#::pgwire::log notice "Popped data: [string length $data], [llength $rowdata] rows remain"
 			if {[llength $rowdata] == 0 && $open} {
 				#::pgwire::log notice "Drained waiting batch, still open"
 				# Dispatch this here to hide some of the latency in going to the server while our caller processes this row
 				lassign [coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 0 {}] \
-					columns rformats tcl_encoding c_types
+					columns rformats c_types
 			}
 
 			# makerow_start

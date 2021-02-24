@@ -1,5 +1,6 @@
 package require tcltest
 namespace import ::tcltest::*
+::tcltest::loadTestedCommands
 
 package require pgwire
 #puts "db: [exec ping -c 1 db]"
@@ -10,6 +11,11 @@ package require unix_sockets
 #}
 set connect {
 	socket db 5432
+}
+
+set std_setup {
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
 }
 
 test pgwire-1.1 {Construct instance} -setup { #<<<
@@ -137,6 +143,23 @@ test pgwire-3.2 {allrows -as dicts, 1 row, many columns} -setup { #<<<
 	unset -nocomplain dbchan rows
 } -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext}}
 #>>>
+test pgwire-3.3 {allrows with params dict} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	pg allrows -as dicts {select title from film where film_id=:film_id} {film_id 256}
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan
+} -result {{title {DROP WATERFRONT}}}
+#>>>
 test pgwire-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
@@ -157,7 +180,7 @@ test pgwire-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setu
 	unset -nocomplain dbchan row
 } -result {ENOUGH RAGING}
 #>>>
-test pgwire-4.2 {allrows -as lists, with -columnsvariable, 1 row, many columns} -setup { #<<<
+test pgwire-4.2 {foreach -as lists, with -columnsvariable, 1 row, many columns} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
@@ -217,16 +240,166 @@ test pgwire-5.2 {foreach -as dicts, 1 row, many columns} -setup { #<<<
 	unset -nocomplain dbchan row res
 } -result {ENOUGH RAGING}
 #>>>
-
-set std_setup {
+test pgwire-5.3 {foreach with params dict} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
-}
-
-test pgwire-10.1 {NotificationResponse} -setup $std_setup -body {
+} -body {
+	pg foreach -as dicts row {select * from film where film_id=:film_id} {film_id 256} {
+		set res	[dict get $row title]
+	}
+	set res
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan row res
+} -result {DROP WATERFRONT}
+#>>>
+test pgwire-6.1 {Transactions, rollback} -setup $std_setup -body { #<<<
+	set res	{}
+	lappend res	[pg transaction_status]
+	pg begintransaction
+	lappend res	[pg transaction_status]
+	pg rollback
+	lappend res	[pg transaction_status]
+	lappend res [pg ready_for_query]
+	set res
 } -cleanup {
 	rename pg {}
-} -result {}
+	unset -nocomplain res
+} -result {I T I 1}
+
+#>>>
+test pgwire-6.2 {Transactions, commit} -setup $std_setup -body { #<<<
+	set res	{}
+	lappend res	[pg transaction_status]
+	pg begintransaction
+	lappend res	[pg transaction_status]
+	pg commit
+	lappend res	[pg transaction_status]
+	lappend res [pg ready_for_query]
+	set res
+} -cleanup {
+	rename pg {}
+	unset -nocomplain res
+} -result {I T I 1}
+
+#>>>
+test pgwire-6.3 {Transactions, error} -setup $std_setup -body { #<<<
+	set res	{}
+	lappend res	[pg transaction_status]
+	pg begintransaction
+	lappend res	[pg transaction_status]
+	try {
+		pg allrows {select nonesuch()}
+	} trap {PGWIRE ErrorResponse ERROR 42883} {} {
+	}
+	lappend res	[pg transaction_status]
+	pg rollback
+	lappend res	[pg transaction_status]
+	lappend res [pg ready_for_query]
+	set res
+} -cleanup {
+	rename pg {}
+	unset -nocomplain res
+} -result {I T E I 1}
+
+#>>>
+test pgwire-6.4 {Transactions, error} -setup $std_setup -body { #<<<
+	set res	{}
+	lappend res	[pg transaction_status]
+	pg begintransaction
+	lappend res	[pg transaction_status]
+	try {
+		pg allrows {select nonesuch()}
+	} trap {PGWIRE ErrorResponse ERROR 42883} {} {
+	}
+	lappend res	[pg transaction_status]
+	pg commit
+	lappend res	[pg transaction_status]
+	lappend res [pg ready_for_query]
+	set res
+} -cleanup {
+	rename pg {}
+	unset -nocomplain res
+} -result {I T E I 1}
+
+#>>>
+test pgwire-6.5 {Transactions, nested begin} -setup $std_setup -body { #<<<
+	set res	{}
+	lappend res	[pg transaction_status]
+	pg begintransaction
+	lappend res	[pg transaction_status]
+	pg begintransaction
+	lappend res	[pg transaction_status]
+	pg rollback
+	lappend res	[pg transaction_status]
+	lappend res [pg ready_for_query]
+	set res
+} -cleanup {
+	rename pg {}
+	unset -nocomplain res
+} -result {I T T I 1}
+
+#>>>
+test pgwire-7.1 {ready_for_query} -setup $std_setup -body { #<<<
+	pg extended_query {set search_path to public} {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+	pg ready_for_query
+} -cleanup {
+	rename pg {}
+} -result 1
+
+#>>>
+test pgwire-7.2 {ready_for_query} -setup $std_setup -body { #<<<
+	pg allrows {set search_path to public}
+	pg ready_for_query
+} -cleanup {
+	rename pg {}
+} -result 1
+
+#>>>
+test pgwire-7.3 {ready_for_query} -setup $std_setup -body { #<<<
+	set stmt_info [pg prepare_statement test-pgwire-7.3 {select title from film where film_id=:film_id}]
+	pg ready_for_query
+} -cleanup {
+	pg close_statement test-pgwire-7.3
+	pg sync
+	rename pg {}
+	unset -nocomplain stmt_info
+} -result 1
+
+#>>>
+test pgwire-10.1 {casts vs params} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set film_id	286
+	pg allrows {
+		select title from film where film_id = :film_id::integer
+	}
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan film_id
+} -result {{title {ENOUGH RAGING}}}
+#>>>
+test pgwire-11.1 {re-entrant checks} -setup $std_setup -body { #<<<
+	pg allrows {set search_path to public}
+	pg ready_for_query
+} -cleanup {
+	rename pg {}
+} -result 1
 #>>>
 
 ::tcltest::cleanupTests

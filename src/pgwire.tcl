@@ -1,5 +1,7 @@
 package require Thread
 
+set block_accelerators	[info exists ::pgwire::block_accelerators]
+
 if {[info object isa object ::pgwire]} {
 	::pgwire destroy
 }
@@ -145,9 +147,14 @@ namespace eval ::pgwire { #<<<
 	}
 }
 
+if {$block_accelerators} {
+	namespace eval ::pgwire {variable block_accelerators 1}
+}
+
 #>>>
 
 set ::pgwire::accelerators	0
+if {!$block_accelerators} {
 if 1 {
 try {
 	package require critcl
@@ -655,6 +662,9 @@ try {
 	set ::pgwire::accelerators	1
 }
 }
+} else {
+	puts stderr "Not using accelerators"
+}
 
 oo::class create ::pgwire {
 	variable {*}{
@@ -673,6 +683,8 @@ oo::class create ::pgwire {
 		msgtypes
 		encodings_map
 		errorfields
+
+		busy_sql
 	}
 
 	constructor args { #<<<
@@ -902,7 +914,6 @@ oo::class create ::pgwire {
 
 	#>>>
 	method detach {} { #<<<
-		::pgwire::log notice "detach"
 		if {![info exists socket] || $socket ni [chan names]} {
 			error "Not connected"
 		}
@@ -948,7 +959,6 @@ oo::class create ::pgwire {
 
 	#>>>
 	method attach handle { #<<<
-		::pgwire::log notice "attach"
 		#package require Thread
 		dict with handle {}
 		thread::attach $socket
@@ -1416,42 +1426,9 @@ oo::class create ::pgwire {
 	#>>>
 	method prepare_statement {stmt_name sql} { #<<<
 		try {
-			set seq				0
-			set params_assigned {}
-			set compiled		{}
-
-			foreach tok [tdbc::tokenize $sql] { # Parse the bind variables from the SQL <<<
-				switch -glob -- $tok {
-					:* - $* - @* {
-						set name	[string range $tok 1 end]
-						if {[regexp {^[0-9]+$} $name]} {
-							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-							# to be parameters from us, but refer to the argument of functions).  Not
-							# watertight, but would require a SQL-dialect aware parser to do properly.
-							append compiled $tok
-							continue
-						}
-						if {![dict exists $params_assigned $name]} {
-							set id	[incr seq]
-							dict set params_assigned $name id		$id
-						} else {
-							set id	[dict get $params_assigned $name id]
-						}
-
-						append compiled \$$id
-					}
-					; {
-						#error "Multiple statements are not supported"
-						# These may be within a function definition or similar.  Build it here and let
-						# the backend sort out whether it will accept it
-						append compiled $tok
-					}
-					default {
-						append compiled $tok
-					}
-				}
-			}
-			#>>>
+			lassign [my tokenize $sql] \
+				params_assigned \
+				compiled
 
 			# Parse, to $stmt_name
 			# Describe S $stmt_name
@@ -1459,7 +1436,8 @@ oo::class create ::pgwire {
 			set parsemsg	[encoding convertto $tcl_encoding $stmt_name]\u0[encoding convertto $tcl_encoding $compiled]\u0\u0\u0
 			set describemsg	S[encoding convertto $tcl_encoding $stmt_name]\u0
 			set ready_for_query	0
-			puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}H\u0\u0\u0\u4
+			set busy_sql $sql
+			puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}S\u0\u0\u0\u4
 
 			flush $socket
 
@@ -1557,7 +1535,7 @@ oo::class create ::pgwire {
 							if {\[info exists param_values\]} {$build_params_dict} else {$build_params_vars}
 						" \n
 						append build_params	{
-							set parameters	[binary format Sa*Sa* $pcount $pformats $pcount $pdesc]
+							binary format Sa*Sa* $pcount $pformats $pcount $pdesc
 						} \n
 						#>>>
 					}
@@ -1652,16 +1630,22 @@ oo::class create ::pgwire {
 							append makerow_dict_no_nulls $makerow_prefix "if {\$collen != -1} {dict set row [list $field_name] \[$set_res\]\nincr o \$collen\n} else {dict set row [list $field_name] {}}\n"
 							append makerow_list $makerow_prefix "if {\$collen == -1} {lappend row {}} else {lappend row \[$set_res\]\nincr o \$collen\n}\n"
 						}
-
-						break
 						#>>>
 					}
 					n { # NoData <<<
+						set rformats		\u0\u0
 						set makerow_vars	{}
 						set makerow_dict	{}
 						set makerow_dict_no_nulls	{}
 						set makerow_list	{}
 						set c_types			{}
+						#>>>
+					}
+					Z { # ReadyForQuery <<<
+						set data	[read $socket $len]
+						if {[eof $socket]} {my connection_lost}
+						binary scan $data a transaction_status
+						set ready_for_query	1
 						break
 						#>>>
 					}
@@ -1680,15 +1664,18 @@ oo::class create ::pgwire {
 				%field_names%		[list $field_names] \
 				%rformats%			[list $rformats] \
 				%c_types%			[list $c_types] \
+				%sql%				[list $sql] \
 			] {%desc%
 				my variable tcl_encoding
 				my variable transaction_status
 				my variable ready_for_query
+				my variable busy_sql
 				set field_names	%field_names%
 
 				set c_types		%c_types%
 
 				set ready_for_query	0
+				set busy_sql	%sql%
 				set rformats	%rformats%
 				set enc_portal	[encoding convertto $tcl_encoding $portal_name]
 				set enc_stmt	[encoding convertto $tcl_encoding %stmt_name%]
@@ -1724,7 +1711,7 @@ oo::class create ::pgwire {
 				}
 				flush $socket
 				#set rtt_start	[clock microseconds]
-				yield [list [dict keys $field_names] $rformats $tcl_encoding $c_types]	;# Attempt to hide some of the setup time in the first RTT to the server
+				yield [list [dict keys $field_names] $rformats $c_types]	;# Attempt to hide some of the setup time in the first RTT to the server
 
 				try {
 					if {$bind} {
@@ -1793,12 +1780,16 @@ oo::class create ::pgwire {
 									#>>>
 								}
 								ErrorResponse { #<<<
+									::pgwire::log notice "portal coroutine got ErrorResponse, sending Sync"
 									puts -nonewline $socket S\u0\u0\u0\u4
 									flush $socket
 									try {
+										::pgwire::log notice "dispatching to default_message_handler"
 										my default_message_handler $msgtype $len
 									} finally {
+										::pgwire::log notice "skip_to_sync"
 										my skip_to_sync
+										::pgwire::log notice "back from skip_to_sync"
 									}
 									#>>>
 								}
@@ -1809,13 +1800,16 @@ oo::class create ::pgwire {
 					#>>>
 				} on error {errmsg options} {
 					set rethrow	[list -options $options $errmsg]
-					#::pgwire::log error "Error during execute: $options"
-					puts -nonewline $socket S\u0\u0\u0\u4
-					flush $socket
+					::pgwire::log error "Error during execute: $options"
+					#puts -nonewline $socket S\u0\u0\u0\u4
+					#flush $socket
+					::pgwire::log notice "portal on error skip_to_sync"
 					my skip_to_sync
+					::pgwire::log notice "back from skip_to_sync"
 				}
 
 				if {[info exists rethrow]} {
+					::pgwire::log notice "rethrowing"
 					return {*}$rethrow
 				}
 
@@ -1841,8 +1835,11 @@ oo::class create ::pgwire {
 				build_params		$build_params
 			#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 		} on error {errmsg options} { #<<<
-			::pgwire::log error "Error preparing statement, closing and syncing: [dict get $options -errorinfo]"
+			#::pgwire::log error "Error preparing statement, closing and syncing: [dict get $options -errorinfo]"
 			if {[info exists socket]} {
+				if {!$ready_for_query} {
+					my skip_to_sync
+				}
 				# Close statement $stmt_name
 				set close_payload	S[encoding convertto $tcl_encoding $stmt_name]\u0
 				puts -nonewline $socket [binary format aIa* C [+ 4 [string length $close_payload]] $close_payload]S\u0\u0\u0\u4
@@ -1907,6 +1904,7 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method tcl_encoding {} { set tcl_encoding }
 
 	method Flush {} { #<<<
 		puts -nonewline $socket H\u0\u0\u0\u4
@@ -1962,18 +1960,42 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method begintransaction {} { tailcall my simple_query_list begin }
-	method rollback         {} { if {$transaction_status ne "I"} {tailcall my simple_query_list rollback} }
-	method commit           {} { if {$transaction_status ne "I"} {tailcall my simple_query_list commit} }
+	method begintransaction {} { #<<<
+		tailcall my extended_query begin {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+	}
+
+	#>>>
+	method rollback {} { #<<<
+		if {$transaction_status ne "I"} {
+			tailcall my extended_query rollback {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+		}
+	}
+
+	#>>>
+	method commit {} { #<<<
+		if {$transaction_status ne "I"} {
+			tailcall my extended_query commit {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+		}
+	}
+
+	#>>>
 	method simple_query_dict {rowdict sql on_row} { #<<<
 		if {!$ready_for_query} {
-			error "Re-entrant query while another is processing: $sql"
+			if {!$ready_for_query} {
+				error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
+			}
 		}
+		set busy_sql	$sql
 		upvar 1 $rowdict row
 		package require tdbc
 		set quoted	{}
 		foreach tok [tdbc::tokenize $sql] {
 			switch -glob -- $tok {
+				::* {
+					# Prevent PG casts from looking like params
+					append compiled	$tok
+				}
+
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
 					if {[regexp {^[0-9]+$} $name]} {
@@ -2017,6 +2039,7 @@ oo::class create ::pgwire {
 				uplevel 1 $on_row
 			}
 			CommandComplete {} {}
+			CloseComplete {} {}
 			ReadyForQuery transaction_status break
 		}
 	}
@@ -2024,13 +2047,19 @@ oo::class create ::pgwire {
 	#>>>
 	method simple_query_list {rowlist sql on_row} { #<<<
 		if {!$ready_for_query} {
-			error "Re-entrant query while another is processing: $sql"
+			error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
 		}
+		set busy_sql	$sql
 		upvar 1 $rowlist row
 		package require tdbc
 		set quoted	{}
 		foreach tok [tdbc::tokenize $sql] {
 			switch -glob -- $tok {
+				::* {
+					# Prevent PG casts from looking like params
+					append compiled	$tok
+				}
+
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
 					if {[regexp {^[0-9]+$} $name]} {
@@ -2067,6 +2096,7 @@ oo::class create ::pgwire {
 				set row	[lmap {isnull value} $column_values {set value}]
 				uplevel 1 $on_row
 			}
+			CloseComplete {} {}
 			CommandComplete {} {}
 			ReadyForQuery transaction_status break
 		}
@@ -2174,51 +2204,74 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method extended_query {sql variant_setup {max_rows_per_batch 0}} { #<<<
-		if {!$ready_for_query} {
-			error "Re-entrant query while another is processing: $sql"
+	method tokenize sql { # Parse the bind variables from the SQL <<<
+		set seq				0
+		set params_assigned {}
+		set compiled		{}
+
+		foreach tok [tdbc::tokenize $sql] {
+			switch -glob -- $tok {
+				::* {
+					# Prevent PG casts from looking like params
+					append compiled $tok
+				}
+
+				:* - $* - @* {
+					set name	[string range $tok 1 end]
+					if {[regexp {^[0-9]+$} $name]} {
+						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+						# to be parameters from us, but refer to the argument of functions).  Not
+						# watertight, but would require a SQL-dialect aware parser to do properly.
+						append compiled $tok
+						continue
+					}
+
+					if {![dict exists $params_assigned $name]} {
+						set id	[incr seq]
+						dict set params_assigned $name id		$id
+					} else {
+						set id	[dict get $params_assigned $name id]
+					}
+
+					append compiled \$$id
+				}
+				; {
+					#error "Multiple statements are not supported"
+					# These may be within a function definition or similar.  Build it here and let
+					# the backend sort out whether it will accept it
+					append compiled $tok
+				}
+				default {
+					append compiled $tok
+				}
+			}
 		}
+
+		list $params_assigned $compiled
+	}
+
+	#>>>
+	method extended_query {sql variant_setup {max_rows_per_batch 0} args} { #<<<
+		if {!$ready_for_query} {
+			error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
+		}
+		set busy_sql	$sql
+		switch -exact -- [llength $args] {
+			0 {}
+			1 {set param_values	[lindex $args 0]}
+			default {
+				error "Too many arguments, must be sql variant_setup ?max_rows_per_batch? ?param_values?"
+			}
+		}
+
 		if {![dict exists $prepared $sql]} { # Prepare statement <<<
 			package require tdbc
 			set stmt_name	[incr name_seq]
 			#::pgwire::log notice "No prepared statement, creating one called ($stmt_name)"
 
-			set seq				0
-			set params_assigned {}
-			set compiled		{}
-
-			foreach tok [tdbc::tokenize $sql] { # Parse the bind variables from the SQL <<<
-				switch -glob -- $tok {
-					:* - $* - @* {
-						set name	[string range $tok 1 end]
-						if {[regexp {^[0-9]+$} $name]} {
-							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-							# to be parameters from us, but refer to the argument of functions).  Not
-							# watertight, but would require a SQL-dialect aware parser to do properly.
-							append compiled $tok
-							continue
-						}
-						if {![dict exists $params_assigned $name]} {
-							set id	[incr seq]
-							dict set params_assigned $name id		$id
-						} else {
-							set id	[dict get $params_assigned $name id]
-						}
-
-						append compiled \$$id
-					}
-					; {
-						#error "Multiple statements are not supported"
-						# These may be within a function definition or similar.  Build it here and let
-						# the backend sort out whether it will accept it
-						append compiled $tok
-					}
-					default {
-						append compiled $tok
-					}
-				}
-			}
-			#>>>
+			lassign [my tokenize $sql] \
+				params_assigned \
+				compiled
 
 			if {[incr age_count] > 10} {
 				if {[dict size $prepared] > 50} {
@@ -2264,6 +2317,7 @@ oo::class create ::pgwire {
 				set parsemsg	[encoding convertto $tcl_encoding $stmt_name]\u0[encoding convertto $tcl_encoding $compiled]\u0\u0\u0
 				set describemsg	S[encoding convertto $tcl_encoding $stmt_name]\u0
 				set ready_for_query	0
+				set busy_sql	$sql
 				puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}H\u0\u0\u0\u4
 
 				flush $socket
@@ -2301,6 +2355,8 @@ oo::class create ::pgwire {
 								set pformats	{}
 							}
 							append build_params [list set pcount [llength $parameter_type_oids]] \n
+							set build_params_vars	{}
+							set build_params_dict	{}
 
 							set param_seq	0
 							foreach oid $parameter_type_oids name [dict keys $params_assigned] {
@@ -2328,10 +2384,10 @@ oo::class create ::pgwire {
 									}
 								}]
 
-								append build_params	[string map [list \
-								   %v%				[list $name] \
-								   %null%			[list [binary format I -1]] \
-								   %encode_field%	$encode_field \
+								append build_params_vars	[string map [list \
+									%v%				[list $name] \
+									%null%			[list [binary format I -1]] \
+									%encode_field%	$encode_field \
 								] {
 									if {[uplevel 1 {info exists %v%}]} {
 										set value	[uplevel 1 {set %v%}]
@@ -2341,11 +2397,27 @@ oo::class create ::pgwire {
 										append pformats	\u0\u1	;# binary
 									}
 								}]
+								append build_params_dict	[string map [list \
+									%v%				[list $name] \
+									%null%			[list [binary format I -1]] \
+									%encode_field%	$encode_field \
+								] {
+									if {[dict exists $param_values %v%]} {
+										set value	[dict get $param_values %v%]
+										%encode_field%
+									} else {
+										append pdesc	%null%
+										append pformats	\u0\u1	;# binary
+									}
+								}]
 								append param_desc	"# \$[incr param_seq]: $name\t$type_name\n"
 							}
 
+							append build_params "
+								if {\[info exists param_values\]} {$build_params_dict} else {$build_params_vars}
+							" \n
 							append build_params	{
-								set parameters	[binary format Sa*Sa* $pcount $pformats $pcount $pdesc]
+								binary format Sa*Sa* $pcount $pformats $pcount $pdesc
 							} \n
 							#>>>
 						}
@@ -2437,7 +2509,7 @@ oo::class create ::pgwire {
 							#>>>
 						}
 						n { # NoData <<<
-							set rformats		[binary format Su 0]
+							set rformats		\u0\u0
 							set makerow_vars	{}
 							set makerow_dict	{}
 							set makerow_dict_no_nulls	{}
@@ -2457,21 +2529,18 @@ oo::class create ::pgwire {
 
 				set execute [string map [list \
 					%desc%				$desc \
-					%build_params%		$build_params \
 					%stmt_name%			[list $stmt_name] \
 					%field_names%		[list $field_names] \
 					%rformats%			[list $rformats] \
 					%c_types%			[list $c_types] \
+					%sql%				[list $sql] \
 				] {%desc%
 					my variable tcl_encoding
 					my variable transaction_status
 					my variable ready_for_query
+					my variable busy_sql
 					set field_names	%field_names%
 					set c_types		%c_types%
-
-					# Build params <<<
-					%build_params%
-					# Build params >>>
 
 					# Execute setup <<<
 					%execute_setup%
@@ -2481,6 +2550,7 @@ oo::class create ::pgwire {
 					# Execute $max_rows_per_batch
 					# Sync
 					set ready_for_query	0
+					set busy_sql	%sql%
 					set rformats	%rformats%
 					set bindmsg		\u0[encoding convertto $tcl_encoding %stmt_name%]\u0$parameters$rformats
 					puts -nonewline $socket [binary format \
@@ -2591,6 +2661,7 @@ oo::class create ::pgwire {
 				# Results:
 				#	- $stmt_name: the name of the prepared statement (as known to the server)
 				#	- $field_names:	the result column names and the local variables they are unpacked into
+				#	- $build_params: script to run to gather the input params
 				#	- $execute: script to run to execute the statement
 				#	- $makerow_vars
 				#	- $makerow_dict
@@ -2601,6 +2672,7 @@ oo::class create ::pgwire {
 				dict set prepared $sql [dict create \
 					stmt_name			$stmt_name \
 					field_names			$field_names \
+					build_params		$build_params \
 					execute				$execute \
 					makerow_vars		$makerow_vars \
 					makerow_dict		$makerow_dict \
@@ -2611,7 +2683,7 @@ oo::class create ::pgwire {
 				]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
-				::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
+				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
 				if {[info exists socket]} {
 					puts -nonewline $socket S\u0\u0\u0\u4
 					flush $socket
@@ -2631,6 +2703,7 @@ oo::class create ::pgwire {
 			# Sets:
 			#	- $stmt_name: the name of the prepared statement (as known to the server)
 			#	- $field_names:	the result column names and the local variables they are unpacked into
+			#	- $build_params: script to run to gather the input params
 			#	- $execute: script to run to execute the statement
 			#	- $makerow_vars
 			#	- $makerow_dict
@@ -2646,7 +2719,7 @@ oo::class create ::pgwire {
 			} on ok e {
 			} trap {TCL LOOKUP DICT} {} {
 				try $variant_setup
-				set e	[list {socket max_rows_per_batch} [string map [list \
+				set e	[list {socket max_rows_per_batch parameters} [string map [list \
 					%on_datarow%	"$makerow\nif {\[eof \$socket\]} {my connection_lost}\n$on_row" \
 					%execute_setup%	$execute_setup \
 				] $execute] [self namespace]]
@@ -2654,7 +2727,8 @@ oo::class create ::pgwire {
 				#writefile /tmp/e [tcl::unsupported::disassemble lambda $e]
 				#writefile /tmp/e.tcl $e
 			}
-			uplevel 1 [list apply $e $socket $max_rows_per_batch]
+			try $build_params on ok parameters {}
+			uplevel 1 [list apply $e $socket $max_rows_per_batch $parameters]
 		} trap {PGWIRE ErrorResponse} {errmsg options} {
 			return -code error -errorcode [dict get $options -errorcode] $errmsg
 		} on error {errmsg options} {
@@ -2670,12 +2744,18 @@ oo::class create ::pgwire {
 		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
 		switch -exact -- [llength $args] {
 			1 {set sqlcode [lindex $args 0]}
-			2 {lassign $args sqlcode dict}
+			2 {lassign $args sqlcode param_values}
 			default {
 				return -code error -errorcode [concat $generalError wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
 						 ?-option value?... ?--? sqlcode ?dictionary?"
 			}
+		}
+
+		if {[info exists param_values]} {
+			set extra	[list $param_values]
+		} else {
+			set extra	{}
 		}
 
 		switch -exact -- [dict get $opts -as] {
@@ -2699,7 +2779,7 @@ oo::class create ::pgwire {
 							set makerow			$makerow_list
 						}
 						set on_row			{lappend acc $row}
-					}]
+					}] 0 {*}$extra
 				} else {
 					tailcall my extended_query $sqlcode {
 						#set execute_setup {
@@ -2722,7 +2802,7 @@ oo::class create ::pgwire {
 							set makerow			$makerow_list
 						}
 						set on_row			{lappend acc $row}
-					}
+					} 0 {*}$extra
 				}
 			}
 
@@ -2748,7 +2828,7 @@ oo::class create ::pgwire {
 						set makerow			$makerow_dict
 					}
 					set on_row			{lappend acc $row}
-				}
+				} 0 {*}$extra
 			}
 
 			default {
@@ -2764,12 +2844,18 @@ oo::class create ::pgwire {
 		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
 		switch -exact -- [llength $args] {
 			3 {lassign $args row_varname sqlcode script}
-			4 {lassign $args row_varname sqlcode dict script}
+			4 {lassign $args row_varname sqlcode param_values script}
 			default {
 				return -code error -errorcode [concat $generalError wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
 						 ?-option value?... ?--? varName sqlcode ?dictionary? script"
 			}
+		}
+
+		if {[info exists param_values]} {
+			set extra	[list $param_values]
+		} else {
+			set extra	{}
 		}
 
 		switch -exact -- [dict get $opts -as] {
@@ -2818,7 +2904,7 @@ oo::class create ::pgwire {
 								}
 							}
 						}
-					}]
+					}] 0 {*}$extra
 				} else {
 					tailcall my extended_query $sqlcode [string map [list \
 						%rowvarname%		[list $row_varname] \
@@ -2862,7 +2948,7 @@ oo::class create ::pgwire {
 								}
 							}
 						}
-					}]
+					}] 0 {*}$extra
 				}
 			}
 
@@ -2909,7 +2995,7 @@ oo::class create ::pgwire {
 							}
 						}
 					}
-				}]
+				}] 0 {*}$extra
 			}
 
 			default {
@@ -2945,6 +3031,7 @@ oo::class create ::pgwire {
 	#>>>
 
 	method transaction_status {} { set transaction_status }
+	method ready_for_query {} { set ready_for_query }
 }
 
 # vim: foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

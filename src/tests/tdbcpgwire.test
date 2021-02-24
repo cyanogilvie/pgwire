@@ -1,5 +1,6 @@
 package require tcltest
 namespace import ::tcltest::*
+::tcltest::loadTestedCommands
 
 package require tdbc::pgwire
 
@@ -29,6 +30,37 @@ test tdbcpgwire-10.1 {Construct statement} -setup { #<<<
 	}
 	unset -nocomplain stmt film_id
 } -result {{title {ENOUGH RAGING}}}
+#>>>
+test tdbcpgwire-10.2 {ErrorResponse statement allrows} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	set stmt	[tdbcpgwire prepare {select foo from film where film_id=:film_id}]
+	set film_id	286
+	set code	[catch {$stmt allrows} r o]
+	list $code $r [dict get $o -errorcode]
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt film_id code r o
+} -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR 42703 *} -result {Postgres error: column "foo" does not exist}
+#>>>
+test tdbcpgwire-10.3 {ready_for_query} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+	tdbcpgwire ready_for_query
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		rename $stmt {}
+	}
+	rename tdbcpgwire {}
+	unset -nocomplain stmt
+} -result 1
+
 #>>>
 test tdbcpgwire-20.1 {Resultset} -setup { #<<<
 	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
@@ -61,10 +93,67 @@ test tdbcpgwire-20.1 {Resultset} -setup { #<<<
 	if {[info object isa object tdbcpgwire]} {
 		tdbcpgwire destroy
 	}
-	unset -nocomplain stmt res count
+	unset -nocomplain stmt res count resultset row
 	catch {rename ::pgwire::log {}}
 	rename _tmplog ::pgwire::log
 } -result {1000 1000 {{ENOUGH RAGING}}}
+#>>>
+test tdbcpgwire-20.2 {Resultset, param_values dict} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	rename ::pgwire::log _tmplog
+	proc ::pgwire::log {lvl msg} {
+		puts stderr "tdbcpgwire-20.2 $lvl: $msg"
+	}
+} -body {
+	set res			{}
+	set count		0
+	set stmt		[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+	set resultset	[$stmt execute {film_id 256}]
+	while {[$resultset nextdict row]} {
+		incr count
+		lappend res $row
+	}
+	list $count [$resultset rowcount] $res
+} -cleanup {
+	foreach v {resultset stmt} {
+		if {[info exists $v] && [info object isa object [set $v]]} {
+			[set $v] destroy
+		}
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt res count resultset row
+	catch {rename ::pgwire::log {}}
+	rename _tmplog ::pgwire::log
+} -result {1 1 {{title {DROP WATERFRONT}}}}
+#>>>
+test tdbcpgwire-21.1 {Resultset, close} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	rename ::pgwire::log _tmplog
+	proc ::pgwire::log {lvl msg} {
+		puts stderr "tdbcpgwire-21.1 $lvl: $msg"
+	}
+} -body {
+	set res			{}
+	set count		0
+	set stmt		[tdbcpgwire prepare {select title from film}]
+	set resultset	[$stmt execute]
+	$resultset close
+	info object isa object $resultset
+} -cleanup {
+	foreach v {resultset stmt} {
+		if {[info exists $v] && [info object isa object [set $v]]} {
+			[set $v] destroy
+		}
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt res count resultset row
+	catch {rename ::pgwire::log {}}
+	rename _tmplog ::pgwire::log
+} -result 0
 #>>>
 
 ::tcltest::cleanupTests

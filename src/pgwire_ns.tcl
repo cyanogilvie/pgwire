@@ -834,6 +834,11 @@ namespace eval ::pgwire_ns {
 		set quoted	{}
 		::foreach tok [tdbc::tokenize $sql] {
 			switch -glob -- $tok {
+				::* {
+					# Prevent PG casts from looking like params
+					append compiled $tok
+				}
+
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
 					if {[regexp {^[0-9]+$} $name]} {
@@ -892,6 +897,11 @@ namespace eval ::pgwire_ns {
 		set quoted	{}
 		::foreach tok [tdbc::tokenize $sql] {
 			switch -glob -- $tok {
+				::* {
+					# Prevent PG casts from looking like params
+					append compiled $tok
+				}
+
 				:* - $* - @* {
 					set name	[string range $tok 1 end]
 					if {[regexp {^[0-9]+$} $name]} {
@@ -1033,6 +1043,52 @@ namespace eval ::pgwire_ns {
 	}
 
 	#>>>
+	proc tokenize sql { # Parse the bind bariables from the SQL <<<
+		set seq				0
+		set params_assigned {}
+		set compiled		{}
+
+		::foreach tok [tdbc::tokenize $sql] {
+			switch -glob -- $tok {
+				::* {
+					# Prevent PG casts from looking like params
+					append compiled $tok
+				}
+
+				:* - $* - @* {
+					set name	[string range $tok 1 end]
+					if {[regexp {^[0-9]+$} $name]} {
+						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+						# to be parameters from us, but refer to the argument of functions).  Not
+						# watertight, but would require a SQL-dialect aware parser to do properly.
+						append compiled $tok
+						continue
+					}
+					if {![dict exists $params_assigned $name]} {
+						set id	[incr seq]
+						dict set params_assigned $name id		$id
+					} else {
+						set id	[dict get $params_assigned $name id]
+					}
+
+					append compiled \$$id
+				}
+				; {
+					#error "Multiple statements are not supported"
+					# These may be within a function definition or similar.  Build it here and let
+					# the backend sort out whether it will accept it
+					append compiled $tok
+				}
+				default {
+					append compiled $tok
+				}
+			}
+		}
+
+		list $params_assigned $compiled
+	}
+
+	#>>>
 	proc extended_query {socket sql variant_setup {max_rows_per_batch 0}} { #<<<
 		variable state
 		if {![dict get $state $socket ready_for_query]} {
@@ -1045,42 +1101,9 @@ namespace eval ::pgwire_ns {
 			dict set state $socket name_seq $name_seq
 			#::pgwire::log notice "No prepared statement, creating one called ($stmt_name)"
 
-			set seq				0
-			set params_assigned {}
-			set compiled		{}
-
-			::foreach tok [tdbc::tokenize $sql] { # Parse the bind variables from the SQL <<<
-				switch -glob -- $tok {
-					:* - $* - @* {
-						set name	[string range $tok 1 end]
-						if {[regexp {^[0-9]+$} $name]} {
-							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-							# to be parameters from us, but refer to the argument of functions).  Not
-							# watertight, but would require a SQL-dialect aware parser to do properly.
-							append compiled $tok
-							continue
-						}
-						if {![dict exists $params_assigned $name]} {
-							set id	[incr seq]
-							dict set params_assigned $name id		$id
-						} else {
-							set id	[dict get $params_assigned $name id]
-						}
-
-						append compiled \$$id
-					}
-					; {
-						#error "Multiple statements are not supported"
-						# These may be within a function definition or similar.  Build it here and let
-						# the backend sort out whether it will accept it
-						append compiled $tok
-					}
-					default {
-						append compiled $tok
-					}
-				}
-			}
-			#>>>
+			lassign [tokenize $sql] \
+				params_assigned \
+				compiled
 
 			set age_count	[dict get $state $socket age_count]
 			dict set state $socket age_count [incr age_count]
@@ -1473,7 +1496,7 @@ namespace eval ::pgwire_ns {
 				]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
-				::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
+				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
 				if {[info exists socket]} {
 					puts -nonewline $socket S\u0\u0\u0\u4
 					flush $socket

@@ -573,6 +573,38 @@ bench pgwire-5.3 {foreach, small number of columns vs foreach [allrows]} -setup 
 	unset -nocomplain q count title row
 } -result {1000 {ENOUGH RAGING}}
 #>>>
+bench pgwire-6.1 {transactions: simple_query_list vs extended_query} -setup { #<<<
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+} -compare {
+	pgwire_simple_query_list     {
+		set res	{}
+		pgwire_uds simple_query_list r begin {}
+		lappend res [pgwire_uds transaction_status]
+		pgwire_uds simple_query_list r rollback {}
+		lappend res [pgwire_uds transaction_status] [pgwire_uds ready_for_query]
+		set res
+	}
+	pgwire_extended_query     {
+		set res	{}
+		pgwire_uds extended_query begin {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+		lappend res [pgwire_uds transaction_status]
+		pgwire_uds extended_query rollback {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+		lappend res [pgwire_uds transaction_status] [pgwire_uds ready_for_query]
+		set res
+	}
+	pgwire_methods     {
+		set res	{}
+		pgwire_uds begintransaction
+		lappend res [pgwire_uds transaction_status]
+		pgwire_uds rollback
+		lappend res [pgwire_uds transaction_status] [pgwire_uds ready_for_query]
+		set res
+	}
+} -cleanup {
+	pgwire_uds destroy
+	unset -nocomplain res
+} -result {T I 1}
+#>>>
 }
 
 main
