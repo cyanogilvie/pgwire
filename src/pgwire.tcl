@@ -685,6 +685,7 @@ oo::class create ::pgwire {
 		errorfields
 
 		busy_sql
+		sync_outstanding
 	}
 
 	constructor args { #<<<
@@ -845,11 +846,12 @@ oo::class create ::pgwire {
 
 	#>>>
 	method connect {chan db user password} { #<<<
-		set socket			$chan
-		set name_seq		0
-		set prepared		{}
-		set ready_for_query	0
-		set age_count		0
+		set socket				$chan
+		set name_seq			0
+		set prepared			{}
+		set ready_for_query		0
+		set age_count			0
+		set sync_outstanding	0
 
 		# Initial values <<<
 		set transaction_status	I
@@ -905,7 +907,8 @@ oo::class create ::pgwire {
 				backend_key_data	$backend_key_data \
 				prepared			[dict map {k v} $prepared {dict merge $v {cached {}}}] \
 				ready_for_query		$ready_for_query \
-				age_count			$age_count
+				age_count			$age_count \
+				sync_outstanding	$sync_outstanding
 		} finally {
 			unset socket
 			my destroy
@@ -920,7 +923,7 @@ oo::class create ::pgwire {
 
 		# Ensure that the handle we're detaching is ready for a query and not in an open transaction <<<
 		if {!$ready_for_query} {
-			puts -nonewline $socket S\u0\u0\u0\u4
+			puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 			flush $socket
 			while 1 {
 				if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
@@ -931,12 +934,13 @@ oo::class create ::pgwire {
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
 						binary scan $data a transaction_status
-						set ready_for_query	1
+						set ready_for_query		1
+						set sync_outstanding	0
 						break
 						#>>>
 					}
 
-					Z - R - E - S - K - C - D - T - t - 1 - 2 - n - s {
+					R - E - S - K - C - D - T - t - 1 - 2 - n - s {
 						# Eat these while waiting for the Sync response
 						if {$len > 0} {
 							read $socket $len
@@ -1255,7 +1259,8 @@ oo::class create ::pgwire {
 				}
 				ReadyForQuery { # ReadyForQuery <<<
 					binary scan $data a transaction_status
-					set ready_for_query	1
+					set ready_for_query		1
+					set sync_outstanding	0
 					lappend messageparams $transaction_status
 					#>>>
 				}
@@ -1437,7 +1442,7 @@ oo::class create ::pgwire {
 			set describemsg	S[encoding convertto $tcl_encoding $stmt_name]\u0
 			set ready_for_query	0
 			set busy_sql $sql
-			puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}S\u0\u0\u0\u4
+			puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}S\u0\u0\u0\u4; set sync_outstanding 1
 
 			flush $socket
 
@@ -1484,7 +1489,7 @@ oo::class create ::pgwire {
 								bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
 								int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
 								smallint -
-								int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 1 $value]}}
+								int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 2 $value]}}
 								int4 -
 								integer	{return -level 0 {append pformats \u0\u1; append pdesc [binary format II 4 $value]}}
 								bigint -
@@ -1645,7 +1650,8 @@ oo::class create ::pgwire {
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
 						binary scan $data a transaction_status
-						set ready_for_query	1
+						set ready_for_query		1
+						set sync_outstanding	0
 						break
 						#>>>
 					}
@@ -1669,6 +1675,7 @@ oo::class create ::pgwire {
 				my variable tcl_encoding
 				my variable transaction_status
 				my variable ready_for_query
+				my variable sync_outstanding
 				my variable busy_sql
 				set field_names	%field_names%
 
@@ -1745,7 +1752,7 @@ oo::class create ::pgwire {
 										throw unterminated_string "No null terminator found"
 									}
 									set message	[string range $data 0 [- $idx 1]]
-									puts -nonewline $socket S\u0\u0\u0\u4
+									puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 									flush $socket
 									my read_to_sync
 									yield [list CommandComplete $message]
@@ -1753,16 +1760,31 @@ oo::class create ::pgwire {
 									#>>>
 								}
 								I { # EmptyQueryResponse <<<
-									puts -nonewline $socket S\u0\u0\u0\u4
+									puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 									flush $socket
 									my read_to_sync
 									break
 									#>>>
 								}
 								s { # PortalSuspended <<<
-									# TODO: wait for ReadyForQuery?
 									yield [list PortalSuspended $executemsg]
 									break
+									#>>>
+								}
+								E { # ErrorResponse <<<
+									::pgwire::log notice "portal coroutine got ErrorResponse, sending Sync"
+									if {!$sync_outstanding} {
+										puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+										flush $socket
+									}
+									try {
+										#::pgwire::log notice "dispatching to default_message_handler"
+										my default_message_handler $msgtype $len
+									} finally {
+										#::pgwire::log notice "skip_to_sync"
+										my skip_to_sync
+										#::pgwire::log notice "back from skip_to_sync"
+									}
 									#>>>
 								}
 								G { # CopyInResponse <<<
@@ -1779,20 +1801,6 @@ oo::class create ::pgwire {
 									#error "CopyOutResponse not supported yet"
 									#>>>
 								}
-								ErrorResponse { #<<<
-									::pgwire::log notice "portal coroutine got ErrorResponse, sending Sync"
-									puts -nonewline $socket S\u0\u0\u0\u4
-									flush $socket
-									try {
-										::pgwire::log notice "dispatching to default_message_handler"
-										my default_message_handler $msgtype $len
-									} finally {
-										::pgwire::log notice "skip_to_sync"
-										my skip_to_sync
-										::pgwire::log notice "back from skip_to_sync"
-									}
-									#>>>
-								}
 								default {my default_message_handler $msgtype $len}
 							}
 						}
@@ -1800,12 +1808,16 @@ oo::class create ::pgwire {
 					#>>>
 				} on error {errmsg options} {
 					set rethrow	[list -options $options $errmsg]
-					::pgwire::log error "Error during execute: $options"
-					#puts -nonewline $socket S\u0\u0\u0\u4
-					#flush $socket
-					::pgwire::log notice "portal on error skip_to_sync"
-					my skip_to_sync
-					::pgwire::log notice "back from skip_to_sync"
+					if {!$ready_for_query} {
+						#::pgwire::log error "Error during execute: $options"
+						if {!$sync_outstanding} {
+							puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+							flush $socket
+						}
+						#::pgwire::log notice "portal on error skip_to_sync"
+						my skip_to_sync
+						#::pgwire::log notice "back from skip_to_sync"
+					}
 				}
 
 				if {[info exists rethrow]} {
@@ -1837,12 +1849,12 @@ oo::class create ::pgwire {
 		} on error {errmsg options} { #<<<
 			#::pgwire::log error "Error preparing statement, closing and syncing: [dict get $options -errorinfo]"
 			if {[info exists socket]} {
-				if {!$ready_for_query} {
+				if {$sync_outstanding} {
 					my skip_to_sync
 				}
 				# Close statement $stmt_name
 				set close_payload	S[encoding convertto $tcl_encoding $stmt_name]\u0
-				puts -nonewline $socket [binary format aIa* C [+ 4 [string length $close_payload]] $close_payload]S\u0\u0\u0\u4
+				puts -nonewline $socket [binary format aIa* C [+ 4 [string length $close_payload]] $close_payload]S\u0\u0\u0\u4; set sync_outstanding 1
 				flush $socket
 				my skip_to_sync
 			}
@@ -1858,7 +1870,8 @@ oo::class create ::pgwire {
 			incr len -4
 			if {$msgtype eq "Z"} { # ReadyForQuery
 				if {[binary scan [read $socket $len] a transaction_status] != 1} {my connection_lost}
-				set ready_for_query	1
+				set ready_for_query		1
+				set sync_outstanding	0
 				break
 			} else {
 				my default_message_handler $msgtype $len
@@ -1869,7 +1882,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method sync {} { #<<<
-		puts -nonewline $socket S\u0\u0\u0\u4
+		puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 		flush $socket
 		my read_to_sync
 	}
@@ -1886,12 +1899,13 @@ oo::class create ::pgwire {
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
 						binary scan $data a transaction_status
-						set ready_for_query	1
+						set ready_for_query		1
+						set sync_outstanding	0
 						break
 						#>>>
 					}
 
-					Z - R - E - S - K - C - D - T - t - 1 - 2 - n - s {
+					R - E - S - K - C - D - T - t - 1 - 2 - n - s {
 						# Eat these while waiting for the Sync response
 						if {$len > 0} {read $socket $len}
 						if {[eof $socket]} {my connection_lost}
@@ -1904,6 +1918,11 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method sync_outstanding args { #<<<
+		set sync_outstanding {*}$args
+	}
+
+	#>>>
 	method tcl_encoding {} { set tcl_encoding }
 
 	method Flush {} { #<<<
@@ -1913,7 +1932,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method Sync {} { #<<<
-		puts -nonewline $socket S\u0\u0\u0\u4
+		puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 		flush $socket
 	}
 
@@ -1981,9 +2000,7 @@ oo::class create ::pgwire {
 	#>>>
 	method simple_query_dict {rowdict sql on_row} { #<<<
 		if {!$ready_for_query} {
-			if {!$ready_for_query} {
-				error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
-			}
+			error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
 		}
 		set busy_sql	$sql
 		upvar 1 $rowdict row
@@ -2366,7 +2383,7 @@ oo::class create ::pgwire {
 									bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
 									int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
 									smallint -
-									int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 1 $value]}}
+									int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 2 $value]}}
 									int4 -
 									integer	{return -level 0 {append pformats \u0\u1; append pdesc [binary format II 4 $value]}}
 									bigint -
@@ -2538,6 +2555,7 @@ oo::class create ::pgwire {
 					my variable tcl_encoding
 					my variable transaction_status
 					my variable ready_for_query
+					my variable sync_outstanding
 					my variable busy_sql
 					set field_names	%field_names%
 					set c_types		%c_types%
@@ -2562,7 +2580,7 @@ oo::class create ::pgwire {
 							B [+ 4 [string length $bindmsg]] $bindmsg \
 							E 9 0 $max_rows_per_batch \
 							S\u0\u0\u0\u4 \
-					]
+					]; set sync_outstanding 1
 					flush $socket
 					#set rtt_start	[clock microseconds]
 
@@ -2636,7 +2654,8 @@ oo::class create ::pgwire {
 							switch -exact -- $msgtype {
 								Z { # ReadyForQuery <<<
 									if {![binary scan [read $socket $len] a transaction_status] == 1} {my connection_lost}
-									set ready_for_query	1
+									set ready_for_query		1
+									set sync_outstanding	0
 									break
 									#>>>
 								}
@@ -2685,8 +2704,10 @@ oo::class create ::pgwire {
 			} on error {errmsg options} { #<<<
 				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
 				if {[info exists socket]} {
-					puts -nonewline $socket S\u0\u0\u0\u4
-					flush $socket
+					if {!$sync_outstanding} {
+						puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+						flush $socket
+					}
 					my skip_to_sync
 				}
 				return -options $options $errmsg

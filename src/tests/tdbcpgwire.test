@@ -48,7 +48,31 @@ test tdbcpgwire-10.2 {ErrorResponse statement allrows} -setup { #<<<
 	unset -nocomplain stmt film_id code r o
 } -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR 42703 *} -result {Postgres error: column "foo" does not exist}
 #>>>
-test tdbcpgwire-10.3 {ready_for_query} -setup { #<<<
+test tdbcpgwire-10.3 {ErrorResponse statement allrows during execute phase} -setup { #<<<
+	set test	tdbcpgwire-10.3
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	tdbcpgwire allrows {
+		create or replace function testerror(tag text) returns text as $$
+		begin
+			raise EXCEPTION 'Test exception: %', tag;
+		end;
+		$$ language plpgsql strict
+	}
+} -body {
+	set stmt	[tdbcpgwire prepare {select testerror(:test)}]
+	[$stmt execute] close
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire allrows {drop function if exists testerror(tag text)}
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt test
+} -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR P0001 *} -result {Postgres error: Test exception: tdbcpgwire-10.3}
+#>>>
+test tdbcpgwire-11.1 {ready_for_query} -setup { #<<<
 	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
 } -body {
 	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]

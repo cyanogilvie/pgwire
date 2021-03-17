@@ -374,6 +374,49 @@ test pgwire-7.3 {ready_for_query} -setup $std_setup -body { #<<<
 } -result 1
 
 #>>>
+test pgwire-8.1 {nested foreach} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set res	{}
+	#pg begintransaction
+	pg foreach film {select * from film order by film_id} {
+		::pgwire::log notice "considering film [dict get $film film_id]: [dict get $film title]"
+		if {[dict get $film film_id] == 286} {
+			::pgwire::log notice "Found film 286: $film"
+			pg foreach actor {
+				select
+					a.first_name,
+					a.last_name
+				from
+					actor a
+				join
+					film_actor fa
+				using
+					(actor_id)
+				where
+					fa.film_id = :film_id
+			} $film {
+				::pgwire::log notice "Found actor: $actor"
+				lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+			}
+			::pgwire::log notice "done fetching actors"
+		}
+	}
+	#pg commit
+	set res
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan film actor res
+} -result {{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}}
+#>>>
 test pgwire-10.1 {casts vs params} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure

@@ -293,11 +293,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+		set need_sync	1
 		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
 			columns rformats c_types
 
 		set tcl_encoding	[$con tcl_encoding]
-		set need_sync	1
 		try {
 			set acc	{}
 			switch -exact -- [dict get $opts -as] {
@@ -371,11 +371,13 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 
 		if {[llength [info commands portal]] > 0} {rename portal {}}
-		if {$need_sync} {
-			puts -nonewline $socket S\u0\u0\u0\u4
+		if {$need_sync && ![$con sync_outstanding]} {
+			puts -nonewline $socket S\u0\u0\u0\u4; $con sync_outstanding 1
 			flush $socket
 		}
-		$con skip_to_sync
+		if {[$con sync_outstanding]} {
+			$con skip_to_sync
+		}
 		return -options $o $r
 	}
 
@@ -396,6 +398,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 		try $build_params on ok parameters {}
 
+		set need_sync	1
 		set max_rows_per_batch	0
 		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
 		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
@@ -444,6 +447,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 							CommandComplete {
 								set msg	[lindex $msg 1]
 								#::pgwire::log notice "Got CommandComplete: \"$msg\""
+								set need_sync	0
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -490,6 +494,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 							CommandComplete {
 								set msg	[lindex $msg 1]
 								#::pgwire::log notice "Got CommandComplete: \"$msg\""
+								set need_sync	0
 							}
 							finished break
 							default {error "Unexpected msg \"$msg\" from portal coroutine"}
@@ -511,7 +516,15 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 
 		if {[llength [info commands portal]] > 0} {rename portal {}}
-		$con sync
+
+		if {$need_sync && ![$con sync_outstanding]} {
+			puts -nonewline $socket S\u0\u0\u0\u4; $con sync_outstanding 1
+			flush $socket
+		}
+		if {[$con sync_outstanding]} {
+			$con skip_to_sync
+		}
+
 		return -options $o $r
 	}
 
