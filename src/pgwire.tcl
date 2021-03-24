@@ -1090,7 +1090,6 @@ if {[info exists _pgwire_default_batchsize]} {
 set ::pgwire::accelerators	0
 if {![info exists ::pgwire::block_accelerators]} {
 	try {
-		error bang
 		package require critcl 3
 	} on error {} {
 	} on ok ver {
