@@ -10,6 +10,9 @@ gdb: all
 benchmark: all
 	docker-compose run --rm pgwire benchmark TESTFLAGS="$(TESTFLAGS)"
 
+gdb_benchmark: all
+	docker-compose run --rm pgwire gdb_benchmark TESTFLAGS="$(TESTFLAGS)"
+
 clean:
 	make -C src clean
 	docker-compose down --rmi all -v --remove-orphans

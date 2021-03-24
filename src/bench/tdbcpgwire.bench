@@ -75,10 +75,10 @@ bench tdbcpgwire-20.1 {resultset allrows, many rows, many columns} -setup { #<<<
 	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
 	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
 } -compare {
-	tdbc_postgres {
+	tdbc_pgwire {
 		set res			{}
 		set count		0
-		set resultset	[[dict get $stmts tdbc_postgres] execute]
+		set resultset	[[dict get $stmts tdbc_pgwire] execute]
 		while {[$resultset nextdict row]} {
 			incr count
 			if {![dict exists $row film_id]} {
@@ -91,10 +91,10 @@ bench tdbcpgwire-20.1 {resultset allrows, many rows, many columns} -setup { #<<<
 		}
 		list $count [$resultset rowcount] $res
 	}
-	tdbc_pgwire {
+	tdbc_postgres {
 		set res			{}
 		set count		0
-		set resultset	[[dict get $stmts tdbc_pgwire] execute]
+		set resultset	[[dict get $stmts tdbc_postgres] execute]
 		while {[$resultset nextdict row]} {
 			incr count
 			if {![dict exists $row film_id]} {

@@ -9,6 +9,49 @@ package require pgwire
 package require tdbc::postgres
 package require unix_sockets
 
+proc readfile fn { #<<<
+	set h	[open $fn r]
+	try {read $h} finally {close $h}
+}
+
+#>>>
+proc get_batch_vars {db sql batchsize as} { #<<<
+	set stmt_info	[$db prepare_extended_query $sql]
+	dict with stmt_info {}
+	# Sets:
+	#	- $stmt_name: the name of the prepared statement (as known to the server)
+	#	- $field_names:	the result column names and the local variables they are unpacked into
+	#	- $build_params: script to run to gather the input params
+	#	- $heat: how frequently this prepared statement has been used recently, relative to others
+
+	try $build_params on ok parameters {}
+
+	set columns	[dict keys $c_types]
+
+	set max_rows_per_batch	$batchsize
+
+	set ops	[::pgwire::build_ops $as $c_types]
+	try {
+		set rowbuffer	::rowbuffer_coro_get_batch_vars_[incr ::coro_seq]
+		coroutine $rowbuffer $db rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+		lassign [$rowbuffer nextbatch] outcome details datarows
+
+		list \
+			ops				$ops \
+			columns			$columns \
+			tcl_encoding	[$db tcl_encoding] \
+			datarows		$datarows \
+			c_types			$c_types \
+			tcl_makerow		[$db tcl_makerow $as $c_types]
+	} finally {
+		if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+			$rowbuffer destroy
+		}
+	}
+}
+
+#>>>
+
 proc main {} {
 bench pgwire-1.0 {select 1, simple_query_list} -setup { #<<<
 	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
@@ -69,10 +112,6 @@ bench pgwire-1.2 {onecolumn} -setup { #<<<
 		pgwire_uds onecolumn {select title from film where film_id=286}
 	}
 
-	pgwire_uds_old {
-		pgwire_uds onecolumn_old {select title from film where film_id=286}
-	}
-
 	tdbc_postgres {
 		lindex [tdbc_postgres allrows -as lists {select title from film where film_id=286}] 0 0
 	}
@@ -96,10 +135,6 @@ bench pgwire-1.3 {onecolumn, with param} -setup { #<<<
 
 	pgwire_uds {
 		pgwire_uds onecolumn {select title from film where film_id=:film_id}
-	}
-
-	pgwire_uds_old {
-		pgwire_uds onecolumn_old {select title from film where film_id=:film_id}
 	}
 
 	tdbc_postgres {
@@ -147,7 +182,6 @@ bench pgwire-2.1 {allrows, large number of columns, lists} -setup { #<<<
 		}
 		llength $rows[unset rows]
 	}
-	pgwire_uds_old    { llength [pgwire_uds allrows_old -as lists $q] }
 	tdbc_postgres { llength [tdbc_postgres allrows -as lists $q] }
 } -cleanup {
 	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
@@ -252,14 +286,6 @@ bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
 	pgwire_lo_lists {
 		set count	0
 		pgwire_uds foreach -as lists row $q {
-			lindex $row 0
-			incr count
-		}
-		set count
-	}
-	pgwire_uds_lists_old {
-		set count	0
-		pgwire_uds foreach_old -as lists row $q {
 			lindex $row 0
 			incr count
 		}
@@ -689,14 +715,6 @@ bench pgwire-6.1 {transactions: simple_query_list vs extended_query} -setup { #<
 		lappend res [pgwire_uds transaction_status] [pgwire_uds ready_for_query]
 		set res
 	}
-	pgwire_extended_query     {
-		set res	{}
-		pgwire_uds extended_query begin {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
-		lappend res [pgwire_uds transaction_status]
-		pgwire_uds extended_query rollback {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
-		lappend res [pgwire_uds transaction_status] [pgwire_uds ready_for_query]
-		set res
-	}
 	pgwire_methods     {
 		set res	{}
 		pgwire_uds begintransaction
@@ -749,14 +767,8 @@ bench pgwire-7.1 {makerow} -setup { #<<<
 		try $tcl_makerow_dicts
 		dict get $row title
 	}
-	c_makerow_list {
-		lindex [::pgwire::c_makerow $datarow $c_types $tcl_encoding lists] 1
-	}
 	c_makerow2_list {
 		lindex [::pgwire::c_makerow2 $ops_list $columns $tcl_encoding $datarow] 1
-	}
-	c_makerow_dict {
-		dict get [::pgwire::c_makerow $datarow $c_types $tcl_encoding dicts] title
 	}
 	c_makerow2_dict {
 		dict get [::pgwire::c_makerow2 $ops_dict $columns $tcl_encoding $datarow] title
@@ -767,28 +779,86 @@ bench pgwire-7.1 {makerow} -setup { #<<<
 			$obj destroy
 		}
 	}
-	unset -nocomplain row ops_list ops_dict columns tcl_encoding c_types datarow tcl_makerow_lists tcl_makerow_dicts collen val o
+	unset -nocomplain row ops_list ops_dict columns tcl_encoding c_types datarow tcl_makerow_lists tcl_makerow_dicts collen val o obj
 } -result {ZORRO ARK}
 #>>>
-bench pgwire-8.1 {allrows using c_makerow2 vs c_allrows_batch} -setup { #<<<
-	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
-	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
-	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
-	set q {select * from film}
+bench pgwire-7.2 {build_ops} -setup { #<<<
+	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
 } -compare {
-	pgwire_lo_makerow2  { llength [pgwire_lo  allrows_makerow -as dicts $q] }
-	pgwire_lo_batch     { llength [pgwire_lo  allrows -as dicts $q] }
-	pgwire_uds_makerow2 { llength [pgwire_uds  allrows_makerow -as dicts $q] }
-	pgwire_uds_batch    { llength [pgwire_uds  allrows -as dicts $q] }
-	tdbc_postgres       { llength [tdbc_postgres allrows -as dicts $q] }
+	dicts {
+		llength [::pgwire::build_ops dicts $c_types]
+	}
+	lists {
+		llength [::pgwire::build_ops lists $c_types]
+	}
 } -cleanup {
-	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
+	foreach obj {pgwire_uds} {
 		if {[info object isa object $obj]} {
 			$obj destroy
 		}
 	}
-	unset -nocomplain q obj
-} -result 1000
+	unset -nocomplain c_types obj
+} -result 14
+#>>>
+bench pgwire-7.3 {foreach_batch} -setup { #<<<
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	set cleanup	{}
+	foreach {k v} [get_batch_vars pgwire_uds {select * from film} 0 dicts] {
+		set $k $v
+		lappend cleanup $k
+	}
+} -compare {
+	tcl_makerow {
+		set acc		0
+		set count	0
+		foreach datarow $datarows {
+			try $tcl_makerow
+			try {
+				incr count
+				incr acc	[dict get $row film_id]
+			} on break {} {
+				set broken	1
+				break
+			} on continue {} {
+			} on return {r o} {
+				#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
+				set broken	1
+				dict incr o -level 1
+				dict set o -code return
+				set rethrow	[list -options $o $r]
+				break
+			} on error {r o} {
+				#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
+				set broken	1
+				dict incr o -level 1
+				set rethrow	[list -options $o $r]
+				break
+			}
+		}
+		if {[info exists rethrow]} {
+			return {*}$rethrow
+		}
+		list $count $acc
+	}
+	c_foreach_batch {
+		set acc		0
+		set count	0
+		::pgwire::c_foreach_batch row $ops $columns $tcl_encoding $datarows {
+			incr count
+			incr acc	[dict get $row film_id]
+		}
+		list $count $acc
+	}
+} -cleanup {
+	foreach obj {pgwire_uds} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain {*}cleanup row datarow tcl_makerow_dicts collen val o obj cleanup k v acc count rethrow broken r
+} -result {1000 500500}
+if 0 {
+}
 #>>>
 }
 

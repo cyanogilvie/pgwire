@@ -303,6 +303,44 @@ test pgwire-5.3 {foreach with params dict} -setup { #<<<
 	unset -nocomplain dbchan row res
 } -result {DROP WATERFRONT}
 #>>>
+test pgwire-5.4 {foreach with yield} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+	coroutine nextrow apply {{} {
+		yield
+		pg foreach row {
+			select film_id from film
+		} {
+			#::pgwire::log notice "coro [info coroutine] yielding row: $row"
+			yield $row
+		}
+		return
+	}}
+} -body {
+	set acc		0
+	set count	0
+	while 1 {
+		set row	[nextrow]
+		if {[llength [info commands nextrow]] == 0} break
+		incr acc [dict get $row film_id]
+		incr count
+	}
+	list $count $acc
+} -cleanup {
+	if {[llength [info commands nextrow]] > 0} {
+		rename nextrow {}
+	}
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan acc count row obj
+} -result {1000 500500}
+#>>>
 test pgwire-6.1 {Transactions, rollback} -setup $std_setup -body { #<<<
 	set res	{}
 	lappend res	[pg transaction_status]
@@ -407,10 +445,10 @@ test pgwire-7.2 {ready_for_query} -setup $std_setup -body { #<<<
 
 #>>>
 test pgwire-7.3 {ready_for_query} -setup $std_setup -body { #<<<
-	set stmt_info [pg prepare_statement test-pgwire-7.3 {select title from film where film_id=:film_id}]
+	set stmt_info [pg prepare_extended_query {select title from film where film_id=:film_id}]
 	pg ready_for_query
 } -cleanup {
-	pg close_statement test-pgwire-7.3
+	pg close_statement [dict get $stmt_info stmt_name]
 	pg sync
 	rename pg {}
 	unset -nocomplain stmt_info

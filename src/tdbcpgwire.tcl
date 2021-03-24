@@ -221,20 +221,19 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward allrows				pg allrows
 	forward foreach				pg foreach
 	forward onecolumn			pg onecolumn
-		forward prepare_statement	pg prepare_statement
 	forward prepare_extended_query	pg prepare_extended_query
 	forward preserve			pg preserve
 	forward release				pg release
 	forward rowbuffer_coro		pg rowbuffer_coro
 	forward close_statement		pg close_statement
 	forward close_portal		pg close_portal
-		forward extended_query		pg extended_query
 	forward skip_to_sync		pg skip_to_sync
 	forward tcl_encoding		pg tcl_encoding
 	forward transaction_status	pg transaction_status
 	forward ready_for_query		pg ready_for_query
 	forward sync_outstanding	pg sync_outstanding
 	forward tcl_makerow			pg tcl_makerow
+	forward buffer_nesting		pg buffer_nesting
 }
 
 #>>>
@@ -297,17 +296,20 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 		set as	[dict get $opts -as]
 
+		$con buffer_nesting
+
 		try $build_params on ok parameters {}
 
 		if {[dict exists $opts -columnsvariable]} {
 			upvar 1 [dict get $opts -columnsvariable] columns
-			set columns	[dict keys $c_types]
 		}
+		set columns	[dict keys $c_types]
 
 		set max_rows_per_batch	$::pgwire::default_batchsize
 
 		if {$::pgwire::accelerators} {
-			set makerow	{set row [::pgwire::c_makerow $datarow $c_types $tcl_encoding $as]}
+			set ops		[::pgwire::build_ops $as $c_types]
+			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
 		} else {
 			set makerow	[$con tcl_makerow $as $c_types]
 		}
@@ -369,12 +371,14 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 		set as	[dict get $opts -as]
 
+		$con buffer_nesting
+
 		try $build_params on ok parameters {}
 
 		if {[dict exists $opts -columnsvariable]} {
 			upvar 1 [dict get $opts -columnsvariable] columns
-			set columns	[dict keys $c_types]
 		}
+		set columns	[dict keys $c_types]
 
 		set max_rows_per_batch	$::pgwire::default_batchsize
 
@@ -382,7 +386,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		coroutine $rowbuffer $con rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
 
 		if {$::pgwire::accelerators} {
-			set makerow	{set row [::pgwire::c_makerow $datarow $c_types $tcl_encoding $as]}
+			set ops		[::pgwire::build_ops $as $c_types]
+			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
 		} else {
 			set makerow	[$con tcl_makerow $as $c_types]
 		}
@@ -466,6 +471,8 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		c_types
 		rowcount
 		stmt_name
+		ops_dict
+		ops_list
 	}
 
 	constructor {stmt args} { #<<<
@@ -494,6 +501,8 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set stmt_name			[$stmt stmt_name]
 		set columns				[dict keys $c_types]
 		set tcl_encoding		[$con tcl_encoding]
+		set ops_dict			[::pgwire::build_ops dicts $c_types]
+		set ops_list			[::pgwire::build_ops lists $c_types]
 
 		if {!$::pgwire::accelerators} {
 			# No accelerator support, rewrite our nextdict and nextlist methods to use the statement-specific
@@ -507,6 +516,8 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			# rewritten method won't see them
 			oo::objdefine [self] variable {*}[info class variables [self class]]
 		}
+
+		$con buffer_nesting
 
 		try [$stmt build_params] on ok parameters {}
 		coroutine [namespace current]::portal $con rowbuffer_coro $stmt_name [self] $rformats $parameters $max_rows_per_batch
@@ -575,7 +586,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			#::pgwire::log notice "Popped data: [string length $data], [llength $datarows] rows remain"
 
 			# makerow_start
-			set row	[::pgwire::c_makerow $data $c_types $tcl_encoding %format%s]
+			set row	[::pgwire::c_makerow2 $ops_%format% $columns $tcl_encoding $data]
 			# makerow_end
 			return 1
 		}]

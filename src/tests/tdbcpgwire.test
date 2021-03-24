@@ -109,6 +109,8 @@ test tdbcpgwire-20.1 {Resultset} -setup { #<<<
 	proc ::pgwire::log {lvl msg} {
 		puts stderr "tdbcpgwire-20.1 $lvl: $msg"
 	}
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize 17
 } -body {
 	set res			{}
 	set count		0
@@ -134,7 +136,8 @@ test tdbcpgwire-20.1 {Resultset} -setup { #<<<
 	if {[info object isa object tdbcpgwire]} {
 		tdbcpgwire destroy
 	}
-	unset -nocomplain stmt res count resultset row
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain stmt res count resultset row hold v
 	catch {rename ::pgwire::log {}}
 	rename _tmplog ::pgwire::log
 } -result {1000 1000 {{ENOUGH RAGING}}}
