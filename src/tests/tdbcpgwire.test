@@ -15,6 +15,23 @@ test tdbcpgwire-1.1 {Construct instance} -body { #<<<
 	}
 } -result 1
 #>>>
+test tdbcpgwire-2.1 {serial allrows} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+	set film_id	286
+	$stmt allrows
+	$stmt allrows
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt film_id
+} -result {{title {ENOUGH RAGING}}}
+#>>>
 test tdbcpgwire-10.1 {Construct statement} -setup { #<<<
 	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
 } -body {

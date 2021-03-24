@@ -10,7 +10,7 @@ package require tdbc::pgwire
 package require tdbc::postgres
 
 proc main {} {
-bench tdbcpgwire-4.1 {prepared statement allrows} -setup { #<<<
+bench tdbcpgwire-4.1 {prepared statement allrows, 1 row, 1 column} -setup { #<<<
 	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
@@ -39,7 +39,7 @@ bench tdbcpgwire-4.1 {prepared statement allrows} -setup { #<<<
 	unset -nocomplain stmts k v film_id q
 } -result {{title {ENOUGH RAGING}}}
 #>>>
-bench tdbcpgwire-4.2 {prepared statement allrows} -setup { #<<<
+bench tdbcpgwire-4.2 {prepared statement allrows, many rows, many columns} -setup { #<<<
 	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
@@ -67,7 +67,7 @@ bench tdbcpgwire-4.2 {prepared statement allrows} -setup { #<<<
 	unset -nocomplain stmts k v film_id q
 } -result 1000
 #>>>
-bench tdbcpgwire-20.1 {resultset allrows} -setup { #<<<
+bench tdbcpgwire-20.1 {resultset allrows, many rows, many columns} -setup { #<<<
 	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 

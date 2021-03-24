@@ -25,6 +25,7 @@ services:
         volumes:
             - ./src:/src
             - run:/run
+            - ./tmp:/tmp
         environment:
             POSTGRES_PASSWORD: insecure
             PGHOST: /run/postgresql

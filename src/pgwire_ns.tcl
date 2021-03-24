@@ -1292,11 +1292,10 @@ namespace eval ::pgwire_ns {
 										float4	{format {binary scan [read $socket $collen] R %s} [list $myname]}
 										float8	{format {binary scan [read $socket $collen] Q %s} [list $myname]}
 										varchar -
-										text	{
-											format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list [dict get $state $socket tcl_encoding]]
-										}
+										text -
 										default	{
-											set colfmt	\u0\u0	;# text
+											set colfmt		\u0\u0	;# text
+											set type_name	text
 											format {set %s [if {$collen == 0} {return -level 0 {}} else {encoding convertfrom %s [read $socket $collen]}]} [list $myname] [list [dict get $state $socket tcl_encoding]]
 										}
 									}]
@@ -1579,7 +1578,7 @@ namespace eval ::pgwire_ns {
 							set makerow			{
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {connection_lost $socket}
-								set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] lists]
+								set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] lists]
 							}
 						} else {
 							set makerow			$makerow_list
@@ -1602,7 +1601,7 @@ namespace eval ::pgwire_ns {
 							set makerow			{
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {connection_lost $socket}
-								set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] lists]
+								set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] lists]
 							}
 						} else {
 							set makerow			$makerow_list
@@ -1628,7 +1627,7 @@ namespace eval ::pgwire_ns {
 						set makerow			{
 							set data	[read $socket $len]
 							if {[chan eof $socket]} {connection_lost $socket}
-							set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] dicts]
+							set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] dicts]
 						}
 					} else {
 						set makerow			$makerow_dict
@@ -1678,7 +1677,7 @@ namespace eval ::pgwire_ns {
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {connection_lost $socket}
 								if {!$broken} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] lists]
+									set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] lists]
 								}
 							}
 						} else {
@@ -1722,7 +1721,7 @@ namespace eval ::pgwire_ns {
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {connection_lost $socket}
 								if {!$broken} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] lists]
+									set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] lists]
 								}
 							}
 						} else {
@@ -1769,7 +1768,7 @@ namespace eval ::pgwire_ns {
 							set data	[read $socket $len]
 							if {[chan eof $socket]} {connection_lost $socket}
 							if {!$broken} {
-								set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] dicts]
+								set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] dicts]
 							}
 						}
 					} else {
@@ -1814,7 +1813,7 @@ namespace eval ::pgwire_ns {
 					set data	[read $socket $len]
 					if {[chan eof $socket]} {connection_lost $socket}
 					if {!$broken} {
-						set row	[::pgwire::c_makerow $data $c_types $rformats [dict get $state $socket tcl_encoding] lists]
+						set row	[::pgwire::c_makerow $data $c_types [dict get $state $socket tcl_encoding] lists]
 					}
 				}
 			} else {

@@ -2,6 +2,8 @@ package require tcltest
 namespace import ::tcltest::*
 ::tcltest::loadTestedCommands
 
+#namespace eval ::pgwire {variable block_accelerators 1}
+
 package require pgwire
 #puts "db: [exec ping -c 1 db]"
 package require unix_sockets
@@ -108,6 +110,28 @@ test pgwire-2.2 {allrows -as lists, no -columnsvariable, 1 row, many columns} -s
 	unset -nocomplain dbchan rows
 } -result 14
 #>>>
+test pgwire-2.4 {allrows -as lists, no -columnsvariable, 1000 rows, 2 columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
+} -body {
+	set rows	[pg allrows -as lists {select film_id,rating from film}]
+
+	list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {lindex $row 0}]]
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan rows row hold
+} -result {1000 500500}
+#>>>
 test pgwire-3.1 {allrows -as dicts, 1 row, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
@@ -159,6 +183,25 @@ test pgwire-3.3 {allrows with params dict} -setup { #<<<
 	}
 	unset -nocomplain dbchan
 } -result {{title {DROP WATERFRONT}}}
+#>>>
+test pgwire-3.4 {allrows -as dicts, no -columnsvariable, 1 row, many columns} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set rows	[pg allrows -as dicts {select film_id from film}]
+
+	list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {dict get $row film_id}]]
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan rows row
+} -result {1000 500500}
 #>>>
 test pgwire-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
@@ -348,7 +391,7 @@ test pgwire-6.5 {Transactions, nested begin} -setup $std_setup -body { #<<<
 
 #>>>
 test pgwire-7.1 {ready_for_query} -setup $std_setup -body { #<<<
-	pg extended_query {set search_path to public} {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+	pg onecolumn {set search_path to public}
 	pg ready_for_query
 } -cleanup {
 	rename pg {}
@@ -374,16 +417,16 @@ test pgwire-7.3 {ready_for_query} -setup $std_setup -body { #<<<
 } -result 1
 
 #>>>
-test pgwire-8.1 {nested foreach} -setup { #<<<
+test pgwire-8.1 {nested foreach, no transaction} -setup { #<<<
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
-	#pg begintransaction
+	set sum_film_id	0
 	pg foreach film {select * from film order by film_id} {
-		::pgwire::log notice "considering film [dict get $film film_id]: [dict get $film title]"
 		if {[dict get $film film_id] == 286} {
-			::pgwire::log notice "Found film 286: $film"
 			pg foreach actor {
 				select
 					a.first_name,
@@ -397,14 +440,12 @@ test pgwire-8.1 {nested foreach} -setup { #<<<
 				where
 					fa.film_id = :film_id
 			} $film {
-				::pgwire::log notice "Found actor: $actor"
 				lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
 			}
-			::pgwire::log notice "done fetching actors"
 		}
+		incr sum_film_id	[dict get $film film_id]
 	}
-	#pg commit
-	set res
+	list $res $sum_film_id
 } -cleanup {
 	foreach obj {pg} {
 		if {[info object isa object $obj]} {
@@ -414,8 +455,220 @@ test pgwire-8.1 {nested foreach} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	unset -nocomplain dbchan film actor res
-} -result {{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan film actor res hold
+} -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
+#>>>
+test pgwire-8.2 {nested foreach, within transaction} -setup { #<<<
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set res	{}
+	set sum_film_id	0
+	pg begintransaction
+	pg foreach film {select * from film order by film_id} {
+		if {[dict get $film film_id] == 286} {
+			pg foreach actor {
+				select
+					a.first_name,
+					a.last_name
+				from
+					actor a
+				join
+					film_actor fa
+				using
+					(actor_id)
+				where
+					fa.film_id = :film_id
+			} $film {
+				lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+			}
+		}
+
+		incr sum_film_id	[dict get $film film_id]
+	}
+	pg commit
+	list $res $sum_film_id
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan film actor res hold
+} -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
+#>>>
+test pgwire-8.3 {nested onecolumn, no transaction} -setup { #<<<
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set res	{}
+	set sum_film_id	0
+	pg foreach film {select * from film order by film_id} {
+		if {[dict get $film film_id] == 286} {
+			set film_id	[dict get $film film_id]
+			lappend res	[pg onecolumn {
+				select
+					a.first_name || ' ' || a.last_name
+				from
+					actor a
+				join
+					film_actor fa
+				using
+					(actor_id)
+				where
+					fa.film_id = :film_id
+				limit 1
+			}]
+		}
+		incr sum_film_id	[dict get $film film_id]
+	}
+	list $res $sum_film_id
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan film actor res film_id hold
+} -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
+#>>>
+test pgwire-8.4 {nested onecolumn, within transaction} -setup { #<<<
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set res	{}
+	set sum_film_id	0
+	pg begintransaction
+	pg foreach film {select * from film order by film_id} {
+		if {[dict get $film film_id] == 286} {
+			set film_id	[dict get $film film_id]
+			lappend res	[pg onecolumn {
+				select
+					a.first_name || ' ' || a.last_name
+				from
+					actor a
+				join
+					film_actor fa
+				using
+					(actor_id)
+				where
+					fa.film_id = :film_id
+				limit 1
+			}]
+		}
+		incr sum_film_id	[dict get $film film_id]
+	}
+	pg commit
+	list $res $sum_film_id
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan film actor res film_id hold
+} -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
+#>>>
+test pgwire-8.5 {nested allrows, no transaction} -setup { #<<<
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set res	{}
+	set sum_film_id	0
+	pg foreach film {select * from film order by film_id} {
+		if {[dict get $film film_id] == 286} {
+			lappend res	{*}[pg allrows -as lists {
+				select
+					a.first_name || ' ' || a.last_name
+				from
+					actor a
+				join
+					film_actor fa
+				using
+					(actor_id)
+				where
+					fa.film_id = :film_id
+				limit 2
+			} $film]
+		}
+		incr sum_film_id	[dict get $film film_id]
+	}
+	list $res $sum_film_id
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan film actor res hold
+} -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
+#>>>
+test pgwire-8.6 {nested allrows, no transaction} -setup { #<<<
+	set dbchan	[try $connect]
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	17
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set res	{}
+	set sum_film_id	0
+	pg begintransaction
+	pg foreach film {select * from film order by film_id} {
+		if {[dict get $film film_id] == 286} {
+			lappend res	{*}[pg allrows -as lists {
+				select
+					a.first_name || ' ' || a.last_name
+				from
+					actor a
+				join
+					film_actor fa
+				using
+					(actor_id)
+				where
+					fa.film_id = :film_id
+				limit 2
+			} $film]
+		}
+		incr sum_film_id	[dict get $film film_id]
+	}
+	pg commit
+	list $res $sum_film_id
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain dbchan film actor res hold
+} -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
 #>>>
 test pgwire-10.1 {casts vs params} -setup { #<<<
 	set dbchan	[try $connect]

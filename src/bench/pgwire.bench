@@ -69,6 +69,10 @@ bench pgwire-1.2 {onecolumn} -setup { #<<<
 		pgwire_uds onecolumn {select title from film where film_id=286}
 	}
 
+	pgwire_uds_old {
+		pgwire_uds onecolumn_old {select title from film where film_id=286}
+	}
+
 	tdbc_postgres {
 		lindex [tdbc_postgres allrows -as lists {select title from film where film_id=286}] 0 0
 	}
@@ -92,6 +96,10 @@ bench pgwire-1.3 {onecolumn, with param} -setup { #<<<
 
 	pgwire_uds {
 		pgwire_uds onecolumn {select title from film where film_id=:film_id}
+	}
+
+	pgwire_uds_old {
+		pgwire_uds onecolumn_old {select title from film where film_id=:film_id}
 	}
 
 	tdbc_postgres {
@@ -126,9 +134,20 @@ bench pgwire-2.1 {allrows, large number of columns, lists} -setup { #<<<
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
 	set q {select * from film}
+	set hold	$::pgwire::default_batchsize
+	#set ::pgwire::default_batchsize	17
+	#set ::pgwire::default_batchsize	0
 } -compare {
 	pgwire_lo     { llength [pgwire_lo  allrows -as lists $q] }
 	pgwire_uds    { llength [pgwire_uds allrows -as lists $q] }
+	pgwire_uds_foreach    {
+		set rows	{}
+		pgwire_uds foreach -as lists row $q {
+			lappend rows $row
+		}
+		llength $rows[unset rows]
+	}
+	pgwire_uds_old    { llength [pgwire_uds allrows_old -as lists $q] }
 	tdbc_postgres { llength [tdbc_postgres allrows -as lists $q] }
 } -cleanup {
 	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
@@ -136,7 +155,8 @@ bench pgwire-2.1 {allrows, large number of columns, lists} -setup { #<<<
 			$obj destroy
 		}
 	}
-	unset -nocomplain q
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain q hold
 } -result 1000
 #>>>
 bench pgwire-2.2 {allrows, large number of columns, dicts} -setup { #<<<
@@ -158,7 +178,48 @@ bench pgwire-2.2 {allrows, large number of columns, dicts} -setup { #<<<
 	unset -nocomplain q
 } -result 1000
 #>>>
+bench pgwire-2.3 {allrows, one row, large number of columns, dicts} -setup { #<<<
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+
+	set q {select * from film where film_id=286}
+} -compare {
+	pgwire_lo     { dict get [lindex [pgwire_lo  allrows -as dicts $q] 0] title }
+	pgwire_uds    { dict get [lindex [pgwire_uds allrows -as dicts $q] 0] title }
+	tdbc_postgres { dict get [lindex [tdbc_postgres allrows -as dicts $q] 0] title }
+} -cleanup {
+	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain q
+} -result {ENOUGH RAGING}
+#>>>
+bench pgwire-2.4 {allrows, one row, one column, dicts} -setup { #<<<
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+
+	set q {select title from film where film_id=286}
+} -compare {
+	pgwire_lo     { dict get [lindex [pgwire_lo  allrows -as dicts $q] 0] title }
+	pgwire_uds    { dict get [lindex [pgwire_uds allrows -as dicts $q] 0] title }
+	tdbc_postgres { dict get [lindex [tdbc_postgres allrows -as dicts $q] 0] title }
+} -cleanup {
+	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain q
+} -result {ENOUGH RAGING}
+#>>>
 bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	0
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
 	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
@@ -172,9 +233,33 @@ bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
 		}
 		set count
 	}
+	pgwire_lo_dicts {
+		set count	0
+		pgwire_lo foreach -as dicts row $q {
+			dict get $row film_id
+			incr count
+		}
+		set count
+	}
 	pgwire_uds_lists {
 		set count	0
 		pgwire_uds foreach -as lists row $q {
+			lindex $row 0
+			incr count
+		}
+		set count
+	}
+	pgwire_lo_lists {
+		set count	0
+		pgwire_uds foreach -as lists row $q {
+			lindex $row 0
+			incr count
+		}
+		set count
+	}
+	pgwire_uds_lists_old {
+		set count	0
+		pgwire_uds foreach_old -as lists row $q {
 			lindex $row 0
 			incr count
 		}
@@ -202,7 +287,8 @@ bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
 			$obj destroy
 		}
 	}
-	unset -nocomplain q count
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain q count hold
 } -result 1000
 #>>>
 bench pgwire-3.2 {foreach, medium number of columns} -setup { #<<<
@@ -254,6 +340,7 @@ bench pgwire-3.2 {foreach, medium number of columns} -setup { #<<<
 #>>>
 bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
 	set q {select film_id,title from film}
@@ -266,7 +353,23 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 		}
 		set count
 	}
+	pgwire_lo_dicts {
+		set count	0
+		pgwire_uds foreach -as dicts row $q {
+			dict get $row film_id
+			incr count
+		}
+		set count
+	}
 	pgwire_uds_lists {
+		set count	0
+		pgwire_uds foreach -as lists row $q {
+			lindex $row 0
+			incr count
+		}
+		set count
+	}
+	pgwire_lo_lists {
 		set count	0
 		pgwire_uds foreach -as lists row $q {
 			lindex $row 0
@@ -574,7 +677,9 @@ bench pgwire-5.3 {foreach, small number of columns vs foreach [allrows]} -setup 
 } -result {1000 {ENOUGH RAGING}}
 #>>>
 bench pgwire-6.1 {transactions: simple_query_list vs extended_query} -setup { #<<<
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
 	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 } -compare {
 	pgwire_simple_query_list     {
 		set res	{}
@@ -600,10 +705,90 @@ bench pgwire-6.1 {transactions: simple_query_list vs extended_query} -setup { #<
 		lappend res [pgwire_uds transaction_status] [pgwire_uds ready_for_query]
 		set res
 	}
+	pgwire_methods_lo     {
+		set res	{}
+		pgwire_lo begintransaction
+		lappend res [pgwire_lo transaction_status]
+		pgwire_lo rollback
+		lappend res [pgwire_lo transaction_status] [pgwire_lo ready_for_query]
+		set res
+	}
+	tdbc_postgres	{
+		set res	{}
+		tdbc_postgres begintransaction
+		lappend res T
+		tdbc_postgres rollback
+		lappend res I 1
+		set res
+	}
 } -cleanup {
-	pgwire_uds destroy
+	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
 	unset -nocomplain res
 } -result {T I 1}
+#>>>
+bench pgwire-7.1 {makerow} -setup { #<<<
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	set ops_list		{op_int4_lists op_text_lists op_text_lists op_int4_lists op_int2_lists op_int2_lists op_int2_lists op_text_lists op_int2_lists op_text_lists op_text_lists op_text_lists op_text_lists op_text_lists}
+	set ops_dict		{op_int4_dicts op_text_dicts op_text_dicts op_int4_dicts op_int2_dicts op_int2_dicts op_int2_dicts op_text_dicts op_int2_dicts op_text_dicts op_text_dicts op_text_dicts op_text_dicts op_text_dicts}
+	set columns 		{film_id title description release_year language_id original_language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext}
+	set tcl_encoding	utf-8
+	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set datarow	[binary decode hex 000e00000004000003e8000000095a4f52524f2041524b000000554120496e7472657069642050616e6f72616d61206f662061204d616420536369656e7469737420416e64206120426f792077686f206d7573742052656465656d206120426f7920696e2041204d6f6e61737465727900000004000007d6000000020001ffffffff00000002000300000004342e39390000000200320000000531382e3939000000054e432d31370000001d323032302d30392d31302031363a34363a30332e3930353739352b30300000002b7b547261696c6572732c436f6d6d656e7461726965732c22426568696e6420746865205363656e6573227d000000722761726b273a322027626f79273a31322c31372027696e747265706964273a3420276d6164273a3820276d6f6e617374657269273a323020276d757374273a3134202770616e6f72616d61273a35202772656465656d273a31352027736369656e74697374273a3920277a6f72726f273a31]
+	set tcl_makerow_lists	[pgwire_uds tcl_makerow lists $c_types]
+	set tcl_makerow_dicts	[pgwire_uds tcl_makerow dicts $c_types]
+} -compare {
+	tcl_makerow_list {
+		try $tcl_makerow_lists
+		lindex $row 1
+	}
+	tcl_makerow_dict {
+		try $tcl_makerow_dicts
+		dict get $row title
+	}
+	c_makerow_list {
+		lindex [::pgwire::c_makerow $datarow $c_types $tcl_encoding lists] 1
+	}
+	c_makerow2_list {
+		lindex [::pgwire::c_makerow2 $ops_list $columns $tcl_encoding $datarow] 1
+	}
+	c_makerow_dict {
+		dict get [::pgwire::c_makerow $datarow $c_types $tcl_encoding dicts] title
+	}
+	c_makerow2_dict {
+		dict get [::pgwire::c_makerow2 $ops_dict $columns $tcl_encoding $datarow] title
+	}
+} -cleanup {
+	foreach obj {pgwire_uds} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain row ops_list ops_dict columns tcl_encoding c_types datarow tcl_makerow_lists tcl_makerow_dicts collen val o
+} -result {ZORRO ARK}
+#>>>
+bench pgwire-8.1 {allrows using c_makerow2 vs c_allrows_batch} -setup { #<<<
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+	set q {select * from film}
+} -compare {
+	pgwire_lo_makerow2  { llength [pgwire_lo  allrows_makerow -as dicts $q] }
+	pgwire_lo_batch     { llength [pgwire_lo  allrows -as dicts $q] }
+	pgwire_uds_makerow2 { llength [pgwire_uds  allrows_makerow -as dicts $q] }
+	pgwire_uds_batch    { llength [pgwire_uds  allrows -as dicts $q] }
+	tdbc_postgres       { llength [tdbc_postgres allrows -as dicts $q] }
+} -cleanup {
+	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain q obj
+} -result 1000
 #>>>
 }
 

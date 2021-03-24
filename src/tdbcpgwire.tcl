@@ -221,13 +221,20 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward allrows				pg allrows
 	forward foreach				pg foreach
 	forward onecolumn			pg onecolumn
-	forward prepare_statement	pg prepare_statement
+		forward prepare_statement	pg prepare_statement
+	forward prepare_extended_query	pg prepare_extended_query
+	forward preserve			pg preserve
+	forward release				pg release
+	forward rowbuffer_coro		pg rowbuffer_coro
 	forward close_statement		pg close_statement
-	forward extended_query		pg extended_query
+	forward close_portal		pg close_portal
+		forward extended_query		pg extended_query
 	forward skip_to_sync		pg skip_to_sync
 	forward tcl_encoding		pg tcl_encoding
 	forward transaction_status	pg transaction_status
 	forward ready_for_query		pg ready_for_query
+	forward sync_outstanding	pg sync_outstanding
+	forward tcl_makerow			pg tcl_makerow
 }
 
 #>>>
@@ -236,15 +243,12 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 	variable {*}{
 		con
+		sql
 
-		socket
-		field_names
-		execute_lambda
-		makerow_vars
-		makerow_dict
-		makerow_dict_no_nulls
-		makerow_list
+		stmt_name
 		build_params
+		rformats
+		c_types
 	}
 
 	constructor {instance sqlcode} { #<<<
@@ -254,20 +258,23 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}]
 		}
 		set con	$instance
+		set sql	$sqlcode
 
 		if {[self next] ne ""} next
 
-		set stmt_info	[$con prepare_statement [self] $sqlcode]
+		set stmt_info	[$con prepare_extended_query $sql]
+		$con preserve $sql
 		dict with stmt_info {}
 	}
 
 	#>>>
 	destructor { #<<<
-		$con close_statement [self]
+		$con release $sql
+		if {[llength [info commands [namespace current]::portal]] > 0} {
+			portal destroy
+		}
 
-		# Closing a statement implicitly closes any resultsets derived from it
 		foreach resultset [my resultsets] {
-			# These will each issue a close for their portals, but it isn't an error to close a non-existant portal
 			$resultset destroy
 		}
 
@@ -288,97 +295,62 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 						 ?-option value?... ?--? ?dictionary?"
 			}
 		}
+		set as	[dict get $opts -as]
 
 		try $build_params on ok parameters {}
 
-		set max_rows_per_batch	0
-		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-		set need_sync	1
-		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
-			columns rformats c_types
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+			set columns	[dict keys $c_types]
+		}
+
+		set max_rows_per_batch	$::pgwire::default_batchsize
+
+		if {$::pgwire::accelerators} {
+			set makerow	{set row [::pgwire::c_makerow $datarow $c_types $tcl_encoding $as]}
+		} else {
+			set makerow	[$con tcl_makerow $as $c_types]
+		}
 
 		set tcl_encoding	[$con tcl_encoding]
 		try {
-			set acc	{}
-			switch -exact -- [dict get $opts -as] {
-				dicts {
-					while 1 {
-						set msg	[portal]
-						#::pgwire::log notice "portal yielded: $msg"
-						switch -exact -- [lindex $msg 0] {
-							DataRow {
-								set data	[read $socket [lindex $msg 1]]
-								if {[eof $socket]} {unset socket; $con connection_lost}
-								if {$::pgwire::accelerators} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
-								} else $makerow_dict
-								lappend acc $row
-							}
-							PortalSuspended {
-								set executemsg	[lindex $msg 1]
-								# Execute portal
-								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
-								flush $socket
-							}
-							CommandComplete {
-								set msg	[lindex $msg 1]
-								#::pgwire::log notice "Got CommandComplete: \"$msg\""
-								set need_sync	0
-							}
-							finished break
-							default {error "Unexpected msg \"$msg\" from portal coroutine"}
-						}
-					}
+			set rowbuffer	[namespace current]::portal
+			coroutine $rowbuffer $con rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+
+			set rows	{}
+
+			while 1 {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
+				foreach datarow $datarows {
+					try $makerow
+					lappend rows $row
 				}
 
-				lists {
-					while 1 {
-						set msg	[portal]
-						switch -exact -- [lindex $msg 0] {
-							DataRow {
-								set data	[read $socket [lindex $msg 1]]
-								if {[eof $socket]} {unset socket; $con connection_lost}
-								if {$::pgwire::accelerators} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
-								} else $makerow_list
-								lappend acc $row
-							}
-							PortalSuspended {
-								set executemsg	[lindex $msg 1]
-								# Execute portal
-								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
-								flush $socket
-							}
-							CommandComplete {
-								set msg	[lindex $msg 1]
-								#::pgwire::log notice "Got CommandComplete: \"$msg\""
-								set need_sync	0
-							}
-							finished break
-							default {error "Unexpected msg \"$msg\" from portal coroutine"}
-						}
+				switch -exact -- $outcome {
+					CommandComplete -
+					EmptyQueryResponse {
+						break
 					}
-				}
-
-				default {
-					error "Unhandled -as format: \"[dict get $opts -as]\""
+					PortalSuspended {}
+					default {
+						error "Unexpected outcome from rowbuffer nextbatch: \"$outcome\""
+					}
 				}
 			}
 
-			return $acc
-		} on error {r o} {
-			dict incr o -level 1
+			set rows
+		} finally {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {![$con ready_for_query] && ![$con sync_outstanding]} {
+				$con Sync
+			}
+			if {[$con sync_outstanding]} {
+				$con skip_to_sync
+			}
 		}
-
-		if {[llength [info commands portal]] > 0} {rename portal {}}
-		if {$need_sync && ![$con sync_outstanding]} {
-			puts -nonewline $socket S\u0\u0\u0\u4; $con sync_outstanding 1
-			flush $socket
-		}
-		if {[$con sync_outstanding]} {
-			$con skip_to_sync
-		}
-		return -options $o $r
 	}
 
 	#>>>
@@ -395,146 +367,89 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 						 ?-option value?... ?--? varName ?dictionary? script"
 			}
 		}
+		set as	[dict get $opts -as]
 
 		try $build_params on ok parameters {}
 
-		set need_sync	1
-		set max_rows_per_batch	0
-		#puts stderr "execute_lambda:\n[join [lmap line [split $execute_lambda \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-		lassign [coroutine portal apply $execute_lambda $socket "" $max_rows_per_batch 1 $parameters] \
-			columns rformats c_types
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+			set columns	[dict keys $c_types]
+		}
 
-		upvar 1 $row_varname row
+		set max_rows_per_batch	$::pgwire::default_batchsize
 
+		set rowbuffer	[namespace current]::portal
+		coroutine $rowbuffer $con rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+
+		if {$::pgwire::accelerators} {
+			set makerow	{set row [::pgwire::c_makerow $datarow $c_types $tcl_encoding $as]}
+		} else {
+			set makerow	[$con tcl_makerow $as $c_types]
+		}
+
+		set tcl_encoding	[$con tcl_encoding]
 		try {
-			switch -exact -- [dict get $opts -as] {
-				dicts {
-					while 1 {
-						set msg	[portal]
-						switch -exact -- [lindex $msg 0] {
-							DataRow {
-								set data	[read $socket [lindex $msg 1]]
-								if {[eof $socket]} {unset socket; $con connection_lost}
-								if {$::pgwire::accelerators} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
-								} else $makerow_dict
-								try {
-									uplevel 1 $script
-								} on continue {} {
-									continue
-								} on break {} {
-									while 1 {
-										set msg	[portal]
-										switch -exact -- [lindex $msg 0] {
-											DataRow  - PortalSuspended - CommandComplete {
-											# Read and discard messages after the break / return / error
-												read $socket [lindex $msg 1]
-												if {[eof $socket]} {unset socket; $con connection_lost}
-											}
-											finished break
-											default {error "Unexpected msg \"$msg\" from portal coroutine"}
-										}
-									}
-									break
-								}
-							}
-							PortalSuspended {
-								set executemsg	[lindex $msg 1]
-								# Execute portal
-								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
-								flush $socket
-							}
-							CommandComplete {
-								set msg	[lindex $msg 1]
-								#::pgwire::log notice "Got CommandComplete: \"$msg\""
-								set need_sync	0
-							}
-							finished break
-							default {error "Unexpected msg \"$msg\" from portal coroutine"}
-						}
+			set broken	0
+			while {!$broken} {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
+				foreach datarow $datarows {
+					try $makerow
+					try {
+						uplevel 1 $script
+					} on break {} {
+						set broken	1
+						break
+					} on continue {} {
+					} on return {r o} {
+						set broken	1
+						dict incr o -level 1
+						dict set o -code return
+						set rethrow	[list -options $o $r]
+						break
+					} on error {r o} {
+						set broken	1
+						dict incr o -level 1
+						set rethrow	[list -options $o $r]
+						break
 					}
 				}
 
-				lists {
-					while 1 {
-						set msg	[portal]
-						switch -exact -- [lindex $msg 0] {
-							DataRow {
-								set data	[read $socket [lindex $msg 1]]
-								if {[eof $socket]} {unset socket; $con connection_lost}
-								if {$::pgwire::accelerators} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
-								} else $makerow_dict
-								try {
-									uplevel 1 $script
-								} on continue {} {
-									continue
-								} on break {} {
-									while 1 {
-										set msg	[portal]
-										switch -exact -- [lindex $msg 0] {
-											DataRow {
-											# Read and discard messages after the break / return / error
-												read $socket [lindex $msg 1]
-												if {[eof $socket]} {unset socket; $con connection_lost}
-											}
-											finished break
-											default {error "Unexpected msg \"$msg\" from portal coroutine"}
-										}
-									}
-									break
-								}
-							}
-							PortalSuspended {
-								set executemsg	[lindex $msg 1]
-								# Execute portal
-								puts -nonewline $socket [binary format aIa*I E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch 0 {*}$args]H\u0\u0\u0\u4
-								flush $socket
-							}
-							CommandComplete {
-								set msg	[lindex $msg 1]
-								#::pgwire::log notice "Got CommandComplete: \"$msg\""
-								set need_sync	0
-							}
-							finished break
-							default {error "Unexpected msg \"$msg\" from portal coroutine"}
-						}
+				switch -exact -- $outcome {
+					CommandComplete -
+					EmptyQueryResponse {
+						break
 					}
-				}
-
-				default {
-					error "Unhandled -as format: \"[dict get $opts -as]\""
+					PortalSuspended {}
+					default {
+						error "Unexpected outcome from rowbuffer nextbatch: \"$outcome\""
+					}
 				}
 			}
-		} on ok {} {
-			return
-		} on return {r o} {
-			dict set o -code return
-			dict incr o -level 1
-		} on error {r o} {
-			dict incr o -level 1
-		}
 
-		if {[llength [info commands portal]] > 0} {rename portal {}}
-
-		if {$need_sync && ![$con sync_outstanding]} {
-			puts -nonewline $socket S\u0\u0\u0\u4; $con sync_outstanding 1
-			flush $socket
+			if {[info exists rethrow]} {
+				return {*}$rethrow
+			}
+		} finally {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {![$con ready_for_query] && ![$con sync_outstanding]} {
+				$con Sync
+			}
+			if {[$con sync_outstanding]} {
+				$con skip_to_sync
+			}
 		}
-		if {[$con sync_outstanding]} {
-			$con skip_to_sync
-		}
-
-		return -options $o $r
 	}
 
 	#>>>
 	forward resultSetCreate ::tdbc::pgwire::resultset create
-	method execute_lambda {} {set execute_lambda}
-	method socket {} {set socket}
 	method con {} {set con}
-	method makerow_def format { set makerow_$format }
 	method build_params {} { set build_params }
+	method c_types {} { set c_types }
+	method rformats {} { set rformats }
+	method stmt_name {} { set stmt_name }
 }
 
 #>>>
@@ -542,17 +457,15 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 	superclass ::tdbc::resultset
 
 	variable {*}{
-		socket
 		con
-		batchsize
-		rowdata
-		execute_lambda
+		datarows
 		open
 		columns
 		rformats
 		tcl_encoding
 		c_types
 		rowcount
+		stmt_name
 	}
 
 	constructor {stmt args} { #<<<
@@ -572,20 +485,22 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		}
 		if {[self next] ne ""} next
 
-		set batchsize	1000
-		set rowdata		{}
-		set rowcount	0
+		set max_rows_per_batch	$::pgwire::default_batchsize
+		set rowcount			0
+		set datarows			{}
+		set con					[$stmt con]
+		set c_types				[$stmt c_types]
+		set rformats			[$stmt rformats]
+		set stmt_name			[$stmt stmt_name]
+		set columns				[dict keys $c_types]
+		set tcl_encoding		[$con tcl_encoding]
 
 		if {!$::pgwire::accelerators} {
 			# No accelerator support, rewrite our nextdict and nextlist methods to use the statement-specific
 			# Tcl row builder script compiled by the prepare statement step
 			foreach format {dict list} {
 				lassign [info class definition [self class] next$format] method_args method_body
-				oo::objdefine [self] method next$format $method_args [regsub {\# makerow_start.*\# makerow_end} $method_body [string map [list \
-					%makerow% [$stmt makerow_def $format] \
-				] {
-					%makerow%
-				}]]
+				oo::objdefine [self] method next$format $method_args [regsub {\# makerow_start.*\# makerow_end} $method_body [$con tcl_makerow $format $c_types]]
 				#::pgwire::log notice "rewrote [self]::next$format body: [lindex [info object definition [self] next$format] 1]"
 			}
 			# Transcribe the variables defined to be visible in methods from the class to this instance or the
@@ -593,24 +508,22 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			oo::objdefine [self] variable {*}[info class variables [self class]]
 		}
 
-		set socket			[$stmt socket]
-		set con				[$stmt con]
-		set execute_lambda	[$stmt execute_lambda]
-		set tcl_encoding	[$con tcl_encoding]
 		try [$stmt build_params] on ok parameters {}
-		lassign [coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 1 $parameters] \
-			columns rformats c_types
-		#::pgwire::log notice "Got initial data from portal:\n\t[join [lmap v {columns rformats c_types} {format {%15s: %s} $v [if {$v eq "rformats"} {regexp -all -inline .. [binary encode hex [set $v]]} else {set $v}]}] \n\t]"
+		coroutine [namespace current]::portal $con rowbuffer_coro $stmt_name [self] $rformats $parameters $max_rows_per_batch
+
 		set open	1
-		my _read_next_batch
 	}
 
 	#>>>
 	destructor { #<<<
-		if {[info exists socket] && $socket in [chan names]} {
-			set close_payload	P[encoding convertto $tcl_encoding [self]]\u0
-			puts -nonewline $socket [binary format aIa* C [+ 4 [string length $close_payload]] $close_payload]
-			flush $socket
+		#::pgwire::log notice "resultset [self] destructor"
+		if {[llength [info commands [namespace current]::portal]] != 0} {
+			#::pgwire::log notice "resultself [self] destructor, portal exists, destroying"
+			portal destroy
+		}
+		if {[info exists con] && [info object isa object $con]} {
+			#::pgwire::log notice "resultself [self] destructor, closing portal [self]"
+			$con close_portal [self]
 		}
 		if {[self next] ne ""} next
 	}
@@ -618,33 +531,20 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 	#>>>
 	method _read_next_batch {} { #<<<
 		#::pgwire::log notice "_read_next_batch"
-		while 1 {
-			set msg	[portal]
-			#::pgwire::log notice "_read_next_batch portal returned [lindex $msg 0]"
-			switch -exact -- [lindex $msg 0] {
-				DataRow {
-					lappend rowdata [read $socket [lindex $msg 1]]
-					if {[eof $socket]} {unset socket; $con connection_lost}
-				}
-				PortalSuspended {
-					incr rowcount	$batchsize
-				}
-				CommandComplete {
-					set rest	[lindex $msg 1]
-					#::pgwire::log notice "Got CommandComplete: \"$rest\""
-					switch -exact -- [lindex $rest 0] {
-						SAVEPOINT -
-						RELEASE {}
-						default {
-							incr rowcount	[lindex $rest end]
-						}
+		lassign [portal nextbatch] outcome details batch_datarows
+		lappend datarows	{*}$batch_datarows
+		switch -exact -- $outcome {
+			PortalSuspended	{incr rowcount $details}
+			CommandComplete {
+				#::pgwire::log notice "Got CommandComplete: \"$details\""
+				switch -exact -- [lindex $details 0] {
+					SAVEPOINT -
+					RELEASE {}
+					default {
+						incr rowcount	[lindex $details end]
 					}
-					set open		0
 				}
-				finished {
-					break
-				}
-				default {error "Unexpected msg \"$msg\" from portal coroutine"}
+				set open		0
 			}
 		}
 	}
@@ -659,29 +559,23 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		] {
 			upvar 1 $rowvar row
 
-			if {[llength $rowdata] == 0} {
+			if {[llength $datarows] == 0} {
 				#::pgwire::log notice "nextdict out of data, open: $open"
 				if {$open} {
 					my _read_next_batch
 				}
 				# Re-check $open here again, _read_next_batch may have changed it
-				if {!$open && [llength $rowdata] == 0} {
+				if {!$open && [llength $datarows] == 0} {
 					#::pgwire::log notice "portal closed, returning 0"
 					return 0
 				}
 			}
 
-			set rowdata	[lassign $rowdata[unset rowdata] data]
-			#::pgwire::log notice "Popped data: [string length $data], [llength $rowdata] rows remain"
-			if {[llength $rowdata] == 0 && $open} {
-				#::pgwire::log notice "Drained waiting batch, still open"
-				# Dispatch this here to hide some of the latency in going to the server while our caller processes this row
-				lassign [coroutine [namespace current]::portal apply $execute_lambda $socket [self] $batchsize 0 {}] \
-					columns rformats c_types
-			}
+			set datarows	[lassign $datarows[unset datarows] data]
+			#::pgwire::log notice "Popped data: [string length $data], [llength $datarows] rows remain"
 
 			# makerow_start
-			set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding %format%s]
+			set row	[::pgwire::c_makerow $data $c_types $tcl_encoding %format%s]
 			# makerow_end
 			return 1
 		}]

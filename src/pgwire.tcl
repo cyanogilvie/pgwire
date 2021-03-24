@@ -1,6 +1,9 @@
 package require Thread
 
-set block_accelerators	[info exists ::pgwire::block_accelerators]
+set _pgwire_block_accelerators	[info exists ::pgwire::block_accelerators]
+if {[info exists ::pgwire::default_batchsize]} {
+	set _pgwire_default_batchsize	$::pgwire::default_batchsize
+}
 
 if {[info object isa object ::pgwire]} {
 	::pgwire destroy
@@ -145,43 +148,199 @@ namespace eval ::pgwire { #<<<
 
 		#>>>
 	}
-}
 
-if {$block_accelerators} {
-	namespace eval ::pgwire {variable block_accelerators 1}
-}
-
-#>>>
-
-set ::pgwire::accelerators	0
-if {!$block_accelerators} {
-if 1 {
-try {
-	package require critcl
-} on ok ver {
-	#::pgwire::log notice "Have critcl $ver"
-	# With a little help from my friends (c) <<<
-	if {[critcl::compiling]} {
-		#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
-		#critcl::cheaders -I/path/to/headers/
-		#critcl::tcl [info tclversion]
-		critcl::tcl 8.6
-		#critcl::debug memory
-		critcl::debug symbols
-		critcl::cflags -O2 -g
-		#critcl::cflags -O3 -march=native
-		critcl::ccode {
-			#include <byteswap.h>
-			#include <stdint.h>
-			#include <string.h>
+	# accel_ops: generate c code for each combination of type, format and null handling, and a function "compile_ops" that takes a Tcl list of ops and populates an array of addresses to those op functions <<<
+	proc build_ops {format c_types} { #<<<
+		lmap {column type} $c_types {
+			return -level 0 op_${type}_${format}
 		}
-		critcl::ccommand ::pgwire::c_makerow {cdata interp objc objv} { //<<<
+	}
+
+	#>>>
+	set accel_ops	[apply {{} {
+		set res	{}
+
+		set opargs	{const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], struct interp_cx* l}
+		append res "typedef void (col_op)($opargs);\n"
+
+		set opnames	{}
+		foreach {format add_column_key handle_null} {
+			lists {
+			} {
+				val = l->lit[PGWIRE_LIT_BLANK];
+			}
+
+			dicts {
+				rowv[c->rs++] = c->cols[colnum];
+			} {
+				return;
+			}
+
+			dicts_no_nulls {
+				rowv[c->rs++] = c->cols[colnum];
+			} {
+				val = l->lit[PGWIRE_LIT_BLANK];
+			}
+		} { 
+			foreach {type makeval} {
+				bool	{
+					// TODO: check that this is in fact 1 byte
+					val = l->lit[(*data == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE];
+				}
+				int1	{val = Tcl_NewIntObj(*(char*)(*data));}
+				int2	{val = Tcl_NewIntObj(bswap_16(*(int16_t*)(*data)));}
+				int4	{val = Tcl_NewIntObj(bswap_32(*(int32_t*)(*data)));}
+				int8	{val = Tcl_NewIntObj(bswap_64(*(int64_t*)(*data)));}
+				bytea	{val = Tcl_NewByteArrayObj(*data, collen);}
+				float4	{
+					{
+						char buf[4];
+
+						*(uint32_t*)buf = bswap_32(*(uint32_t*)(*data));
+						val = Tcl_NewDoubleObj(*(float*)buf);
+					}
+				}
+				float8 {
+					{
+						char buf[8];
+
+						*(uint64_t*)buf = bswap_64(*(uint64_t*)(*data));
+						val = Tcl_NewDoubleObj(*(double*)buf);
+					}
+				}
+				text {
+					{
+						Tcl_DString		utf8;
+
+						if (collen == 0) {
+							val = l->lit[PGWIRE_LIT_BLANK];
+						} else {
+							Tcl_DStringInit(&utf8);
+							Tcl_ExternalToUtfDString(c->encoding, *data, collen, &utf8);
+							val = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8));
+							Tcl_DStringFree(&utf8);
+						}
+					}
+				}
+			} {
+				set opname	op_${type}_${format}
+				lappend opnames	$opname
+				append res [string map [list \
+					%format%			$format \
+					%handle_null%		$handle_null \
+					%add_column_key%	$add_column_key \
+					%makeval%			$makeval \
+					%opname%			$opname \
+					%opargs%			$opargs \
+				] {
+					static void %opname%(%opargs%) //<<<
+					{
+						Tcl_Obj*	val;
+
+						if (collen != -1) {
+							%makeval%
+							*data += collen;
+						} else {
+							%handle_null%
+						}
+
+						%add_column_key%
+						rowv[c->rs++] = val;
+					}
+
+					//>>>
+				}]
+			}
+		}
+
+		set opname_strings	[join [lmap opname $opnames {
+			format {"%s"} $opname
+		}] {,
+	  				}]
+		set opname_addrs	[join [lmap opname $opnames {format %s $opname}] {,
+					}]
+		append res [string map [list \
+			%opname_strings%	$opname_strings \
+			%opname_addrs%		$opname_addrs \
+		] {
+			int compile_ops(Tcl_Interp* interp, Tcl_Obj* ops, col_op* opv[])
+			{
+				int			retcode = TCL_OK;
+				Tcl_Obj**	ov = NULL;
+				int			oc;
+				static const char* opnames[] = {
+					%opname_strings%,
+					(char*)NULL
+				};
+				col_op*	opaddr[] = {
+					%opname_addrs%
+				};
+				int opidx, i, opi = 0;
+
+				if (TCL_OK != (retcode = Tcl_ListObjGetElements(interp, ops, &oc, &ov)))
+					goto done;
+
+				for (i=0; i<oc; i++) {
+					if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, ov[i], opnames, "op", TCL_EXACT, &opidx)))
+						goto done;
+
+					opv[opi++] = opaddr[opidx];
+				}
+
+done:
+				return retcode;
+			}
+		}]
+
+		set res
+	}}]
+	#>>>
+	# C code <<<
+	set c_code	[string map [list \
+		%accel_ops%	$::pgwire::accel_ops \
+	] {
+		#include <byteswap.h>
+		#include <stdint.h>
+		#include <string.h>
+
+		struct column_cx {
+			Tcl_Encoding	encoding;
+			int				rs;
+			Tcl_Obj**		cols;
+
+			Tcl_Obj*		nullobj;
+			Tcl_Obj*		blankobj;
+		};
+
+		enum {
+			PGWIRE_LIT_BLANK,
+			PGWIRE_LIT_ONE,
+			PGWIRE_LIT_ZERO,
+			PGWIRE_LIT_TRUE,
+			PGWIRE_LIT_FALSE,
+
+			PGWIRE_LIT_SIZE
+		};
+		const char* lit_vals[] = {
+			"",
+			"1",
+			"0",
+			"1",
+			"0"
+		};
+
+		struct interp_cx {
+			Tcl_Obj*	lit[PGWIRE_LIT_SIZE];
+		};
+
+		%accel_ops%
+
+		int c_makerow(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
+		{
 			const char* restrict		data = NULL;
 			int							data_len;
 			Tcl_Obj**					c_types = NULL;
 			int							c_types_len;
-			const uint16_t*	restrict	rformats = NULL;
-			int							rformats_len;
 			Tcl_Encoding				encoding;
 			int							i;
 			const char* restrict		p = NULL;
@@ -234,8 +393,8 @@ try {
 				FORMAT_DICTS_NO_NULLS
 			};
 
-			if (objc != 6) {
-				Tcl_WrongNumArgs(interp, 1, objv, "data c_types rformats tcl_encoding format");
+			if (objc != 5) {
+				Tcl_WrongNumArgs(interp, 1, objv, "data c_types tcl_encoding format");
 				return TCL_ERROR;
 			}
 
@@ -243,19 +402,13 @@ try {
 			e = p + data_len;
 			if (Tcl_ListObjGetElements(interp, objv[2], &c_types_len, &c_types) != TCL_OK)
 				return TCL_ERROR;
-			rformats = (const uint16_t* restrict)Tcl_GetByteArrayFromObj(objv[3], &rformats_len);
-			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
+			if (Tcl_GetEncodingFromObj(interp, objv[3], &encoding) != TCL_OK)
 				return TCL_ERROR;
-			if (Tcl_GetIndexFromObj(interp, objv[5], formats, "format", TCL_EXACT, &format) != TCL_OK)
+			if (Tcl_GetIndexFromObj(interp, objv[4], formats, "format", TCL_EXACT, &format) != TCL_OK)
 				return TCL_ERROR;
 
 			if (c_types_len % 2 != 0) {
 				Tcl_SetObjResult(interp, Tcl_ObjPrintf("c_types must be an even number of elements"));
-				return TCL_ERROR;
-			}
-
-			if (rformats_len-2 != c_types_len) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("rformats must be two bytes long for each column, plus 2 bytes, have %d for %d columns", rformats_len, c_types_len/2));
 				return TCL_ERROR;
 			}
 
@@ -311,76 +464,63 @@ try {
 						Tcl_IncrRefCount(rowv[rs++] = c_types[i]);
 					}
 
-					/* rformats[c] is byteswapped (big endian), but 0 is still 0 in either byte order */
-					if (rformats[c] == 0) {
-						/* Text */
-						Tcl_DString		utf8;
+					if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, c_types[i+1], types, "type", TCL_EXACT, &type_idx)))
+						goto done;
 
-						Tcl_DStringInit(&utf8);
+					switch (type_idx) {
+						case TYPE_BOOL:
+							// TODO: check that this is in fact 1 byte
+							// TODO: instead of Tcl_NewBooleanObj, ref a static true or false obj?
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewBooleanObj(*p != 0));
+							break;
+						case TYPE_INT1:
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(*p));	// Signed?
+							break;
+						case TYPE_SMALLINT:
+						case TYPE_INT2:
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_16(*(int16_t*)p)));	// Signed?
+							break;
+						case TYPE_INT4:
+						case TYPE_INTEGER:
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_32(*(int32_t*)p)));	// Signed?
+							break;
+						case TYPE_BIGINT:
+						case TYPE_INT8:
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_64(*(int64_t*)p)));	// Signed?
+							break;
+						case TYPE_BYTEA:
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj(p, collen));
+							break;
+						case TYPE_FLOAT4:
+							{
+								char buf[4];
+								*(int32_t*)buf = bswap_32(*(int32_t*)p);
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(float*)buf));
+							}
+							break;
+						case TYPE_FLOAT8:
+							{
+								char buf[8];
+								*(int64_t*)buf = bswap_64(*(int64_t*)p);
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(double*)buf));
+							}
+							break;
+						case TYPE_VARCHAR:
+						case TYPE_TEXT:
+							{
+								Tcl_DString		utf8;
 
-						Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
-						Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
-						Tcl_DStringFree(&utf8);
-					} else {
-						/* Binary */
-						if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, c_types[i+1], types, "type", TCL_EXACT, &type_idx)))
+								Tcl_DStringInit(&utf8);
+
+								Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
+								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
+								Tcl_DStringFree(&utf8);
+							}
+							break;
+						default:
+							Tcl_SetObjResult(interp, Tcl_ObjPrintf("Unrecognised type \"%s\" for column \"%s\"", Tcl_GetString(c_types[i+1]), Tcl_GetString(c_types[i])));
+							retcode = TCL_ERROR;
 							goto done;
-
-						switch (type_idx) {
-							case TYPE_BOOL:
-								// TODO: check that this is in fact 1 byte
-								// TODO: instead of Tcl_NewBooleanObj, ref a static true or false obj?
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewBooleanObj(*p != 0));
-								break;
-							case TYPE_INT1:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(*p));	// Signed?
-								break;
-							case TYPE_SMALLINT:
-							case TYPE_INT2:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_16(*(uint16_t*)p)));	// Signed?
-								break;
-							case TYPE_INT4:
-							case TYPE_INTEGER:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_32(*(int32_t*)p)));	// Signed?
-								break;
-							case TYPE_BIGINT:
-							case TYPE_INT8:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_64(*(uint64_t*)p)));	// Signed?
-								break;
-							case TYPE_BYTEA:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj(p, collen));
-								break;
-							case TYPE_FLOAT4:
-								{
-									char buf[4];
-									*(uint32_t*)buf = bswap_32(*(uint32_t*)p);
-									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(float*)buf));
-								}
-								break;
-							case TYPE_FLOAT8:
-								{
-									char buf[8];
-									*(uint64_t*)buf = bswap_64(*(uint64_t*)p);
-									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(double*)buf));
-								}
-								break;
-							case TYPE_VARCHAR:
-							case TYPE_TEXT:
-								{
-									Tcl_DString		utf8;
-
-									Tcl_DStringInit(&utf8);
-
-									Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
-									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
-									Tcl_DStringFree(&utf8);
-								}
-								break;
-							default:
-								Tcl_SetObjResult(interp, Tcl_ObjPrintf("Unrecognised type \"%s\" for column \"%s\"", Tcl_GetString(c_types[i+1]), Tcl_GetString(c_types[i])));
-								retcode = TCL_ERROR;
-								goto done;
-						}
 					}
 					p += collen;
 				}
@@ -403,265 +543,383 @@ done:
 				return retcode;
 			}
 		}
-		#>>>
-
-		# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
-		critcl::load
-	}
-	# With a little help from my friends (c) >>>
-	set ::pgwire::accelerators	1
-}
-} else {
-try {
-	package require tcc4tcl
-} on ok ver {
-	::pgwire::log notice "Have tcc4tcl $ver"
-	set cc	[tcc4tcl::new]
-	# With a little help from my friends (c) <<<
-	#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
-	$cc add_include_path /usr/include
-	$cc ccode {
-		#include <byteswap.h>
-		#include <stdint.h>
-		#include <string.h>
-
-		int c_makerow(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
+		//>>>
+		void free_interp_cx(ClientData cdata, Tcl_Interp* interp) //<<<
 		{
-			const char* restrict		data = NULL;
-			int							data_len;
-			Tcl_Obj**					c_types;
-			int							c_types_len;
-			const uint16_t*	restrict	rformats = NULL;
-			int							rformats_len;
-			Tcl_Encoding				encoding;
-			int							i;
-			const char* restrict		p = NULL;
-			const char* restrict		e = NULL;
-			uint16_t					colcount;
-			Tcl_Obj*					row = NULL;
-			int							retcode = TCL_OK;
-			static const char* types[] = {
-				"bool",
-				"int1",
-				"smallint",
-				"int2",
-				"int4",
-				"integer",
-				"bigint",
-				"int8",
-				"bytea",
-				"float4",
-				"float8",
-				"varchar",
-				"text",
-				(char*)NULL
-			};
-			int type_idx;
-			enum {
-				TYPE_BOOL,
-				TYPE_INT1,
-				TYPE_SMALLINT,
-				TYPE_INT2,
-				TYPE_INT4,
-				TYPE_INTEGER,
-				TYPE_BIGINT,
-				TYPE_INT8,
-				TYPE_BYTEA,
-				TYPE_FLOAT4,
-				TYPE_FLOAT8,
-				TYPE_VARCHAR,
-				TYPE_TEXT
-			};
-			static const char* formats[] = {
-				"dicts",
-				"lists",
-				(char*)NULL
-			};
-			int format;
-			enum {
-				FORMAT_DICTS,
-				FORMAT_LISTS
-			};
+			struct interp_cx*	l = (struct interp_cx*)cdata;
+			int					i;
 
-			if (objc != 6) {
-				Tcl_WrongNumArgs(interp, 1, objv, "data c_types rformats tcl_encoding format");
+			if (l) {
+				for (i=0; i<PGWIRE_LIT_SIZE; i++) {
+					if (l->lit[i]) {
+						Tcl_DecrRefCount(l->lit[i]);
+						l->lit[i] = NULL;
+					}
+				}
+
+				ckfree(l); l = NULL;
+			}
+		}
+
+		//>>>
+		struct interp_cx* get_interp_cx(Tcl_Interp* interp) //<<<
+		{
+			struct interp_cx*	l = Tcl_GetAssocData(interp, "pgwire", NULL);
+			int					i;
+
+			if (l == NULL) {
+				l = ckalloc(sizeof *l);
+				for (i=0; i<PGWIRE_LIT_SIZE; i++)
+					Tcl_IncrRefCount(l->lit[i] = Tcl_NewStringObj(lit_vals[i], -1));
+				Tcl_SetAssocData(interp, "pgwire", free_interp_cx, l);
+			}
+
+			return l;
+		}
+
+		//>>>
+		int c_foreach_batch(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
+		{
+			int					retcode = TCL_OK;
+			Tcl_Obj**			datarowv = NULL;
+			int					datarowc;
+			Tcl_Obj*			script = NULL;
+			Tcl_Obj**			colv = NULL;
+			int					colc;
+			Tcl_Obj*			row = NULL;
+			struct interp_cx*	l = get_interp_cx(interp);
+			Tcl_Obj*			rowvar = NULL;
+			Tcl_Encoding		encoding;
+
+			if (objc != 7) {
+				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script");
 				return TCL_ERROR;
 			}
 
-			p = data = Tcl_GetByteArrayFromObj(objv[1], &data_len);
-			e = p + data_len;
-			if (Tcl_ListObjGetElements(interp, objv[2], &c_types_len, &c_types) != TCL_OK)
+			rowvar = objv[1];
+
+			if (Tcl_ListObjGetElements(interp, objv[3], &colc, &colv) != TCL_OK)
 				return TCL_ERROR;
-			rformats = (const uint16_t* restrict)Tcl_GetByteArrayFromObj(objv[3], &rformats_len);
 			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
 				return TCL_ERROR;
-			if (Tcl_GetIndexFromObj(interp, objv[5], formats, "format", TCL_EXACT, &format) != TCL_OK)
+			if (Tcl_ListObjGetElements(interp, objv[5], &datarowc, &datarowv) != TCL_OK)
 				return TCL_ERROR;
-
-			if (c_types_len % 2 != 0) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("c_types must be an even number of elements"));
-				return TCL_ERROR;
-			}
-
-			if (rformats_len-2 != c_types_len) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("rformats must be two bytes long for each column, plus 2 bytes, have %d for %d columns", rformats_len, c_types_len/2));
-				return TCL_ERROR;
-			}
-
-			if (data_len < 4) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short"));
-				return TCL_ERROR;
-			}
-
-			colcount = bswap_16(*(uint16_t*)p); p+=2;
-			if (colcount != c_types_len/2) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
-				return TCL_ERROR;
-			}
+			Tcl_IncrRefCount(script = objv[6]);
 
 			{
-				const int	rslots = colcount * (format == FORMAT_LISTS ? 1 : 2);
-				Tcl_Obj**	rowv = NULL;
-				int			c;		/* col num */
-				int			rs;		/* rowv slot */
-				Tcl_Obj*	nullobj = NULL;
+				const int			colcount = colc;
+				col_op*				ops[colcount];		// Is the concern about stack consumption here for a very large number of columns valid?
+				Tcl_Obj*			rowv[colcount*2];	// *2: dict format can use up to 2 slots per col
+				int					r;
+				struct column_cx	col;
 
-				rowv = ckalloc(sizeof(Tcl_Obj*)*rslots);
+				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops)))
+					goto done;
 
-				Tcl_IncrRefCount(nullobj = Tcl_NewStringObj("", 0));	/* TODO: store a static null obj in an interp AssocData */
+				col.encoding = encoding;
+				col.cols = colv;
 
-				/* Zero the pointers, so that we don't leak partial rows of Tcl_Objs on error */
-				memset(rowv, 0, sizeof(Tcl_Obj*) * rslots);
+				for (r=0; r<datarowc; r++) {
+					int				data_len, c;
+					unsigned char*	data = Tcl_GetByteArrayFromObj(datarowv[r], &data_len);
+					unsigned char*	p = data+2;
 
-				for (i=0, c=1, rs=0; i<c_types_len; i+=2, c++) {
-					const int collen = bswap_32(*(uint32_t*)p);
+					col.rs = 0;
 
-					p += 4;
+					//fprintf(stderr, "data_len: %d\n", data_len);
+					for (c=0; c<colcount; c++) {
+						const int	collen = bswap_32(*(int32_t*)p);
 
-					if (collen == -1) {
-						/* NULL */
-						if (format == FORMAT_LISTS)
-							Tcl_IncrRefCount(rowv[rs++] = nullobj);
-						continue;
+						//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
+						p += 4;
+						ops[c](c, collen, &p, &col, rowv, l);
 					}
 
-					if (e-p < collen) {
-						Tcl_SetObjResult(interp, Tcl_ObjPrintf("Insufficient data for column %d: need %d but %ld remain", i/2, collen, e-p));
+					if (row) Tcl_DecrRefCount(row);
+					Tcl_IncrRefCount(row = Tcl_NewListObj(col.rs, rowv));
+
+					if (NULL == Tcl_ObjSetVar2(interp, rowvar, NULL, row, TCL_LEAVE_ERR_MSG)) {
 						retcode = TCL_ERROR;
 						goto done;
 					}
 
-					if (format == FORMAT_DICTS) {
-						Tcl_IncrRefCount(rowv[rs++] = c_types[i]);
-					}
-
-					/* rformats[c] is byteswapped (big endian), but 0 is still 0 in either byte order */
-					if (rformats[c] == 0) {
-						/* Text */
-						Tcl_DString		utf8;
-
-						Tcl_DStringInit(&utf8);
-
-						Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
-						Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
-						Tcl_DStringFree(&utf8);
-					} else {
-						/* Binary */
-						if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, c_types[i+1], types, "type", TCL_EXACT, &type_idx)))
+					//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(row), Tcl_GetString(script));
+					retcode = Tcl_EvalObjEx(interp, script, 0);
+					switch (retcode) {
+						case TCL_OK:
+							break;
+						case TCL_CONTINUE:
+							retcode = TCL_OK;
+							continue;
+						default:
 							goto done;
-
-						switch (type_idx) {
-							case TYPE_BOOL:
-								// TODO: check that this is in fact 1 byte
-								// TODO: instead of Tcl_NewBooleanObj, ref a static true or false obj?
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewBooleanObj(*p != 0));
-								break;
-							case TYPE_INT1:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(*p));	// Signed?
-								break;
-							case TYPE_SMALLINT:
-							case TYPE_INT2:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_16(*(uint16_t*)p)));	// Signed?
-								break;
-							case TYPE_INT4:
-							case TYPE_INTEGER:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_32(*(int32_t*)p)));	// Signed?
-								break;
-							case TYPE_BIGINT:
-							case TYPE_INT8:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_64(*(uint64_t*)p)));	// Signed?
-								break;
-							case TYPE_BYTEA:
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj(p, collen));
-								break;
-							case TYPE_FLOAT4:
-								{
-									char buf[4];
-									*(uint32_t*)buf = bswap_32(*(uint32_t*)p);
-									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(float*)buf));
-								}
-								break;
-							case TYPE_FLOAT8:
-								{
-									char buf[8];
-									*(uint64_t*)buf = bswap_64(*(uint64_t*)p);
-									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(double*)buf));
-								}
-								break;
-							case TYPE_VARCHAR:
-							case TYPE_TEXT:
-								{
-									Tcl_DString		utf8;
-
-									Tcl_DStringInit(&utf8);
-
-									Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
-									Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
-									Tcl_DStringFree(&utf8);
-								}
-								break;
-							default:
-								Tcl_SetObjResult(interp, Tcl_ObjPrintf("Unrecognised type \"%s\" for column \"%s\"", Tcl_GetString(c_types[i+1]), Tcl_GetString(c_types[i])));
-								retcode = TCL_ERROR;
-								goto done;
-						}
-					}
-					p += collen;
-				}
-
-				Tcl_SetObjResult(interp, Tcl_NewListObj(rs, rowv));
-
-	done:
-				while (--rs >= 0) {
-					if (rowv[rs] != NULL) {
-						Tcl_DecrRefCount(rowv[rs]);
-						rowv[rs] = NULL;
 					}
 				}
-				if (nullobj) {
-					Tcl_DecrRefCount(nullobj); nullobj = NULL;
-				}
-				if (rowv) {
-					ckfree(rowv); rowv = NULL;
-				}
-				return retcode;
 			}
+
+
+			/*
+			// per datarow:
+
+			if (data_len < 4) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
+				retcode = TCL_ERROR;
+				goto done;
+			}
+
+			colcount = bswap_16(*(int16_t*)p); p+=2;
+			if (colcount != c_types_len/2) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+				retcode = TCL_ERROR;
+				goto done;
+			}
+			*/
+
+done:
+			if (script) {
+				Tcl_DecrRefCount(script); script = NULL;
+			}
+			if (row) {
+				Tcl_DecrRefCount(row); row = NULL;
+			}
+			return retcode;
 		}
+
 		//>>>
+		int c_allrows_batch(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
+		{
+			int					retcode = TCL_OK;
+			Tcl_Obj**			datarowv = NULL;
+			int					datarowc;
+			Tcl_Obj**			colv = NULL;
+			int					colc;
+			struct interp_cx*	l = get_interp_cx(interp);
+			Tcl_Encoding		encoding;
+			Tcl_Obj*			rows = NULL;
+
+			if (objc != 6) {
+				Tcl_WrongNumArgs(interp, 1, objv, "rowsvar ops columns tcl_encoding datarows");
+				return TCL_ERROR;
+			}
+
+			if (Tcl_ListObjGetElements(interp, objv[3], &colc, &colv) != TCL_OK)
+				return TCL_ERROR;
+			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
+				return TCL_ERROR;
+			if (Tcl_ListObjGetElements(interp, objv[5], &datarowc, &datarowv) != TCL_OK)
+				return TCL_ERROR;
+			if (datarowc == 0)
+				return TCL_OK;
+
+			/* Retrieve the existing value from $rowsvar and ensure it's unshared */
+			rows = Tcl_ObjGetVar2(interp, objv[1], NULL, 0);
+			if (rows == NULL) {
+				rows = Tcl_NewListObj(0, NULL);
+			} else if (Tcl_IsShared(rows)) {
+				rows = Tcl_DuplicateObj(rows);
+			}
+
+			{
+				const int			colcount = colc;
+				col_op*				ops[colcount];		// Is the concern about stack consumption here for a very large number of columns valid?
+				Tcl_Obj*			rowv[colcount*2];	// *2: dict format can use up to 2 slots per col
+				int					r;
+				struct column_cx	col;
+
+				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops)))
+					goto done;
+
+				col.encoding = encoding;
+				col.cols = colv;
+
+				for (r=0; r<datarowc; r++) {
+					int				data_len, c;
+					unsigned char*	data = Tcl_GetByteArrayFromObj(datarowv[r], &data_len);
+					unsigned char*	p = data+2;
+
+					col.rs = 0;
+
+					for (c=0; c<colcount; c++) {
+						const int	collen = bswap_32(*(int32_t*)p);
+
+						p += 4;
+						ops[c](c, collen, &p, &col, rowv, l);
+					}
+
+					if (TCL_OK != (retcode = Tcl_ListObjAppendElement(interp, rows, Tcl_NewListObj(col.rs, rowv))))
+						goto done;
+				}
+			}
+
+
+			/*
+			// per datarow:
+
+			if (data_len < 4) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
+				retcode = TCL_ERROR;
+				goto done;
+			}
+
+			colcount = bswap_16(*(int16_t*)p); p+=2;
+			if (colcount != c_types_len/2) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+				retcode = TCL_ERROR;
+				goto done;
+			}
+			*/
+
+			Tcl_SetObjResult(interp, rows);
+
+			if (NULL == Tcl_ObjSetVar2(interp, objv[1], NULL, rows, TCL_LEAVE_ERR_MSG)) {
+				retcode = TCL_ERROR;
+				goto done;
+			}
+
+done:
+			if (rows) {
+				/* rows may have a 0 refcount, if we created a fresh obj, or duplicated one, and didn't make it to the end.  In that case we need to free it to avoid a leak */
+				Tcl_IncrRefCount(rows);
+				Tcl_DecrRefCount(rows); rows = NULL;
+			}
+			return retcode;
+		}
+
+		//>>>
+		int c_makerow2(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
+		{
+			int					retcode = TCL_OK;
+			Tcl_Obj**			colv = NULL;
+			int					colc;
+			struct interp_cx*	l = get_interp_cx(interp);
+			Tcl_Encoding		encoding;
+			unsigned char*		data = NULL;
+			int					data_len;
+
+			if (objc != 5) {
+				Tcl_WrongNumArgs(interp, 1, objv, "ops columns tcl_encoding datarow");
+				return TCL_ERROR;
+			}
+
+			if (Tcl_ListObjGetElements(interp, objv[2], &colc, &colv) != TCL_OK)
+				return TCL_ERROR;
+			if (Tcl_GetEncodingFromObj(interp, objv[3], &encoding) != TCL_OK)
+				return TCL_ERROR;
+			data = Tcl_GetByteArrayFromObj(objv[4], &data_len);
+
+			{
+				const int			colcount = colc;
+				col_op*				ops[colcount];		// Is the concern about stack consumption here for a very large number of columns valid?
+				Tcl_Obj*			rowv[colcount*2];	// *2: dict format can use up to 2 slots per col
+				int					r;
+				struct column_cx	col;
+				int					c;
+				unsigned char*		p = data+2;
+
+				if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops)))
+					goto done;
+
+				col.encoding = encoding;
+				col.cols = colv;
+				col.rs = 0;
+
+				//fprintf(stderr, "data_len: %d\n", data_len);
+				for (c=0; c<colcount; c++) {
+					const int	collen = bswap_32(*(int32_t*)p);
+
+					//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
+					p += 4;
+					ops[c](c, collen, &p, &col, rowv, l);
+				}
+
+				Tcl_SetObjResult(interp, Tcl_NewListObj(col.rs, rowv));
+			}
+
+done:
+			return retcode;
+		}
+
+		//>>>
+	}]
+	# C code >>>
+	set lineno	0
+	#::pgwire::log notice "c code:\n[join [lmap line [split $c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+}
+#>>>
+
+if {$_pgwire_block_accelerators} {
+	namespace eval ::pgwire {variable block_accelerators 1}
+}
+unset _pgwire_block_accelerators
+
+if {[info exists _pgwire_default_batchsize]} {
+	namespace eval ::pgwire [list variable default_batchsize $_pgwire_default_batchsize]
+	unset _pgwire_default_batchsize
+} else {
+	namespace eval ::pgwire {variable default_batchsize 1000}
+}
+
+#>>>
+
+set ::pgwire::accelerators	0
+if {![info exists ::pgwire::block_accelerators]} {
+	try {
+		package require critcl 3
+	} on error {} {
+	} on ok ver {
+		#::pgwire::log notice "Have critcl $ver"
+		# With a little help from my friends (c) <<<
+		if {[critcl::compiling]} {
+			#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
+			#critcl::cheaders -I/path/to/headers/
+			#critcl::tcl [info tclversion]
+			critcl::tcl 8.6
+			#critcl::debug memory
+			critcl::debug symbols
+			critcl::cflags -O2 -g
+			#critcl::cflags -O3 -march=native
+			critcl::ccode $::pgwire::c_code;	set baseline	[dict get [info frame 0] line]; set lineno	[expr {$baseline-1}]
+			#::pgwire::log notice "c code:\n[join [lmap line [split $::pgwire::c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+			critcl::ccommand ::pgwire::c_makerow		c_makerow
+			critcl::ccommand ::pgwire::c_makerow2		c_makerow2
+			critcl::ccommand ::pgwire::c_foreach_batch	c_foreach_batch
+			critcl::ccommand ::pgwire::c_allrows_batch	c_allrows_batch
+
+			# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
+			critcl::load
+		}
+		# With a little help from my friends (c) >>>
+		set ::pgwire::accelerators	1
 	}
+	if {!$::pgwire::accelerators} {
+		try {
+			package require tcc4tcl
+		} on ok ver {
+			::pgwire::log notice "Have tcc4tcl $ver"
+			set cc	[tcc4tcl::new]
+			# With a little help from my friends (c) <<<
+			#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
+			$cc add_include_path /usr/include
+			$cc ccode $::pgwire::c_code
 
-	#::pgwire::log notice "tcc c code: [$cc code]"
+			$cc linktclcommand ::pgwire::c_makerow       c_makerow
+			$cc linktclcommand ::pgwire::c_makerow2      c_makerow2
+			$cc linktclcommand ::pgwire::c_foreach_batch c_foreach_batch
+			$cc linktclcommand ::pgwire::c_allrows_batch c_allrows_batch
 
-	$cc linktclcommand ::pgwire::c_makerow c_makerow
+			try {
+				$cc go
+			} on error {errmsg options} {
+				::pgwire::log error "Error compiling [dict get $options -errorinfo]"
+				set lineno	0
+				::pgwire::log notice "tcc c code:\n[join [lmap line [split [$cc code] \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+				return -options $options $errmsg
+			}
 
-	::pgwire::log notice "build tcc accelerators: [timerate {
-		$cc go
-	} 1 1]"
-
-	# With a little help from my friends (c) >>>
-	set ::pgwire::accelerators	1
-}
-}
+			# With a little help from my friends (c) >>>
+			set ::pgwire::accelerators	1
+		}
+	}
 } else {
 	puts stderr "Not using accelerators"
 }
@@ -686,6 +944,8 @@ oo::class create ::pgwire {
 
 		busy_sql
 		sync_outstanding
+		pending_rowbuffer
+		preserved
 	}
 
 	constructor args { #<<<
@@ -812,6 +1072,10 @@ oo::class create ::pgwire {
 		}
 		# Const lookups >>>
 
+		my variable makerow_cache
+		set makerow_cache	{}
+		set preserved		{}
+
 		switch -exact [llength $args] {
 			0 {
 			}
@@ -892,6 +1156,18 @@ oo::class create ::pgwire {
 		if {![info exists socket] || $socket ni [chan names]} {
 			error "Not connected"
 		}
+
+		# TEMP: close all statements in prepared_old (extended_query method) <<<
+		my variable prepared_old
+		if {[info exists prepared_old]} {
+			dict for {sql info} $prepared_old {
+				set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
+				puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
+				incr expired
+				dict unset prepared_old $sql
+			}
+		}
+		# TEMP: close all statements in prepared_old (extended_query method) >>>
 
 		#package require Thread
 		thread::detach $socket
@@ -1429,6 +1705,11 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method close_portal portal_name { #<<<
+		my Close P $portal_name
+	}
+
+	#>>>
 	method prepare_statement {stmt_name sql} { #<<<
 		try {
 			lassign [my tokenize $sql] \
@@ -1867,6 +2148,7 @@ oo::class create ::pgwire {
 	method read_to_sync {} { #<<<
 		while 1 {
 			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			#::pgwire::log notice "read_to_sync msgtype ($msgtype)"
 			incr len -4
 			if {$msgtype eq "Z"} { # ReadyForQuery
 				if {[binary scan [read $socket $len] a transaction_status] != 1} {my connection_lost}
@@ -1877,6 +2159,7 @@ oo::class create ::pgwire {
 				my default_message_handler $msgtype $len
 			}
 		}
+		#::pgwire::log notice "read_to_sync returning transaction_status: ($transaction_status)"
 		set transaction_status
 	}
 
@@ -1961,6 +2244,21 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method preserve sql { #<<<
+		dict incr preserved $sql 1
+	}
+
+	#>>>
+	method release sql { #<<<
+		if {[dict exists $preserved $sql] && [dict get $preserved $sql] > 0} {
+			dict incr preserved $sql -1
+			if {[dict get $preserved $sql] == 0} {
+				dict unset preserved $sql
+			}
+		}
+	}
+
+	#>>>
 
 	method val str { # Quote a SQL value <<<
 		if {
@@ -1979,21 +2277,47 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method _basic_query_noresult sql { #<<<
+		set payload [encoding convertto $tcl_encoding $sql]\u0
+		puts -nonewline $socket [binary format aIa* Q [+ 4 [string length $payload]] $payload]
+		flush $socket
+		while 1 {
+			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			incr len -4
+			switch -exact -- $msgtype {
+				Z { # ReadyForQuery <<<
+					if {![binary scan [read $socket $len] a transaction_status] == 1} {my connection_lost}
+					set ready_for_query		1
+					set sync_outstanding	0
+					break
+					#>>>
+				}
+				C - T - D { # CommandComplete, RowDescription, DataRow <<<
+					set data	[read $socket $len]
+					if {[eof $socket]} {my connection_lost}
+					#>>>
+				}
+				default {my default_message_handler $msgtype $len}
+			}
+		}
+	}
+
+	#>>>
 	method begintransaction {} { #<<<
-		tailcall my extended_query begin {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+		tailcall my _basic_query_noresult begin
 	}
 
 	#>>>
 	method rollback {} { #<<<
 		if {$transaction_status ne "I"} {
-			tailcall my extended_query rollback {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+			tailcall my _basic_query_noresult rollback
 		}
 	}
 
 	#>>>
 	method commit {} { #<<<
 		if {$transaction_status ne "I"} {
-			tailcall my extended_query commit {set execute_setup {set acc {}}; set makerow {}; set on_row {}}
+			tailcall my _basic_query_noresult commit
 		}
 	}
 
@@ -2269,6 +2593,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method extended_query {sql variant_setup {max_rows_per_batch 0} args} { #<<<
+		my variable prepared_old
 		if {!$ready_for_query} {
 			error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
 		}
@@ -2281,7 +2606,7 @@ oo::class create ::pgwire {
 			}
 		}
 
-		if {![dict exists $prepared $sql]} { # Prepare statement <<<
+		if {![info exists prepared_old] || ![dict exists $prepared_old $sql]} { # Prepare statement <<<
 			package require tdbc
 			set stmt_name	[incr name_seq]
 			#::pgwire::log notice "No prepared statement, creating one called ($stmt_name)"
@@ -2291,32 +2616,32 @@ oo::class create ::pgwire {
 				compiled
 
 			if {[incr age_count] > 10} {
-				if {[dict size $prepared] > 50} {
+				if {[dict size $prepared_old] > 50} {
 					log_duration "Cache check" {
 					# Age cache <<<
 					set expired	0
 					# Pre-scan for one-offs to expire <<<
-					dict for {sql info} $prepared {
+					dict for {sql info} $prepared_old {
 						if {[dict get $info heat] == 0} {
 							set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
 							puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
 							incr expired
-							dict unset prepared $sql
+							dict unset prepared_old $sql
 						}
 					}
 					# Pre-scan for one-offs to expire >>>
-					if {[dict size $prepared] > 50} {
-						#::pgwire::log notice "Prescan expired $expired entries, [dict size $prepared] remain, aging:\n\t[join [lmap {k v} $prepared {format {%s: %3d} $k [dict get $v heat]}] \n\t]"
+					if {[dict size $prepared_old] > 50} {
+						#::pgwire::log notice "Prescan expired $expired entries, [dict size $prepared_old] remain, aging:\n\t[join [lmap {k v} $prepared_old {format {%s: %3d} $k [dict get $v heat]}] \n\t]"
 						# Age the entries that have hits <<<
-						dict for {sql info} $prepared {
+						dict for {sql info} $prepared_old {
 							set heat	[expr {[dict get $info heat] >> 1}]
 							if {$heat eq 0} {
 								set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
 								puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
 								incr expired
-								dict unset prepared $sql
+								dict unset prepared_old $sql
 							} else {
-								dict set prepared $sql heat $heat
+								dict set prepared_old $sql heat $heat
 							}
 						}
 						# Age the entries that have hits >>>
@@ -2688,7 +3013,7 @@ oo::class create ::pgwire {
 				#	- $makerow_list
 				#	- $cached
 				#	- $heat - how frequently this prepared statement has been used recently, relative to others
-				dict set prepared $sql [dict create \
+				dict set prepared_old $sql [dict create \
 					stmt_name			$stmt_name \
 					field_names			$field_names \
 					build_params		$build_params \
@@ -2715,11 +3040,11 @@ oo::class create ::pgwire {
 			#>>>
 			#>>>
 		} else { # Retrieve prepared statement <<<
-			set stmt_info	[dict get $prepared $sql]
+			set stmt_info	[dict get $prepared_old $sql]
 			dict with stmt_info {}
 			if {$heat < 128} {
 				incr heat
-				dict set prepared $sql heat $heat
+				dict set prepared_old $sql heat $heat
 			}
 			# Sets:
 			#	- $stmt_name: the name of the prepared statement (as known to the server)
@@ -2744,7 +3069,7 @@ oo::class create ::pgwire {
 					%on_datarow%	"$makerow\nif {\[eof \$socket\]} {my connection_lost}\n$on_row" \
 					%execute_setup%	$execute_setup \
 				] $execute] [self namespace]]
-				dict set prepared $sql cached $variant_setup $e
+				dict set prepared_old $sql cached $variant_setup $e
 				#writefile /tmp/e [tcl::unsupported::disassemble lambda $e]
 				#writefile /tmp/e.tcl $e
 			}
@@ -2759,7 +3084,780 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method prepare_extended_query sql { #<<<
+		set busy_sql	$sql
+
+		if {![dict exists $prepared $sql]} { # Prepare statement <<<
+			package require tdbc
+			set stmt_name	[incr name_seq]
+			#::pgwire::log notice "No prepared statement, creating one called ($stmt_name)"
+
+			lassign [my tokenize $sql] \
+				params_assigned \
+				compiled
+
+			if {[incr age_count] > 10} {
+				if {[dict size $prepared] > 50} {
+					log_duration "Cache check" {
+					# Age cache <<<
+					set expired	0
+					# Pre-scan for one-offs to expire <<<
+					dict for {sql info} $prepared {
+						if {[dict exists $preserved $sql]} continue
+						if {[dict get $info heat] == 0} {
+							set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
+							puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
+							incr expired
+							dict unset prepared $sql
+						}
+					}
+					# Pre-scan for one-offs to expire >>>
+					if {[dict size $prepared] > 50} {
+						#::pgwire::log notice "Prescan expired $expired entries, [dict size $prepared] remain, aging:\n\t[join [lmap {k v} $prepared {format {%s: %3d} $k [dict get $v heat]}] \n\t]"
+						# Age the entries that have hits <<<
+						dict for {sql info} $prepared {
+							if {[dict exists $preserved $sql]} continue
+							set heat	[expr {[dict get $info heat] >> 1}]
+							if {$heat eq 0} {
+								set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
+								puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
+								incr expired
+								dict unset prepared $sql
+							} else {
+								dict set prepared $sql heat $heat
+							}
+						}
+						# Age the entries that have hits >>>
+					}
+					# Age cache >>>
+					}
+				}
+				set age_count	0
+			}
+
+			try {
+				# Parse, to $stmt_name
+				# Describe S $stmt_name
+				# Flush
+				set parsemsg	[encoding convertto $tcl_encoding $stmt_name]\u0[encoding convertto $tcl_encoding $compiled]\u0\u0\u0
+				set describemsg	S[encoding convertto $tcl_encoding $stmt_name]\u0
+				set busy_sql	$sql
+				puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}H\u0\u0\u0\u4
+
+				flush $socket
+
+				# Parse responses <<<
+				while 1 {
+					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+					incr len -4	;# len includes itself
+					if {$msgtype eq 1} break elseif {$msgtype eq 3} {
+						# Eat any CloseComplete (3) msgs here from the cache
+						# expiries above (to save a round-trip time when
+						# expiring statements)
+						#incr expired -1
+						#::pgwire::log notice "Got CloseComplete, $expired more expected"
+					} else {
+						my default_message_handler $msgtype $len
+					}
+				}
+				#>>>
+				# Describe responses <<<
+				set field_names		{}
+				set param_desc		{}
+				while 1 {
+					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+					incr len -4	;# len includes itself
+
+					switch -exact -- $msgtype {
+						t { # ParameterDescription: compile build_params <<<
+							binary scan [read $socket $len] SI* count parameter_type_oids
+							if {[eof $socket]} {my connection_lost}
+
+							#::pgwire::log notice "ParameterDescription, $count params, type oids: $parameter_type_oids, params_assigned: ($params_assigned)"
+							set build_params	{
+								set pdesc		{}
+								set pformats	{}
+							}
+							append build_params [list set pcount [llength $parameter_type_oids]] \n
+							set build_params_vars	{}
+							set build_params_dict	{}
+
+							set param_seq	0
+							foreach oid $parameter_type_oids name [dict keys $params_assigned] {
+								set type_name	[dict get $type_oids $oid]
+
+								set encode_field	[switch -exact -- [dict get $type_oids $oid] {
+									bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
+									int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
+									smallint -
+									int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 2 $value]}}
+									int4 -
+									integer	{return -level 0 {append pformats \u0\u1; append pdesc [binary format II 4 $value]}}
+									bigint -
+									int8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IW 8 $value]}}
+									bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ia* [string length $value] $value]}}
+									float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IR 4 $value]}}
+									float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IQ 8 $value]}}
+									varchar -
+									default {
+										return -level 0 {
+											set bytes	[encoding convertto $tcl_encoding $value]
+											set bytelen	[string length $bytes]
+											append pformats \u0\u0; append pdesc [binary format Ia$bytelen $bytelen $bytes]
+										}
+									}
+								}]
+
+								append build_params_vars	[string map [list \
+									%v%				[list $name] \
+									%null%			[list [binary format I -1]] \
+									%encode_field%	$encode_field \
+								] {
+									try {
+										if {[uplevel 1 {info exists %v%}]} {
+											set value	[uplevel 1 {set %v%}]
+											%encode_field%
+										} else {
+											append pdesc	%null%
+											append pformats	\u0\u1	;# binary
+										}
+									} on error {errmsg options} {
+										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v\": $errmsg"
+									}
+								}]
+								append build_params_dict	[string map [list \
+									%v%				[list $name] \
+									%null%			[list [binary format I -1]] \
+									%encode_field%	$encode_field \
+								] {
+									try {
+										if {[dict exists $param_values %v%]} {
+											set value	[dict get $param_values %v%]
+											%encode_field%
+										} else {
+											append pdesc	%null%
+											append pformats	\u0\u1	;# binary
+										}
+									} on error {errmsg options} {
+										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v\": $errmsg"
+									}
+								}]
+								append param_desc	"# \$[incr param_seq]: $name\t$type_name\n"
+							}
+
+							append build_params "
+								if {\[info exists param_values\]} {$build_params_dict} else {$build_params_vars}
+							" \n
+							append build_params	{
+								binary format Sa*Sa* $pcount $pformats $pcount $pdesc
+							} \n
+							#>>>
+						}
+						T { # RowDescription: compile rformats and c_types <<<
+							set data	[read $socket $len]
+							if {[eof $socket]} {my connection_lost}
+
+							binary scan $data S fields_per_row
+							set i	2
+							set c_types		{}
+							set rformats	[binary format Su $fields_per_row]
+							for {set c 0} {$c < $fields_per_row} {incr c} {
+								set idx	[string first \u0 $data $i]
+								if {$idx == -1} {
+									#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
+									throw unterminated_string "No null terminator found"
+								}
+								set field_name	[string range $data $i [- $idx 1]]
+								set i	[+ $idx 1]
+
+								#binary scan $data @${i}ISISIS \
+								#		table_oid \
+								#		attrib_num \
+								#		type_oid \
+								#		data_size \
+								#		type_modifier \
+								#		format
+								#incr i 18
+								incr i 6
+								binary scan $data @${i}I type_oid
+								incr i 12
+
+								if {[dict exists $type_oids $type_oid]} {
+									set type_name	[dict get $type_oids $type_oid]
+								} else {
+									set type_name	text
+								}
+
+								switch -glob -- $type_name {
+									bool	-
+									int1	-
+									smallint -
+									int2	-
+									int4	-
+									integer	-
+									bigint	-
+									int8	-
+									bytea	-
+									float4	-
+									float8	{
+										set colfmt		\u0\u1	;# binary
+									}
+									default	{
+										set colfmt		\u0\u0	;# text
+										set type_name	text
+									}
+								}
+
+								append rformats	$colfmt
+								lappend c_types	$field_name $type_name
+							}
+
+							break
+							#>>>
+						}
+						n { # NoData <<<
+							set rformats	\u0\u0
+							set c_types		{}
+							break
+							#>>>
+						}
+						default {my default_message_handler $msgtype $len}
+					}
+				}
+				#>>>
+				set cached		{}
+				#::pgwire::log notice "execute script:\n$execute\nmakerow_vars: $makerow_vars\nmakerow_dict: $makerow_dict\nmakerow_list: $makerow_list"
+				# Results:
+				#	- $stmt_name: the name of the prepared statement (as known to the server)
+				#	- $build_params: script to run to gather the input params
+				#	- $rformats: the marshalled count and formats that we will send the input params as
+				#	- $c_types:	the result column names and the formats that they are transported as
+				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				dict set prepared $sql [set stmt_info [dict create \
+					stmt_name			$stmt_name \
+					build_params		$build_params \
+					rformats			$rformats \
+					c_types				$c_types \
+					heat				0 \
+				]]
+				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
+			} on error {errmsg options} { #<<<
+				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
+				if {[info exists socket]} {
+					if {!$sync_outstanding} {
+						puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+						flush $socket
+					}
+					my skip_to_sync
+				}
+				return -options $options $errmsg
+			}
+			#>>>
+			#>>>
+		} else { # Retrieve prepared statement <<<
+			set stmt_info	[dict get $prepared $sql]
+			dict with stmt_info {}
+			set heat	[dict get $stmt_info heat]
+			if {$heat < 128} {
+				incr heat
+				dict set prepared $sql heat $heat
+			}
+			# Sets:
+			#	- $stmt_name: the name of the prepared statement (as known to the server)
+			#	- $build_params: script to run to gather the input params
+			#	- $rformats: the marshalled count and formats that we will send the input params as
+			#	- $c_types:	the result column names and the formats that they are transported as
+			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+		}
+		#>>>
+
+		set stmt_info
+	}
+
+	#>>>
+	method _read_batch {} { #<<<
+		set datarows	{}
+
+		while 1 {
+			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			incr len -4	;# len includes itself
+			#::pgwire::log notice "_read_batch msg \"$msgtype\", len: $len"
+			if {$msgtype eq "D"} { # DataRow <<<
+				lappend datarows [read $socket $len]
+				if {[eof $socket]} {my connection_lost}
+				#>>>
+			} else {
+				switch -exact -- $msgtype {
+					C { # CommandComplete <<<
+						set data	[read $socket $len]
+						if {[eof $socket]} {my connection_lost}
+						set idx	[string first "\u0" $data]
+						if {$idx == -1} {
+							#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
+							throw unterminated_string "No null terminator found"
+						}
+						set message	[string range $data 0 [- $idx 1]]
+						return [list CommandComplete $message $datarows]
+						#>>>
+					}
+					I { # EmptyQueryResponse <<<
+						return {EmptyQueryResponse {} {}}
+						#>>>
+					}
+					s { # PortalSuspended <<<
+						return [list PortalSuspended [llength $datarows] $datarows]
+						#>>>
+					}
+					E { # ErrorResponse <<<
+						my default_message_handler $msgtype $len
+						#>>>
+					}
+					G { # CopyInResponse <<<
+						read $socket $len
+						if {[eof $socket]} {my connection_lost}
+						# Send CopyFail response
+						set message	"not supported\u0"
+						puts -nonewline $socket [binary format aIa* f [+ 4 [string length $message]] $msg 0]
+						#>>>
+					}
+					H - d - c { # CopyOutResponse / CopyData / CopyDone <<<
+						if {$len > 0} {read $socket $len}
+						if {[eof $socket]} {my connection_lost}
+						#error "CopyOutResponse not supported yet"
+						#>>>
+					}
+					default {my default_message_handler $msgtype $len}
+				}
+			}
+		}
+	}
+
+	#>>>
+	method _bind_and_execute {stmt_name portal_name rformats parameters max_rows_per_batch} { #<<<
+		set enc_stmt	[encoding convertto $tcl_encoding $stmt_name]
+
+		if {$portal_name eq ""} {
+			set enc_portal	""
+		} else {
+			set enc_portal	[encoding convertto $tcl_encoding $portal_name]
+		}
+
+		set bindmsg		$enc_portal\u0$enc_stmt\u0$parameters$rformats
+		set executemsg	$enc_portal\u0
+
+		if {$max_rows_per_batch == 0} {
+			# Simplified flow: no batches, pre-send Sync
+			# Bind statment $stmt_name, portal $portal_name
+			# Execute $max_rows_per_batch
+			# Sync
+			puts -nonewline $socket [binary format \
+				{ \
+					aIa* \
+					aIa*I \
+					a* \
+				} \
+					B [+ 4 [string length $bindmsg]] $bindmsg \
+					E [+ 8 [string length $executemsg]] $executemsg 0 \
+					S\u0\u0\u0\u4 \
+			]; set sync_outstanding	1
+		} else {
+			# Batched flow: batches into $max_rows_per_batch, defer Sync
+			# Bind statment $stmt_name, portal $portal_name
+			# Execute $max_rows_per_batch
+			# Flush
+			puts -nonewline $socket [binary format \
+				{ \
+					aIa* \
+					aIa*I \
+					a* \
+				} \
+					B [+ 4 [string length $bindmsg]] $bindmsg \
+					E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch \
+					H\u0\u0\u0\u4 \
+			]
+		}
+		flush $socket
+
+		try {
+			# Bind responses <<<
+			while 1 {
+				if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+				incr len -4	;# len includes itself
+				#if {[info exists rtt_start]} {
+				#	::pgwire::log notice "server RTT: [format %.6f [expr {([clock microseconds] - $rtt_start)/1e6}]]"
+				#}
+				if {$msgtype eq 2} break else {my default_message_handler $msgtype $len}
+			}
+			#>>>
+
+			my _read_batch
+		} on error {errmsg options} {
+			#::pgwire::log notice "error: [dict get $options -errorinfo]"
+			if {[info exists socket] && !$sync_outstanding} {
+				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				flush $socket
+			}
+			return -options $options $errmsg
+		} finally {
+			if {[info exists socket] && $sync_outstanding} {
+				my skip_to_sync
+			}
+		}
+	}
+
+	#>>>
+	method _execute {portal_name max_rows_per_batch} { #<<<
+		if {$portal_name eq ""} {
+			set enc_portal	""
+		} else {
+			set enc_portal	[encoding convertto $tcl_encoding $portal_name]
+		}
+
+		set executemsg	$enc_portal\u0
+
+		if {$max_rows_per_batch == 0} {
+			# Simplified flow: no batches, pre-send Sync
+			# Execute $max_rows_per_batch
+			# Sync
+			puts -nonewline $socket [binary format \
+				{ \
+					aIa*I \
+					a* \
+				} \
+					E [+ 8 [string length $executemsg]] $executemsg 0 \
+					S\u0\u0\u0\u4 \
+			]; set sync_outstanding	1
+		} else {
+			# Batched flow: batches into $max_rows_per_batch, defer Sync
+			# Execute $max_rows_per_batch
+			# Flush
+			puts -nonewline $socket [binary format \
+				{ \
+					aIa*I \
+					a* \
+				} \
+					E [+ 8 [string length $executemsg]] $executemsg $max_rows_per_batch \
+					H\u0\u0\u0\u4 \
+			]
+		}
+		flush $socket
+
+		try {
+			my _read_batch
+		} on error {errmsg options} {
+			if {[info exists socket] && !$sync_outstanding} {
+				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				flush $socket
+			}
+			return -options $options $errmsg
+		} finally {
+			if {[info exists socket] && $sync_outstanding} {
+				my skip_to_sync
+			}
+		}
+	}
+
+	#>>>
+	method tcl_makerow {as c_types} { #<<<
+		my variable makerow_cache
+		set key	[list $as $c_types]
+
+		if {[dict exists $makerow_cache $key]} {
+			set makerow		[dict get $makerow_cache $key script]
+		} else {
+			# Compile makerow from c_types, as <<<
+			set makerow		{}
+			#append makerow	"binary scan \$datarow S col_count\n"	;# $col_count isn't actually used
+			append makerow	"set o 2\n"
+
+			switch -exact -- $as {
+				dicts - lists - dicts_no_nulls {
+					append makerow	{set row {}} \n
+				}
+				default {
+					error "Unhandled result format: \"$as\""
+				}
+			}
+
+			set remain	[expr {[llength $c_types] / 2}]
+			foreach {field_name type_name} $c_types {
+				append makerow	"binary scan \$datarow @\${o}I collen; incr o 4\n"
+				append makerow	"if {\$collen != -1} \{\n"
+				append makerow	[switch -glob -- $type_name {
+					bool	{return -level 0 {	binary scan $datarow @${o}c val}}
+					int1	{return -level 0 {	binary scan $datarow @${o}c val}}
+					smallint -
+					int2	{return -level 0 {	binary scan $datarow @${o}S val}}
+					int4 -
+					integer	{return -level 0 {	binary scan $datarow @${o}I val}}
+					bigint -
+					int8	{return -level 0 {	binary scan $datarow @${o}W val}}
+					bytea	{return -level 0 {	binary scan $datarow @${o}a val}}
+					float4	{return -level 0 {	binary scan $datarow @${o}R val}}
+					float8	{return -level 0 {	binary scan $datarow @${o}Q val}}
+					text {
+						string cat {
+							if {$collen == 0} {
+								set val	{}
+							} else {
+								set val	[encoding convertfrom $tcl_encoding [string range $datarow $o [expr {$o + $collen -1}]]]
+							}
+						} \n
+					}
+					default {
+						error "Unhandled type: \"$type_name\""
+					}
+				}] \n
+
+				switch -exact -- $as {
+					dicts - dicts_no_nulls { append makerow	"\tlappend row [list $field_name] \$val\n" }
+					lists                  { append makerow	"\tlappend row \$val\n" }
+				}
+
+				# Suppress the unnecessary advance of o if this is the last field
+				if {[incr remain -1]} {
+					append makerow	\t {incr o $collen} \n
+				}
+
+				switch -exact -- $as {
+					dicts          {}
+					dicts_no_nulls { append makerow	"\} else \{\n\tlappend row [list $field_name] {}\n" }
+					lists          { append makerow	"\} else \{\n\tlappend row {}\n" }
+				}
+
+				append makerow "\}\n"
+			}
+			# Compile makerow from c_types, as >>>
+
+			#::pgwire::log notice "tcl_makerow $as $c_types:\n$makerow"
+			dict set makerow_cache $key script $makerow
+		}
+
+		set makerow
+	}
+
+	#>>>
 	method allrows args { #<<<
+		variable ::tdbc::generalError
+
+		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
+		switch -exact -- [llength $args] {
+			1 {set sqlcode [lindex $args 0]}
+			2 {lassign $args sqlcode param_values}
+			default {
+				return -code error -errorcode [concat $generalError wrongNumArgs] \
+						"wrong # args: should be [lrange [info level 0] 0 1]\
+						 ?-option value?... ?--? sqlcode ?dictionary?"
+			}
+		}
+		set as	[dict get $opts -as]
+
+		if {$transaction_status eq "I" && [info exists pending_rowbuffer]} {
+			$pending_rowbuffer preread_all
+		}
+
+		set stmt_info	[my prepare_extended_query $sqlcode]
+		dict with stmt_info {}
+		# Sets:
+		#	- $stmt_name: the name of the prepared statement (as known to the server)
+		#	- $field_names:	the result column names and the local variables they are unpacked into
+		#	- $build_params: script to run to gather the input params
+		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+
+		try $build_params on ok parameters {}
+
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+		set columns	[dict keys $c_types]
+
+		#set max_rows_per_batch	17
+		set max_rows_per_batch	$::pgwire::default_batchsize
+		#set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		if {$::pgwire::accelerators} {
+			set ops	[::pgwire::build_ops $as $c_types]
+		} else {
+			set addrow	[format {
+				%s
+				lappend rows	$row
+			} [my tcl_makerow $as $c_types]]
+		}
+
+		lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+			outcome details datarows
+
+		try {
+			set rows	{}
+			while 1 {
+				if {$::pgwire::accelerators} {
+					switch -exact -- $outcome \
+						CommandComplete - \
+						PortalSuspended {
+							#::pgwire::log notice "before c_allrows_batch: [tcl::unsupported::representation $rows]"
+							::pgwire::c_allrows_batch rows $ops $columns $tcl_encoding $datarows
+						}
+				} else {
+					switch -exact -- $outcome \
+						CommandComplete - \
+						PortalSuspended "
+							foreach datarow \$datarows [list $addrow]
+						"
+				}
+				#set h	[open /tmp/datarow wb]
+				#puts -nonewline $h $datarow
+				#close $h
+				#set h	[open /tmp/vars w]
+				#puts $h [list \
+				#	ops				$ops \
+				#	columns			$columns \
+				#	tcl_encoding	$tcl_encoding \
+				#	c_types			$c_types \
+				#]
+				#close $h
+
+				switch -exact -- $outcome {
+					CommandComplete -
+					EmptyQueryResponse {
+						break
+					}
+					PortalSuspended {
+						lassign [my _execute "" $max_rows_per_batch] \
+							outcome details datarows
+					}
+					default {
+						error "Unexpected outcome from _read_batch: \"$outcome\""
+					}
+				}
+			}
+
+			set rows
+		} finally {
+			if {!$ready_for_query} {
+				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				flush $socket
+			}
+			if {$sync_outstanding} {
+				my skip_to_sync
+			}
+		}
+	}
+
+	#>>>
+	method allrows_makerow args { #<<<
+		variable ::tdbc::generalError
+
+		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
+		switch -exact -- [llength $args] {
+			1 {set sqlcode [lindex $args 0]}
+			2 {lassign $args sqlcode param_values}
+			default {
+				return -code error -errorcode [concat $generalError wrongNumArgs] \
+						"wrong # args: should be [lrange [info level 0] 0 1]\
+						 ?-option value?... ?--? sqlcode ?dictionary?"
+			}
+		}
+		set as	[dict get $opts -as]
+
+		if {$transaction_status eq "I" && [info exists pending_rowbuffer]} {
+			$pending_rowbuffer preread_all
+		}
+
+		set stmt_info	[my prepare_extended_query $sqlcode]
+		dict with stmt_info {}
+		# Sets:
+		#	- $stmt_name: the name of the prepared statement (as known to the server)
+		#	- $field_names:	the result column names and the local variables they are unpacked into
+		#	- $build_params: script to run to gather the input params
+		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+
+		try $build_params on ok parameters {}
+
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+		set columns	[dict keys $c_types]
+
+		#set max_rows_per_batch	17
+		set max_rows_per_batch	1000
+		#set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		if {$::pgwire::accelerators} {
+			set ops	[::pgwire::build_ops $as $c_types]
+			set addrow	{
+				lappend rows	[::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]
+			}
+		} else {
+			set addrow	[format {
+				%s
+				lappend rows	$row
+			} [my tcl_makerow $as $c_types]]
+		}
+
+		lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+			outcome details datarows
+
+		try {
+			set rows	{}
+			while 1 {
+				if {$::pgwire::accelerators} {
+					switch -exact -- $outcome \
+						CommandComplete - \
+						PortalSuspended {
+							foreach datarow $datarows {
+								lappend rows	[::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]
+							}
+						}
+				} else {
+					switch -exact -- $outcome \
+						CommandComplete - \
+						PortalSuspended "
+							foreach datarow \$datarows [list $addrow]
+						"
+				}
+				#set h	[open /tmp/datarow wb]
+				#puts -nonewline $h $datarow
+				#close $h
+				#set h	[open /tmp/vars w]
+				#puts $h [list \
+				#	ops				$ops \
+				#	columns			$columns \
+				#	tcl_encoding	$tcl_encoding \
+				#	c_types			$c_types \
+				#]
+				#close $h
+
+				switch -exact -- $outcome {
+					CommandComplete -
+					EmptyQueryResponse {
+						break
+					}
+					PortalSuspended {
+						lassign [my _execute "" $max_rows_per_batch] \
+							outcome details datarows
+					}
+					default {
+						error "Unexpected outcome from _read_batch: \"$outcome\""
+					}
+				}
+			}
+
+			set rows
+		} finally {
+			if {!$ready_for_query} {
+				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				flush $socket
+			}
+			if {$sync_outstanding} {
+				my skip_to_sync
+			}
+		}
+	}
+
+	#>>>
+	method allrows_old args { #<<<
 		variable ::tdbc::generalError
 
 		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
@@ -2794,7 +3892,7 @@ oo::class create ::pgwire {
 							set makerow			{
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {my connection_lost}
-								set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+								set row	[::pgwire::c_makerow $data $c_types $tcl_encoding lists]
 							}
 						} else {
 							set makerow			$makerow_list
@@ -2817,7 +3915,7 @@ oo::class create ::pgwire {
 							set makerow			{
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {my connection_lost}
-								set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+								set row	[::pgwire::c_makerow $data $c_types $tcl_encoding lists]
 							}
 						} else {
 							set makerow			$makerow_list
@@ -2843,7 +3941,7 @@ oo::class create ::pgwire {
 						set makerow			{
 							set data	[read $socket $len]
 							if {[chan eof $socket]} {my connection_lost}
-							set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
+							set row	[::pgwire::c_makerow $data $c_types $tcl_encoding dicts]
 						}
 					} else {
 						set makerow			$makerow_dict
@@ -2859,7 +3957,207 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method rowbuffer_coro {stmt_name portal_name rformats parameters batchsize} { #<<<
+		set pending_rowbuffer	[info coroutine]
+
+		try {
+			#::pgwire::log notice "rowbuffer_coro [info coroutine] bind and execute $batchsize"
+			set waiting	[my _bind_and_execute $stmt_name $portal_name $rformats $parameters $batchsize]
+			lassign $waiting last_outcome
+			#::pgwire::log notice "rowbuffer_coro [info coroutine] last_outcome $last_outcome"
+			set res	started
+
+			while 1 {
+				set rest	[lassign [yield $res] op]
+				#::pgwire::log notice "rowbuffer_coro [info coroutine] op ($op)"
+				switch -exact -- $op {
+					nextbatch {
+						# If we already have a result waiting, return that
+						if {[info exists waiting]} {
+							set res	$waiting
+							unset waiting
+							continue
+						}
+
+						if {$last_outcome eq "PortalSuspended"} {
+							#::pgwire::log notice "rowbuffer_coro [info coroutine] execute $batchsize"
+							set res [my _execute $portal_name $batchsize]
+							lassign $res last_outcome
+							#::pgwire::log notice "rowbuffer_coro [info coroutine] last_outcome $last_outcome"
+							if {$last_outcome ne "PortalSuspended"} {
+								unset -nocomplain pending_rowbuffer
+							}
+							continue
+						} else {
+							error "No waiting results, and last outcome was \"$last_outcome\""
+						}
+					}
+
+					preread_all {
+						# We're being asked to read all our results and get out of the way (by an inner query)
+						if {$last_outcome eq "PortalSuspended"} {
+							#::pgwire::log notice "rowbuffer_coro [info coroutine] execute all remaining"
+							set waiting [my _execute $portal_name 0]
+							lassign $waiting outcome
+							#::pgwire::log notice "rowbuffer_coro [info coroutine] last_outcome $last_outcome"
+							unset -nocomplain pending_rowbuffer
+							set res	preread_ok
+						} else {
+							set res preread_na
+						}
+					}
+
+					destroy {
+						return
+					}
+				}
+			}
+		} finally {
+			if {[info exists pending_rowbuffer] && $pending_rowbuffer eq [info coroutine]} {
+				unset pending_rowbuffer
+			}
+			if {[info exists socket]} {
+				if {!$ready_for_query && !$sync_outstanding} {
+					#::pgwire::log notice "rowbuffer_coro [info coroutine] send sync"
+					puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+					flush $socket
+				}
+				if {$sync_outstanding} {
+					#::pgwire::log notice "rowbuffer_coro [info coroutine] skip_to_sync"
+					my skip_to_sync
+				}
+				if {$portal_name ne ""} {
+					my close_portal $portal_name
+				}
+			}
+			#::pgwire::log notice "rowbuffer_coro [info coroutine] exiting"
+		}
+	}
+
+	#>>>
 	method foreach args { #<<<
+		variable ::tdbc::generalError
+
+		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
+		switch -exact -- [llength $args] {
+			3 {lassign $args row_varname sqlcode script}
+			4 {lassign $args row_varname sqlcode param_values script}
+			default {
+				return -code error -errorcode [concat $generalError wrongNumArgs] \
+						"wrong # args: should be [lrange [info level 0] 0 1]\
+						 ?-option value?... ?--? varName sqlcode ?dictionary? script"
+			}
+		}
+		set as	[dict get $opts -as]
+
+		if {$transaction_status eq "I" && [info exists pending_rowbuffer]} {
+			$pending_rowbuffer preread_all
+		}
+
+		set stmt_info	[my prepare_extended_query $sqlcode]
+		dict with stmt_info {}
+		# Sets:
+		#	- $stmt_name: the name of the prepared statement (as known to the server)
+		#	- $field_names:	the result column names and the local variables they are unpacked into
+		#	- $build_params: script to run to gather the input params
+		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+
+		try $build_params on ok parameters {}
+
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+		set columns	[dict keys $c_types]
+
+		#set max_rows_per_batch	17
+		set max_rows_per_batch	$::pgwire::default_batchsize
+		#set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		if {$::pgwire::accelerators} {
+			#set makerow	{set row [::pgwire::c_makerow $datarow $c_types $tcl_encoding $as]}
+			set ops	[::pgwire::build_ops $as $c_types]
+			set foreach_batch {
+				uplevel 1 [list ::pgwire::c_foreach_batch $row_varname $ops $columns $tcl_encoding $datarows $script]
+			}
+		} else {
+			upvar 1 $row_varname row
+			#set makerow	[my tcl_makerow $as $c_types]
+			set foreach_batch [string map [list \
+				%makerow%		[my tcl_makerow $as $c_types] \
+				%script%		[list $script] \
+			] {
+				foreach datarow $datarows {
+					%makerow%
+					try {
+						uplevel 1 %script%
+					} on break {} {
+						set broken	1
+						break
+					} on continue {} {
+					} on return {r o} {
+						#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
+						set broken	1
+						dict incr o -level 1
+						dict set o -code return
+						set rethrow	[list -options $o $r]
+						break
+					} on error {r o} {
+						#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
+						set broken	1
+						dict incr o -level 1
+						set rethrow	[list -options $o $r]
+						break
+					}
+				}
+			}]
+		}
+
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+		coroutine $rowbuffer my rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+
+		try {
+			set broken	0
+			while {!$broken} {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
+				try $foreach_batch
+
+				switch -exact -- $outcome {
+					CommandComplete -
+					EmptyQueryResponse {
+						break
+					}
+					PortalSuspended {}
+					default {
+						error "Unexpected outcome from _read_batch: \"$outcome\""
+					}
+				}
+			}
+
+			if {[info exists rethrow]} {
+				#::pgwire::log notice "rethrowing"
+				return {*}$rethrow
+			}
+		} finally {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {!$ready_for_query && !$sync_outstanding} {
+				#::pgwire::log notice "foreach finally send sync"
+				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				flush $socket
+			}
+			if {$sync_outstanding} {
+				#::pgwire::log notice "foreach finally skip_to_sync"
+				my skip_to_sync
+			}
+		}
+	}
+
+	#>>>
+	method foreach_old args { #<<<
 		variable ::tdbc::generalError
 
 		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
@@ -2898,7 +4196,7 @@ oo::class create ::pgwire {
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {my connection_lost}
 								if {!$broken} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+									set row	[::pgwire::c_makerow $data $c_types $tcl_encoding lists]
 								}
 							}
 						} else {
@@ -2942,7 +4240,7 @@ oo::class create ::pgwire {
 								set data	[read $socket $len]
 								if {[chan eof $socket]} {my connection_lost}
 								if {!$broken} {
-									set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+									set row	[::pgwire::c_makerow $data $c_types $tcl_encoding lists]
 								}
 							}
 						} else {
@@ -2989,7 +4287,7 @@ oo::class create ::pgwire {
 							set data	[read $socket $len]
 							if {[chan eof $socket]} {my connection_lost}
 							if {!$broken} {
-								set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding dicts]
+								set row	[::pgwire::c_makerow $data $c_types $tcl_encoding dicts]
 							}
 						}
 					} else {
@@ -3027,6 +4325,77 @@ oo::class create ::pgwire {
 
 	#>>>
 	method onecolumn sql { #<<<
+		variable ::tdbc::generalError
+
+		if {$transaction_status eq "I" && [info exists pending_rowbuffer]} {
+			$pending_rowbuffer preread_all
+		}
+
+		set stmt_info	[my prepare_extended_query $sql]
+		dict with stmt_info {}
+		# Sets:
+		#	- $stmt_name: the name of the prepared statement (as known to the server)
+		#	- $field_names:	the result column names and the local variables they are unpacked into
+		#	- $build_params: script to run to gather the input params
+		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+
+		try $build_params on ok parameters {}
+
+		set max_rows_per_batch	0
+
+		if {!$::pgwire::accelerators} {
+			set makerow	[my tcl_makerow lists $c_types]
+		}
+
+		lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+			outcome details datarows
+
+		try {
+			if {$::pgwire::accelerators} {
+				switch -exact -- $outcome {
+					CommandComplete -
+					PortalSuspended {
+						if {[llength $datarows] > 0} {
+							return [lindex [::pgwire::c_makerow [lindex $datarows 0] $c_types $tcl_encoding lists] 0]
+						} else {
+							return {}
+						}
+					}
+					EmptyQueryResponse {
+						return {}
+					}
+				}
+			} else {
+				switch -exact -- $outcome {
+					CommandComplete -
+					PortalSuspended {
+						if {[llength $datarows] > 0} {
+							set datarow	[lindex $datarows 0]
+							try $makerow
+							return [lindex $row 0]
+						} else {
+							return {}
+						}
+					}
+					EmptyQueryResponse {
+						return {}
+					}
+				}
+			}
+		} finally {
+			if {!$ready_for_query} {
+				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				flush $socket
+			}
+			if {$sync_outstanding} {
+				my skip_to_sync
+			}
+		}
+
+	}
+
+	#>>>
+	method onecolumn_old sql { #<<<
 		tailcall my extended_query $sql {
 			set execute_setup	{set broken 0; set acc {}}
 			if {0 && $::pgwire::accelerators} {
@@ -3034,7 +4403,7 @@ oo::class create ::pgwire {
 					set data	[read $socket $len]
 					if {[chan eof $socket]} {my connection_lost}
 					if {!$broken} {
-						set row	[::pgwire::c_makerow $data $c_types $rformats $tcl_encoding lists]
+						set row	[::pgwire::c_makerow $data $c_types $tcl_encoding lists]
 					}
 				}
 			} else {
