@@ -214,6 +214,63 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 
 	#>>>
 
+	method tables {{pattern %}} { #<<<
+		set tables	{}
+		pg foreach row {
+			select
+				c.relname as name
+			from
+				pg_catalog.pg_class c
+			left join
+				pg_catalog.pg_namespace n
+			on
+				n.oid = c.relnamespace
+			where
+				c.relkind in ('r', 'v', 'm', 'f') and
+				n.nspname = current_schema and
+				pg_catalog.pg_table_is_visible(c.oid) and
+				c.relname like :pattern
+			order by
+				name
+		} {
+			lappend tables [dict get $row name]
+		}
+		set tables
+	}
+
+	#>>>
+	method columns {table {pattern %}} { #<<<
+		set res	{}
+		pg foreach row {
+			select
+				column_name,
+				data_type,
+				character_maximum_length,
+				numeric_precision,
+				column_default,
+				is_nullable
+			from
+				information_schema.columns
+			where
+				table_schema = current_schema and
+				table_name = :table and
+				column_name like :pattern
+		} {
+			set inf	[dict create \
+				name		[dict get $row column_name] \
+				type		[dict get $row data_type] \
+				nullable	[expr {[dict get $row is_nullable] eq "YES" ? 1 : 0}] \
+			]
+			if {[dict exists $row numeric_precision]} {
+				dict set inf precision	[dict get $row numeric_precision]
+			}
+			lappend res [dict get $row column_name] $inf
+		}
+		set res
+	}
+
+	#>>>
+
 	forward statementCreate ::tdbc::pgwire::statement create
 	forward begintransaction	pg begintransaction
 	forward rollback			pg rollback
@@ -509,7 +566,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			# Tcl row builder script compiled by the prepare statement step
 			foreach format {dict list} {
 				lassign [info class definition [self class] next$format] method_args method_body
-				oo::objdefine [self] method next$format $method_args [regsub {\# makerow_start.*\# makerow_end} $method_body [$con tcl_makerow $format $c_types]]
+				oo::objdefine [self] method next$format $method_args [regsub {\# makerow_start.*\# makerow_end} $method_body [$con tcl_makerow ${format}s $c_types]]
 				#::pgwire::log notice "rewrote [self]::next$format body: [lindex [info object definition [self] next$format] 1]"
 			}
 			# Transcribe the variables defined to be visible in methods from the class to this instance or the
@@ -582,11 +639,11 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 				}
 			}
 
-			set datarows	[lassign $datarows[unset datarows] data]
-			#::pgwire::log notice "Popped data: [string length $data], [llength $datarows] rows remain"
+			set datarows	[lassign $datarows[unset datarows] datarow]
+			#::pgwire::log notice "Popped data: [string length $datarow], [llength $datarows] rows remain"
 
 			# makerow_start
-			set row	[::pgwire::c_makerow2 $ops_%format% $columns $tcl_encoding $data]
+			set row	[::pgwire::c_makerow2 $ops_%format% $columns $tcl_encoding $datarow]
 			# makerow_end
 			return 1
 		}]

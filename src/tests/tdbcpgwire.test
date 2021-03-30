@@ -3,6 +3,7 @@ namespace import ::tcltest::*
 ::tcltest::loadTestedCommands
 
 package require tdbc::pgwire
+package require tdbc::postgres
 
 set connargs	{-db pagila -user postgres -password insecure -host db -port 5432}
 
@@ -172,6 +173,39 @@ test tdbcpgwire-20.2 {Resultset, param_values dict} -setup { #<<<
 	rename _tmplog ::pgwire::log
 } -result {1 1 {{title {DROP WATERFRONT}}}}
 #>>>
+test tdbcpgwire-20.3 {Resultset, tcl_makerow forced, param_values dict} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	rename ::pgwire::log _tmplog
+	proc ::pgwire::log {lvl msg} {
+		puts stderr "tdbcpgwire-20.2 $lvl: $msg"
+	}
+	set hold	$::pgwire::accelerators
+	set ::pgwire::accelerators	0
+} -body {
+	set res			{}
+	set count		0
+	set stmt		[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+	set resultset	[$stmt execute {film_id 256}]
+	while {[$resultset nextdict row]} {
+		incr count
+		lappend res $row
+	}
+	list $count [$resultset rowcount] $res
+} -cleanup {
+	foreach v {resultset stmt} {
+		if {[info exists $v] && [info object isa object [set $v]]} {
+			[set $v] destroy
+		}
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	set ::pgwire::accelerators $hold
+	unset -nocomplain stmt res count resultset row hold
+	catch {rename ::pgwire::log {}}
+	rename _tmplog ::pgwire::log
+} -result {1 1 {{title {DROP WATERFRONT}}}}
+#>>>
 test tdbcpgwire-21.1 {Resultset, close} -setup { #<<<
 	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
 	rename ::pgwire::log _tmplog
@@ -198,6 +232,40 @@ test tdbcpgwire-21.1 {Resultset, close} -setup { #<<<
 	catch {rename ::pgwire::log {}}
 	rename _tmplog ::pgwire::log
 } -result 0
+#>>>
+test tdbcpgwire-22.1.1 {tables method} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	tdbcpgwire tables
+} -cleanup {
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+} -result {actor actor_info address category city country customer customer_list film film_actor film_category film_list inventory language nicer_but_slower_film_list payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06 rental sales_by_film_category sales_by_store staff staff_list store}
+#>>>
+test tdbcpgwire-22.1.2 {tables method with pattern} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	tdbc::postgres::connection create tdbcpostgres {*}$connargs
+} -body {
+	tdbcpgwire tables payment_%
+} -cleanup {
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	if {[info object isa object tdbcpostgres]} {
+		tdbcpostgres destroy
+	}
+} -result {payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06}
+#>>>
+test tdbcpgwire-22.2 {columns method} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	tdbcpgwire columns film
+} -cleanup {
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+} -result {film_id {name film_id type integer nullable 0 precision 32} title {name title type text nullable 0} description {name description type text nullable 1} release_year {name release_year type integer nullable 1 precision 32} language_id {name language_id type smallint nullable 0 precision 16} original_language_id {name original_language_id type smallint nullable 1 precision 16} rental_duration {name rental_duration type smallint nullable 0 precision 16} rental_rate {name rental_rate type numeric nullable 0 precision 4} length {name length type smallint nullable 1 precision 16} replacement_cost {name replacement_cost type numeric nullable 0 precision 5} rating {name rating type USER-DEFINED nullable 1} last_update {name last_update type {timestamp with time zone} nullable 0} special_features {name special_features type ARRAY nullable 1} fulltext {name fulltext type tsvector nullable 0}}
 #>>>
 
 ::tcltest::cleanupTests

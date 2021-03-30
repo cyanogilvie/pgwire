@@ -1137,6 +1137,7 @@ if {![info exists ::pgwire::block_accelerators]} {
 	if {!$::pgwire::accelerators} {
 		try {
 			package require tcc4tcl
+		} on error {} {
 		} on ok ver {
 			::pgwire::log notice "Have tcc4tcl $ver"
 			# With a little help from my friends (c) <<<
@@ -1388,18 +1389,6 @@ oo::class create ::pgwire {
 		if {![info exists socket] || $socket ni [chan names]} {
 			error "Not connected"
 		}
-
-		# TEMP: close all statements in prepared_old (extended_query method) <<<
-		my variable prepared_old
-		if {[info exists prepared_old]} {
-			dict for {sql info} $prepared_old {
-				set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
-				puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
-				incr expired
-				dict unset prepared_old $sql
-			}
-		}
-		# TEMP: close all statements in prepared_old (extended_query method) >>>
 
 		#package require Thread
 		thread::detach $socket
@@ -2535,7 +2524,7 @@ oo::class create ::pgwire {
 											append pformats	\u0\u1	;# binary
 										}
 									} on error {errmsg options} {
-										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v\": $errmsg"
+										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v%\": $errmsg"
 									}
 								}]
 								append build_params_dict	[string map [list \
@@ -2552,7 +2541,7 @@ oo::class create ::pgwire {
 											append pformats	\u0\u1	;# binary
 										}
 									} on error {errmsg options} {
-										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v\": $errmsg"
+										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v%\": $errmsg"
 									}
 								}]
 								append param_desc	"# \$[incr param_seq]: $name\t$type_name\n"
