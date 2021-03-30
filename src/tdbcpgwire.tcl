@@ -80,6 +80,9 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 		foreach stmt [my statements] {
 			$stmt destroy
 		}
+		if {[info object isa object pg]} {
+			pg destroy
+		}
 		if {[self next] ne ""} next
 	}
 

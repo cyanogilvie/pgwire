@@ -1402,7 +1402,7 @@ oo::class create ::pgwire {
 				server_params		$server_params \
 				name_seq			$name_seq \
 				backend_key_data	$backend_key_data \
-				prepared			[dict map {k v} $prepared {dict merge $v {cached {}}}] \
+				prepared			$prepared \
 				ready_for_query		$ready_for_query \
 				age_count			$age_count \
 				sync_outstanding	$sync_outstanding
