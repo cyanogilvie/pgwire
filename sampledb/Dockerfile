@@ -12,3 +12,4 @@ RUN mkdir /data && \
 	wget -q -O - https://github.com/devrimgunduz/pagila/archive/v2.1.0.tar.gz | tar xzOf - 'pagila-2.1.0/pagila-insert-data.sql' | su postgres -c 'psql -q -d pagila -f -' && \
 	su postgres -c 'psql -d pagila -c "select count(1) from actor"' && \
 	su postgres -c 'pg_ctl stop'
+RUN apk add --update --no-cache iproute2

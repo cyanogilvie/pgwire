@@ -17,6 +17,8 @@ services:
             timeout: 1s
             retries: 1
             start_period: 1s
+        cap_add:
+            - NET_ADMIN
     pgwire:
         build: pgwire
         depends_on:
@@ -29,6 +31,9 @@ services:
         environment:
             POSTGRES_PASSWORD: insecure
             PGHOST: /run/postgresql
+        cap_add:
+            - NET_ADMIN
+        command: tc qdisc add dev eth0 root netem delay 100ms; /usr/bin/make
 volumes:
     data:
     run:

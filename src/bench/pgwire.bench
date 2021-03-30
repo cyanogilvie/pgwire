@@ -370,6 +370,8 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
 	set q {select film_id,title from film}
+	set hold	$::pgwire::default_batchsize
+	set ::pgwire::default_batchsize	0
 } -compare {
 	pgwire_uds_dicts {
 		set count	0
@@ -381,7 +383,7 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 	}
 	pgwire_lo_dicts {
 		set count	0
-		pgwire_uds foreach -as dicts row $q {
+		pgwire_lo foreach -as dicts row $q {
 			dict get $row film_id
 			incr count
 		}
@@ -397,7 +399,7 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 	}
 	pgwire_lo_lists {
 		set count	0
-		pgwire_uds foreach -as lists row $q {
+		pgwire_lo foreach -as lists row $q {
 			lindex $row 0
 			incr count
 		}
@@ -425,7 +427,8 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 			$obj destroy
 		}
 	}
-	unset -nocomplain q count
+	set ::pgwire::default_batchsize	$hold
+	unset -nocomplain q count hold
 } -result 1000
 #>>>
 bench pgwire-4.1 {foreach, large number of columns, dicts} -setup { #<<<
@@ -844,6 +847,15 @@ bench pgwire-7.3 {foreach_batch} -setup { #<<<
 		set acc		0
 		set count	0
 		::pgwire::c_foreach_batch row $ops $columns $tcl_encoding $datarows {
+			incr count
+			incr acc	[dict get $row film_id]
+		}
+		list $count $acc
+	}
+	c_foreach_batch_nr {
+		set acc		0
+		set count	0
+		::pgwire::c_foreach_batch_nr row $ops $columns $tcl_encoding $datarows {
 			incr count
 			incr acc	[dict get $row film_id]
 		}

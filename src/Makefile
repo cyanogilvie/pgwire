@@ -18,7 +18,9 @@ test: all
 	tclsh tests/all.tcl $(TESTFLAGS)
 
 benchmark: all
+	tc qdisc add dev eth0 root netem delay .5ms
 	tclsh bench/run.tcl $(TESTFLAGS)
+	tc qdisc del dev eth0 root netem
 
 gdb_benchmark: all
 	gdb -ex=r --args tclsh bench/run.tcl $(TESTFLAGS)

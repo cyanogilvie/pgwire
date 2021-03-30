@@ -1090,7 +1090,21 @@ if {[info exists _pgwire_default_batchsize]} {
 set ::pgwire::accelerators	0
 if {![info exists ::pgwire::block_accelerators]} {
 	try {
-		package require critcl 3
+		rename ::interp ::pgwire::_interp
+		try {
+			proc ::interp {op args} {
+				# Prevent critcl turning on interp frame debug (about 10% slowdown)
+				switch -exact -- $op {
+					debug return
+				}
+				tailcall ::pgwire::_interp $op {*}$args
+			}
+
+			package require critcl 3
+		} finally {
+			rename ::interp {}
+			rename ::pgwire::_interp ::interp
+		}
 	} on error {} {
 	} on ok ver {
 		#::pgwire::log notice "Have critcl $ver"
@@ -1460,6 +1474,14 @@ oo::class create ::pgwire {
 		#package require Thread
 		dict with handle {}
 		thread::attach $socket
+	}
+
+	#>>>
+	method _tx {start end bytes} { #<<<
+	}
+
+	#>>>
+	method _rx {start end bytes} { #<<<
 	}
 
 	#>>>

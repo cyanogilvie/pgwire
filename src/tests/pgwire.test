@@ -20,6 +20,64 @@ set std_setup {
 	pgwire create pg $dbchan pagila postgres insecure
 }
 
+oo::class create pgwire_tap { # Record the network protocol reads and writes with timestamps <<<
+	superclass ::pgwire
+
+	variable tap_h
+
+	constructor {tap_fn args} { #<<<
+		set tap_h	[open $tap_fn w]
+		chan configure $tap_h -blocking 0 -buffering full -buffersize 1000000
+
+		proc puts args { #<<<
+			if {[llength $args] == 3} {
+				set before [clock microseconds]
+			}
+			::puts {*}$args
+			if {[info exists before]} {
+				my _tx $before [clock microseconds] [lindex $args 2]
+			}
+		}
+		#>>>
+		proc read args { #<<<
+			try {
+				set before	[clock microseconds]
+				::read {*}$args
+			} on ok bytes {
+				my _rx $before [clock microseconds] $bytes
+				set bytes
+			}
+		}
+
+		#>>>
+
+		next {*}$args
+	}
+
+	#>>>
+	destructor { #<<<
+		if {[self next] ne ""} next
+		if {[info exists tap_h]} {
+			close $tap_h
+		}
+	}
+
+	#>>>
+
+	method _rx {start end bytes} { #<<<
+		::puts $tap_h	[list rx $start $end [binary encode base64 $bytes]]
+	}
+
+	#>>>
+	method _tx {start end bytes} { #<<<
+		::puts $tap_h	[list tx $start $end [binary encode base64 $bytes]]
+	}
+
+	#>>>
+}
+
+#>>>
+
 test pgwire-1.1 {Construct instance} -setup { #<<<
 	set dbchan	[try $connect]
 } -body {
@@ -245,7 +303,7 @@ test pgwire-4.2 {foreach -as lists, with -columnsvariable, 1 row, many columns} 
 #>>>
 test pgwire-5.1 {foreach -as dicts, 1 row, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
+	pgwire_tap create pg /tmp/pgwire-5.1.tap $dbchan pagila postgres insecure
 } -body {
 	pg foreach -as dicts row {select release_year,title from film where film_id=286} {
 		set res	[dict get $row title]
