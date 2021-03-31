@@ -2712,6 +2712,10 @@ oo::class create ::pgwire {
 					C { # CommandComplete <<<
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
+						if {!$sync_outstanding} {
+							puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+							flush $socket
+						}
 						set idx	[string first "\u0" $data]
 						if {$idx == -1} {
 							#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
@@ -2798,6 +2802,7 @@ oo::class create ::pgwire {
 			]
 		}
 		flush $socket
+		set ready_for_query	0
 
 		try {
 			# Bind responses <<<
@@ -2862,6 +2867,7 @@ oo::class create ::pgwire {
 			]
 		}
 		flush $socket
+		set ready_for_query	0
 
 		try {
 			my _read_batch
@@ -3004,12 +3010,15 @@ oo::class create ::pgwire {
 			} [my tcl_makerow $as $c_types]]
 		}
 
-		lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
-			outcome details datarows
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+		coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch
 
 		try {
 			set rows	{}
 			while 1 {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
 				if {$::pgwire::accelerators} {
 					switch -exact -- $outcome \
 						CommandComplete - \
@@ -3041,10 +3050,7 @@ oo::class create ::pgwire {
 					EmptyQueryResponse {
 						break
 					}
-					PortalSuspended {
-						lassign [my _execute "" $max_rows_per_batch] \
-							outcome details datarows
-					}
+					PortalSuspended {}
 					default {
 						error "Unexpected outcome from _read_batch: \"$outcome\""
 					}
@@ -3053,11 +3059,16 @@ oo::class create ::pgwire {
 
 			set rows
 		} finally {
-			if {!$ready_for_query} {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {!$ready_for_query && !$sync_outstanding} {
+				#::pgwire::log notice "foreach finally send sync"
 				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 				flush $socket
 			}
 			if {$sync_outstanding} {
+				#::pgwire::log notice "foreach finally skip_to_sync"
 				my skip_to_sync
 			}
 		}
@@ -3318,7 +3329,7 @@ oo::class create ::pgwire {
 				}
 			}
 		} finally {
-			if {!$ready_for_query} {
+			if {!$ready_for_query && !$sync_outstanding} {
 				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 				flush $socket
 			}
