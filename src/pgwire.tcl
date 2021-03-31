@@ -2519,12 +2519,19 @@ oo::class create ::pgwire {
 									bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ia* [string length $value] $value]}}
 									float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IR 4 $value]}}
 									float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IQ 8 $value]}}
-									varchar -
+									text -
+									varchar {
+										return -level 0 {
+											set bytes	[encoding convertto $tcl_encoding $value]
+											set bytelen	[string length $bytes]
+											append pformats \u0\u1; append pdesc [binary format Ia* $bytelen $bytes]
+										}
+									}
 									default {
 										return -level 0 {
 											set bytes	[encoding convertto $tcl_encoding $value]
 											set bytelen	[string length $bytes]
-											append pformats \u0\u0; append pdesc [binary format Ia$bytelen $bytelen $bytes]
+											append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
 										}
 									}
 								}]
