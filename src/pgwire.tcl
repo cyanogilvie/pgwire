@@ -1,17 +1,31 @@
 package require Thread
 
-set _pgwire_block_accelerators	[info exists ::pgwire::block_accelerators]
-if {[info exists ::pgwire::default_batchsize]} {
-	set _pgwire_default_batchsize	$::pgwire::default_batchsize
-}
+apply {{} {
+	# Preserve tuneables from previous loads when re-sourcing this, or set before we are loaded <<<
+	set preserved	{}
+	foreach v {
+		block_accelerators
+		default_batchsize
+		include_path
+	} {
+		if {[info exists ::pgwire::$v]} {
+			lappend preserved $v [set ::pgwire::$v]
+		}
+	}
+	#>>>
 
-if {[info object isa object ::pgwire]} {
-	::pgwire destroy
-}
+	if {[info object isa object ::pgwire]} {
+		::pgwire destroy
+	}
 
-if {[namespace exists ::pgwire]} {
-	namespace delete ::pgwire
-}
+	if {[namespace exists ::pgwire]} {
+		namespace delete ::pgwire
+	}
+	namespace eval ::pgwire {}
+	foreach {v val} $preserved {
+		set ::pgwire::$v	$val
+	}
+}}
 namespace eval ::pgwire { #<<<
 	if {[info commands ::ns_log] ne ""} {
 		proc log {lvl msg} {
@@ -21,6 +35,13 @@ namespace eval ::pgwire { #<<<
 		proc log {lvl msg} {
 			puts $msg
 		}
+	}
+
+	if {![info exists default_batchsize]} {
+		variable default_batchsize	1000
+	}
+	if {![info exists include_path]} {
+		variable include_path	/usr/include
 	}
 
 	namespace eval tapchan {
@@ -1073,88 +1094,86 @@ done:
 }
 #>>>
 
-if {$_pgwire_block_accelerators} {
-	namespace eval ::pgwire {variable block_accelerators 1}
-}
-unset _pgwire_block_accelerators
-
-if {[info exists _pgwire_default_batchsize]} {
-	namespace eval ::pgwire [list variable default_batchsize $_pgwire_default_batchsize]
-	unset _pgwire_default_batchsize
-} else {
-	namespace eval ::pgwire {variable default_batchsize 1000}
-}
-
-#>>>
 
 set ::pgwire::accelerators	0
 if {![info exists ::pgwire::block_accelerators]} {
-	try {
-		rename ::interp ::pgwire::_interp
+	if {[llength [lsearch -all -inline -exact -not [package versions critcl] 0]] > 0} {
 		try {
-			proc ::interp {op args} {
-				# Prevent critcl turning on interp frame debug (about 10% slowdown)
-				switch -exact -- $op {
-					debug return
+			rename ::interp ::pgwire::_interp
+			try {
+				proc ::interp {op args} {
+					# Prevent critcl turning on interp frame debug (about 10% slowdown)
+					switch -exact -- $op {
+						debug return
+					}
+					tailcall ::pgwire::_interp $op {*}$args
 				}
-				tailcall ::pgwire::_interp $op {*}$args
+
+				package require critcl 3
+			} finally {
+				rename ::interp {}
+				rename ::pgwire::_interp ::interp
 			}
-
-			package require critcl 3
-		} finally {
-			rename ::interp {}
-			rename ::pgwire::_interp ::interp
-		}
-	} on error {} {
-	} on ok ver {
-		#::pgwire::log notice "Have critcl $ver"
-		# With a little help from my friends (c) <<<
-		if {[critcl::compiling]} {
-			#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
-			#critcl::cheaders -I/path/to/headers/
-			#critcl::tcl [info tclversion]
-			critcl::tcl 8.6
-			#critcl::debug memory
-			critcl::debug symbols
-			critcl::cflags -O2 -g
-			#critcl::cflags -O3 -march=native
-			critcl::ccode $::pgwire::c_code;	set baseline	[dict get [info frame 0] line]; set lineno	[expr {$baseline-1}]
-			#::pgwire::log notice "c code:\n[join [lmap line [split $::pgwire::c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-			#critcl::ccommand ::pgwire::c_makerow           c_makerow
-			critcl::ccommand ::pgwire::c_makerow2           c_makerow2
-			critcl::ccommand ::pgwire::c_foreach_batch      c_foreach_batch
-			critcl::ccommand ::pgwire::c_allrows_batch      c_allrows_batch
-			critcl::cinit {
-				Tcl_NRCreateCommand(interp, "::pgwire::c_foreach_batch_nr", c_foreach_batch_nr, c_foreach_batch_nr_setup, NULL, NULL);
-			} {}
-
-			# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
-			critcl::load
-		}
-		# With a little help from my friends (c) >>>
-		set ::pgwire::accelerators	1
-	}
-	if {!$::pgwire::accelerators} {
-		try {
-			package require tcc4tcl
 		} on error {} {
 		} on ok ver {
-			::pgwire::log notice "Have tcc4tcl $ver"
+			#::pgwire::log notice "Have critcl $ver"
 			# With a little help from my friends (c) <<<
-			tcc4tcl $::tcc4tcl::dir memory tcc
-			tcc add_include_path /usr/include
-			tcc compile "#include <tcl.h>\n$::pgwire::c_code"
-			tcc command ::pgwire::c_makerow2             c_makerow2
-			tcc command ::pgwire::c_foreach_batch        c_foreach_batch
-			tcc nrcommand ::pgwire::c_foreach_batch_nr   c_foreach_batch_nr c_foreach_batch_nr_setup
-			tcc command ::pgwire::c_allrows_batch        c_allrows_batch
-			rename tcc {}
+			if {[critcl::compiling]} {
+				#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
+				foreach path $::pgwire::include_path {
+					critcl::cheaders -I$path
+				}
+				#critcl::tcl [info tclversion]
+				critcl::tcl 8.6
+				#critcl::debug memory
+				critcl::debug symbols
+				critcl::cflags -O2 -g
+				#critcl::cflags -O3 -march=native
+				critcl::ccode $::pgwire::c_code;	set baseline	[dict get [info frame 0] line]; set lineno	[expr {$baseline-1}]
+				#::pgwire::log notice "c code:\n[join [lmap line [split $::pgwire::c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+				#critcl::ccommand ::pgwire::c_makerow           c_makerow
+				critcl::ccommand ::pgwire::c_makerow2           c_makerow2
+				critcl::ccommand ::pgwire::c_foreach_batch      c_foreach_batch
+				critcl::ccommand ::pgwire::c_allrows_batch      c_allrows_batch
+				critcl::cinit {
+					Tcl_NRCreateCommand(interp, "::pgwire::c_foreach_batch_nr", c_foreach_batch_nr, c_foreach_batch_nr_setup, NULL, NULL);
+				} {}
+
+				# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
+				critcl::load
+			}
 			# With a little help from my friends (c) >>>
 			set ::pgwire::accelerators	1
 		}
 	}
+	if {!$::pgwire::accelerators} {
+		try {
+			package require Thread	;# Thread: tcc appears to have concurrency issues, so we need to ensure that we're only running in a single thread at at time
+			package require tcc4tcl
+		} on error {} {
+		} on ok ver {
+			tsv::lock pgwire {
+				set start	[clock microseconds]
+				#::pgwire::log notice "Have tcc4tcl $ver"
+				# With a little help from my friends (c) <<<
+				tcc4tcl $::tcc4tcl::dir memory tcc
+				foreach path $::pgwire::include_path {
+					tcc add_include_path $path
+				}
+				tcc compile "#include <tcl.h>\n$::pgwire::c_code"
+				tcc command ::pgwire::c_makerow2             c_makerow2
+				tcc command ::pgwire::c_foreach_batch        c_foreach_batch
+				tcc nrcommand ::pgwire::c_foreach_batch_nr   c_foreach_batch_nr c_foreach_batch_nr_setup
+				tcc command ::pgwire::c_allrows_batch        c_allrows_batch
+				rename tcc {}
+				# With a little help from my friends (c) >>>
+				set ::pgwire::accelerators	1
+				::pgwire::log notice "build pgwire accelerators with tcc: [format {%.3f ms} [expr {([clock microseconds] - $start)/1e6}]]"
+			}
+		}
+	}
 } else {
-	puts stderr "Not using accelerators"
+	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], critcl versions: ([package versions critcl]), tcc4tcl versions: ([package versions tcc4tcl])"
 }
 
 oo::class create ::pgwire {
