@@ -1340,7 +1340,7 @@ oo::class create ::pgwire {
 				}
 			}
 
-			4 {
+			4 - 5 {
 				my connect {*}$args
 			}
 
@@ -1361,7 +1361,7 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method connect {chan db user password} { #<<<
+	method connect {chan db user password {params {}}} { #<<<
 		set socket				$chan
 		set name_seq			0
 		set prepared			{}
@@ -1400,7 +1400,7 @@ oo::class create ::pgwire {
 			-encoding		binary \
 			-buffering		full
 
-		my _startup $db $user $password
+		my _startup $db $user $password $params
 	}
 
 	#>>>
@@ -1526,7 +1526,7 @@ oo::class create ::pgwire {
 		error "No md5 command available"
 	}
 	# Try to find a suitable md5 command >>>
-	method _startup {db user password} { #<<<
+	method _startup {db user password params} { #<<<
 		set payload	[binary format I [expr {
 			3 << 16 | 0
 		}]]	;# Version 3.0
@@ -1536,6 +1536,7 @@ oo::class create ::pgwire {
 			database					$db \
 			client_encoding				UTF8 \
 			standard_conforming_strings	on \
+			{*}$params
 		] {
 			append payload $k \0 $v \0
 		}

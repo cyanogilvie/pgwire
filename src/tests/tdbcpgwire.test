@@ -267,6 +267,16 @@ test tdbcpgwire-22.2 {columns method} -setup { #<<<
 	}
 } -result {film_id {name film_id type integer nullable 0 precision 32} title {name title type text nullable 0} description {name description type text nullable 1} release_year {name release_year type integer nullable 1 precision 32} language_id {name language_id type smallint nullable 0 precision 16} original_language_id {name original_language_id type smallint nullable 1 precision 16} rental_duration {name rental_duration type smallint nullable 0 precision 16} rental_rate {name rental_rate type numeric nullable 0 precision 4} length {name length type smallint nullable 1 precision 16} replacement_cost {name replacement_cost type numeric nullable 0 precision 5} rating {name rating type USER-DEFINED nullable 1} last_update {name last_update type {timestamp with time zone} nullable 0} special_features {name special_features type ARRAY nullable 1} fulltext {name fulltext type tsvector nullable 0}}
 #>>>
+test tdbcpgwire-23.1 {applicatin_name} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs -params {application_name tdbcpgwire-21.1}
+} -body {
+	tdbcpgwire onecolumn {select application_name from pg_stat_activity where pid=pg_backend_pid()}
+} -cleanup {
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+} -result tdbcpgwire-21.1
+#>>>
 
 ::tcltest::cleanupTests
 return

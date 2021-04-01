@@ -27,6 +27,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 		db
 		user
 		password
+		params
 
 		socket
 	}
@@ -42,6 +43,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 					-user		{-required}
 					-password	{-required}
 					-db			{-default template1}
+					-params		{-default {}}
 				}
 			} else {
 				if {[llength $args] % 2 != 0} {
@@ -57,6 +59,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 						-user		{set user $v}
 						-password	{set password $v}
 						-db			{set db $v}
+						-params		{set params $v}
 						default {
 							error "Invalid option \"$k\", must be one of -host, -port, -user, -password, -db"
 						}
@@ -106,7 +109,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 		set socket	[socket $host $port]
 
 		try {
-			pg connect $socket $db $user $password
+			pg connect $socket $db $user $password $params
 		} on error {errmsg options} {
 			if {$socket in [chan names]} {
 				close $socket
