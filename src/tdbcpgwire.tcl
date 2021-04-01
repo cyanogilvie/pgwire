@@ -311,6 +311,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		build_params
 		rformats
 		c_types
+		param_types
 	}
 
 	constructor {instance sqlcode} { #<<<
@@ -509,6 +510,37 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 				$con skip_to_sync
 			}
 		}
+	}
+
+	#>>>
+	method params {} { #<<<
+		dict map {name type_name} $param_types {
+			dict create \
+				direction		in \
+				type			$type_name \
+				precision		0 \
+				scale			0 \
+				nullable		1
+		}
+	}
+
+	#>>>
+	method paramtype {name args} { #<<<
+		if {![dict exists $param_types $name]} {
+			error "Invalid param name \"$name\", must be one of: [join [lmap e [dict keys $param_types] {format {"%s"} $e}] {, }]"
+		}
+
+		switch -exact -- [llength $args] {
+			1 {lassign $args type}
+			2 {lassign $args direction type}
+			3 {lassign $args direction type precision}
+			4 {lassign $args direction type precision scale}
+			default {
+				throw {TCL WRONGARGS} "Wrong # of args, must be name ?direction? type ?precision? ?scale?"
+			}
+		}
+
+		dict set param_types $name $type
 	}
 
 	#>>>

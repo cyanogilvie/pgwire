@@ -90,6 +90,56 @@ test tdbcpgwire-10.3 {ErrorResponse statement allrows during execute phase} -set
 	unset -nocomplain stmt test
 } -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR P0001 *} -result {Postgres error: Test exception: tdbcpgwire-10.3}
 #>>>
+test tdbcpgwire-10.4 {statement params} -setup { #<<<
+	set test	tdbcpgwire-10.4
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
+	$stmt params
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt test
+} -result {film_id {direction in type int4 precision 0 scale 0 nullable 1} rating {direction in type __unknown(16386) precision 0 scale 0 nullable 1}}
+#>>>
+test tdbcpgwire-10.5 {statement paramtype} -setup { #<<<
+	set test	tdbcpgwire-10.5
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
+	$stmt paramtype rating varbinary
+	$stmt params
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt test
+} -result {film_id {direction in type int4 precision 0 scale 0 nullable 1} rating {direction in type varbinary precision 0 scale 0 nullable 1}}
+#>>>
+test tdbcpgwire-10.6 {statement paramtype, invalid param} -setup { #<<<
+	set test	tdbcpgwire-10.6
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+} -body {
+	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
+	$stmt paramtype ratingx varbinary
+	$stmt params
+} -cleanup {
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {
+		tdbcpgwire destroy
+	}
+	unset -nocomplain stmt test
+} -returnCodes error -result {Invalid param name "ratingx", must be one of: "film_id", "rating"}
+#>>>
 test tdbcpgwire-11.1 {ready_for_query} -setup { #<<<
 	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
 } -body {

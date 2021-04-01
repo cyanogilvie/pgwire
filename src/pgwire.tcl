@@ -2486,6 +2486,7 @@ oo::class create ::pgwire {
 				# Describe responses <<<
 				set field_names		{}
 				set param_desc		{}
+				set param_types		{}
 				while 1 {
 					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
 					incr len -4	;# len includes itself
@@ -2506,9 +2507,14 @@ oo::class create ::pgwire {
 
 							set param_seq	0
 							foreach oid $parameter_type_oids name [dict keys $params_assigned] {
-								set type_name	[dict get $type_oids $oid]
+								if {[dict exists $type_oids $oid]} {
+									set type_name	[dict get $type_oids $oid]
+								} else {
+									set type_name	__unknown($oid)
+								}
+								lappend param_types $name $type_name
 
-								set encode_field	[switch -exact -- [dict get $type_oids $oid] {
+								set encode_field	[switch -exact -- $type_name {
 									bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
 									int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
 									smallint -
@@ -2662,12 +2668,14 @@ oo::class create ::pgwire {
 				#	- $rformats: the marshalled count and formats that we will send the input params as
 				#	- $c_types:	the result column names and the formats that they are transported as
 				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				#	- $param_types: input types
 				dict set prepared $sql [set stmt_info [dict create \
 					stmt_name			$stmt_name \
 					build_params		$build_params \
 					rformats			$rformats \
 					c_types				$c_types \
 					heat				0 \
+					param_types			$param_types \
 				]]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
@@ -2697,6 +2705,7 @@ oo::class create ::pgwire {
 			#	- $rformats: the marshalled count and formats that we will send the input params as
 			#	- $c_types:	the result column names and the formats that they are transported as
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+			#	- $param_types: input types
 		}
 		#>>>
 
