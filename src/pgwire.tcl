@@ -1375,7 +1375,7 @@ oo::class create ::pgwire {
 				}
 			}
 
-			4 {
+			4 - 5 {
 				my connect {*}$args
 			}
 
@@ -1396,7 +1396,7 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method connect {chan db user password} { #<<<
+	method connect {chan db user password {params {}}} { #<<<
 		set socket				$chan
 		set name_seq			0
 		set prepared			{}
@@ -1435,7 +1435,7 @@ oo::class create ::pgwire {
 			-encoding		binary \
 			-buffering		full
 
-		my _startup $db $user $password
+		my _startup $db $user $password $params
 	}
 
 	#>>>
@@ -1561,7 +1561,7 @@ oo::class create ::pgwire {
 		error "No md5 command available"
 	}
 	# Try to find a suitable md5 command >>>
-	method _startup {db user password} { #<<<
+	method _startup {db user password params} { #<<<
 		set payload	[binary format I [expr {
 			3 << 16 | 0
 		}]]	;# Version 3.0
@@ -1571,6 +1571,7 @@ oo::class create ::pgwire {
 			database					$db \
 			client_encoding				UTF8 \
 			standard_conforming_strings	on \
+			{*}$params
 		] {
 			append payload $k \0 $v \0
 		}
@@ -2519,6 +2520,7 @@ oo::class create ::pgwire {
 				#>>>
 				# Describe responses <<<
 				set param_desc		{}
+				set param_types		{}
 				while 1 {
 					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
 					incr len -4	;# len includes itself
@@ -2539,9 +2541,14 @@ oo::class create ::pgwire {
 
 							set param_seq	0
 							foreach oid $parameter_type_oids name [dict keys $params_assigned] {
-								set type_name	[dict get $type_oids $oid]
+								if {[dict exists $type_oids $oid]} {
+									set type_name	[dict get $type_oids $oid]
+								} else {
+									set type_name	__unknown($oid)
+								}
+								lappend param_types $name $type_name
 
-								set encode_field	[switch -exact -- [dict get $type_oids $oid] {
+								set encode_field	[switch -exact -- $type_name {
 									bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
 									int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
 									smallint -
@@ -2553,12 +2560,19 @@ oo::class create ::pgwire {
 									bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ia* [string length $value] $value]}}
 									float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IR 4 $value]}}
 									float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IQ 8 $value]}}
-									varchar -
+									text -
+									varchar {
+										return -level 0 {
+											set bytes	[encoding convertto $tcl_encoding $value]
+											set bytelen	[string length $bytes]
+											append pformats \u0\u1; append pdesc [binary format Ia* $bytelen $bytes]
+										}
+									}
 									default {
 										return -level 0 {
 											set bytes	[encoding convertto $tcl_encoding $value]
 											set bytelen	[string length $bytes]
-											append pformats \u0\u0; append pdesc [binary format Ia$bytelen $bytelen $bytes]
+											append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
 										}
 									}
 								}]
@@ -2693,6 +2707,7 @@ oo::class create ::pgwire {
 				#	- $columns: a list of column names (can contain duplicates)
 				#	- $heat: how frequently this prepared statement has been used recently, relative to others
 				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+				#	- $param_types: input types
 				dict set prepared $sql [set stmt_info [dict create \
 					stmt_name			$stmt_name \
 					build_params		$build_params \
@@ -2701,6 +2716,7 @@ oo::class create ::pgwire {
 					columns				$columns \
 					heat				0 \
 					ops_cache			{} \
+					param_types			$param_types \
 				]]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
@@ -2732,6 +2748,7 @@ oo::class create ::pgwire {
 			#	- $columns: a list of column names (can contain duplicates)
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
 			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			#	- $param_types: input types
 		}
 		#>>>
 
@@ -2762,6 +2779,10 @@ oo::class create ::pgwire {
 					C { # CommandComplete <<<
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
+						if {!$sync_outstanding} {
+							puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+							flush $socket
+						}
 						set idx	[string first "\u0" $data]
 						if {$idx == -1} {
 							#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
@@ -2848,6 +2869,7 @@ oo::class create ::pgwire {
 			]
 		}
 		flush $socket
+		set ready_for_query	0
 
 		try {
 			# Bind responses <<<
@@ -2912,6 +2934,7 @@ oo::class create ::pgwire {
 			]
 		}
 		flush $socket
+		set ready_for_query	0
 
 		try {
 			my _read_batch
@@ -3060,12 +3083,15 @@ oo::class create ::pgwire {
 			} [my tcl_makerow $as $c_types]]
 		}
 
-		lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
-			outcome details datarows
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+		coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch
 
 		try {
 			set rows	{}
 			while 1 {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
 				if {$::pgwire::accelerators} {
 					switch -exact -- $outcome \
 						CommandComplete - \
@@ -3097,10 +3123,7 @@ oo::class create ::pgwire {
 					EmptyQueryResponse {
 						break
 					}
-					PortalSuspended {
-						lassign [my _execute "" $max_rows_per_batch] \
-							outcome details datarows
-					}
+					PortalSuspended {}
 					default {
 						error "Unexpected outcome from _read_batch: \"$outcome\""
 					}
@@ -3109,11 +3132,16 @@ oo::class create ::pgwire {
 
 			set rows
 		} finally {
-			if {!$ready_for_query} {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {!$ready_for_query && !$sync_outstanding} {
+				#::pgwire::log notice "foreach finally send sync"
 				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 				flush $socket
 			}
 			if {$sync_outstanding} {
+				#::pgwire::log notice "foreach finally skip_to_sync"
 				my skip_to_sync
 			}
 		}
@@ -3389,7 +3417,7 @@ oo::class create ::pgwire {
 				}
 			}
 		} finally {
-			if {!$ready_for_query} {
+			if {!$ready_for_query && !$sync_outstanding} {
 				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 				flush $socket
 			}

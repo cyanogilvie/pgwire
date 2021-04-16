@@ -896,6 +896,26 @@ test pgwire-11.1 {re-entrant checks} -setup $std_setup -body { #<<<
 	rename pg {}
 } -result 1
 #>>>
+test pgwire-20.1 {update} -setup $std_setup -body { #<<<
+	pg onecolumn {create table foo (id serial, bar text)}
+	set id	[pg onecolumn {insert into foo (bar) values ('initial') returning id}]
+	set bar updated
+	pg onecolumn {update foo set bar=:bar where id=:id}
+	pg onecolumn {select bar from foo where id=:id}
+} -cleanup {
+	pg allrows {drop table foo}
+	rename pg {}
+	unset -nocomplain id bar
+} -result updated
+#>>>
+test pgwire-21.1 {application_name} -setup {} -body { #<<<
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-21.1}
+	pg onecolumn {select application_name from pg_stat_activity where pid=pg_backend_pid()}
+} -cleanup {
+	rename pg {}
+	unset -nocomplain id bar
+} -result pgwire-21.1
+#>>>
 
 ::tcltest::cleanupTests
 return
