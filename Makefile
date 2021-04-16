@@ -1,5 +1,5 @@
 all:
-	make -C src
+	make -C src all
 
 test: all
 	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)"
@@ -9,6 +9,7 @@ gdb: all
 
 benchmark: all
 	docker-compose up -d db
+	-docker-compose exec db tc qdisc del dev eth0 root netem
 	docker-compose exec db tc qdisc add dev eth0 root netem delay .5ms
 	docker-compose run --rm pgwire benchmark TESTFLAGS="$(TESTFLAGS)"
 	docker-compose exec db tc qdisc del dev eth0 root netem
@@ -18,4 +19,4 @@ gdb_benchmark: all
 
 clean:
 	make -C src clean
-	docker-compose down --rmi all -v --remove-orphans
+	docker-compose down --rmi local -v --remove-orphans

@@ -4,7 +4,6 @@ if {"bench" ni [info commands bench]} {
 }
 
 
-tcl::tm::path add [file join [file dirname [file dirname [file normalize [info script]]]] tm]
 package require pgwire
 package require tdbc::pgwire
 package require tdbc::postgres

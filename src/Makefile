@@ -1,5 +1,5 @@
 # First two numbers are the PostgreSQL protocol version number, rest is ours
-VER=3.0.0a1
+VER=3.0.0b1
 
 all: tm/pgwire-$(VER).tm tm/tdbc/pgwire-$(VER).tm
 
@@ -12,18 +12,18 @@ tm/tdbc/pgwire-$(VER).tm: tdbcpgwire.tcl
 	cp tdbcpgwire.tcl tm/tdbc/pgwire-$(VER).tm
 
 gdb: all
-	gdb -ex=r --args tclsh tests/all.tcl $(TESTFLAGS)
+	gdb -ex=r --args tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 test: all
-	tclsh tests/all.tcl $(TESTFLAGS)
+	tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 benchmark: all
 	tc qdisc add dev eth0 root netem delay .5ms
-	tclsh bench/run.tcl $(TESTFLAGS)
+	tclsh bench/run.tcl $(VER) $(TESTFLAGS)
 	tc qdisc del dev eth0 root netem
 
 gdb_benchmark: all
-	gdb -ex=r --args tclsh bench/run.tcl $(TESTFLAGS)
+	gdb -ex=r --args tclsh bench/run.tcl $(VER) $(TESTFLAGS)
 
 clean:
 	-rm -rf tm/*

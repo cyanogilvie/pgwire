@@ -284,7 +284,7 @@ namespace eval ::pgwire { #<<<
 			%opname_strings%	$opname_strings \
 			%opname_addrs%		$opname_addrs \
 		] {
-			int compile_ops(Tcl_Interp* interp, Tcl_Obj* ops, col_op* opv[])
+			int compile_ops(Tcl_Interp* interp, Tcl_Obj* ops, col_op* opv[], int expecting)
 			{
 				int			retcode = TCL_OK;
 				Tcl_Obj**	ov = NULL;
@@ -301,6 +301,12 @@ namespace eval ::pgwire { #<<<
 				if (TCL_OK != (retcode = Tcl_ListObjGetElements(interp, ops, &oc, &ov)))
 					goto done;
 
+				if (oc != expecting) {
+					Tcl_SetObjResult(interp, Tcl_ObjPrintf("Expecting %d ops, got %d", expecting, oc));
+					retcode = TCL_ERROR;
+					goto done;
+				}
+
 				for (i=0; i<oc; i++) {
 					if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, ov[i], opnames, "op", TCL_EXACT, &opidx)))
 						goto done;
@@ -309,6 +315,32 @@ namespace eval ::pgwire { #<<<
 				}
 
 done:
+				return retcode;
+			}
+
+			/* Testing only */
+			int compile_ops_cmd(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[])
+			{
+				int			retcode = TCL_OK;
+				int			expecting;
+
+				if (objc != 3) {
+					Tcl_WrongNumArgs(interp, 1, objv, "ops expecting");
+					retcode = TCL_ERROR;
+					goto done;
+				}
+
+				if (TCL_OK != (retcode = Tcl_GetIntFromObj(interp, objv[2], &expecting)))
+					goto done;
+
+				{
+					col_op*	ops[expecting];
+
+					if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops, expecting)))
+						goto done;
+				}
+
+			done:
 				return retcode;
 			}
 		}]
@@ -683,6 +715,7 @@ done:
 			Tcl_Obj*			rowvar = NULL;
 			Tcl_Encoding		encoding;
 			int					i;
+			int					ops_len;
 
 			//fprintf(stderr, "c_foreach_batch_nr_setup\n");
 			if (objc != 7) {
@@ -724,7 +757,7 @@ done:
 			Tcl_IncrRefCount(s->rowvar = rowvar);
 			Tcl_IncrRefCount(s->script = script);
 			s->ops = ckalloc(colc * sizeof(col_op*));
-			if (TCL_OK != (retcode = compile_ops(interp, objv[2], s->ops)))
+			if (TCL_OK != (retcode = compile_ops(interp, objv[2], s->ops, colc)))
 				goto err;
 
 			return c_foreach_batch_nr_loop_top(interp, s);
@@ -860,7 +893,7 @@ done:
 				int					r;
 				struct column_cx	col;
 
-				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops)))
+				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops, colcount)))
 					goto done;
 
 				col.encoding = encoding;
@@ -973,7 +1006,7 @@ done:
 				int					r;
 				struct column_cx	col;
 
-				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops)))
+				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops, colcount)))
 					goto done;
 
 				col.encoding = encoding;
@@ -1063,7 +1096,7 @@ done:
 				int					c;
 				unsigned char*		p = data+2;
 
-				if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops)))
+				if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops, colcount)))
 					goto done;
 
 				col.encoding = encoding;
@@ -1135,6 +1168,7 @@ if {![info exists ::pgwire::block_accelerators]} {
 				critcl::ccommand ::pgwire::c_makerow2           c_makerow2
 				critcl::ccommand ::pgwire::c_foreach_batch      c_foreach_batch
 				critcl::ccommand ::pgwire::c_allrows_batch      c_allrows_batch
+				critcl::ccommand ::pgwire::compile_ops          compile_ops_cmd
 				critcl::cinit {
 					Tcl_NRCreateCommand(interp, "::pgwire::c_foreach_batch_nr", c_foreach_batch_nr, c_foreach_batch_nr_setup, NULL, NULL);
 				} {}
@@ -1165,6 +1199,7 @@ if {![info exists ::pgwire::block_accelerators]} {
 				tcc command ::pgwire::c_foreach_batch        c_foreach_batch
 				tcc nrcommand ::pgwire::c_foreach_batch_nr   c_foreach_batch_nr c_foreach_batch_nr_setup
 				tcc command ::pgwire::c_allrows_batch        c_allrows_batch
+				tcc command ::pgwire::compile_ops            compile_ops_cmd
 				rename tcc {}
 				# With a little help from my friends (c) >>>
 				set ::pgwire::accelerators	1
@@ -2483,7 +2518,6 @@ oo::class create ::pgwire {
 				}
 				#>>>
 				# Describe responses <<<
-				set field_names		{}
 				set param_desc		{}
 				while 1 {
 					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
@@ -2574,13 +2608,14 @@ oo::class create ::pgwire {
 							} \n
 							#>>>
 						}
-						T { # RowDescription: compile rformats and c_types <<<
+						T { # RowDescription: compile rformats, c_types and columns <<<
 							set data	[read $socket $len]
 							if {[eof $socket]} {my connection_lost}
 
 							binary scan $data S fields_per_row
 							set i	2
 							set c_types		{}
+							set columns		{}
 							set rformats	[binary format Su $fields_per_row]
 							for {set c 0} {$c < $fields_per_row} {incr c} {
 								set idx	[string first \u0 $data $i]
@@ -2631,6 +2666,7 @@ oo::class create ::pgwire {
 
 								append rformats	$colfmt
 								lappend c_types	$field_name $type_name
+								lappend columns	$field_name
 							}
 
 							break
@@ -2639,6 +2675,7 @@ oo::class create ::pgwire {
 						n { # NoData <<<
 							set rformats	\u0\u0
 							set c_types		{}
+							set columns		{}
 							break
 							#>>>
 						}
@@ -2653,13 +2690,17 @@ oo::class create ::pgwire {
 				#	- $build_params: script to run to gather the input params
 				#	- $rformats: the marshalled count and formats that we will send the input params as
 				#	- $c_types:	the result column names and the formats that they are transported as
+				#	- $columns: a list of column names (can contain duplicates)
 				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 				dict set prepared $sql [set stmt_info [dict create \
 					stmt_name			$stmt_name \
 					build_params		$build_params \
 					rformats			$rformats \
 					c_types				$c_types \
+					columns				$columns \
 					heat				0 \
+					ops_cache			{} \
 				]]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
@@ -2688,11 +2729,20 @@ oo::class create ::pgwire {
 			#	- $build_params: script to run to gather the input params
 			#	- $rformats: the marshalled count and formats that we will send the input params as
 			#	- $c_types:	the result column names and the formats that they are transported as
+			#	- $columns: a list of column names (can contain duplicates)
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 		}
 		#>>>
 
 		set stmt_info
+	}
+
+	#>>>
+	method save_ops {sql format ops} { #<<<
+		if {![dict exists $prepared $sql]} return
+		dict set prepared $sql ops_cache $format $ops
+		set ops
 	}
 
 	#>>>
@@ -2975,20 +3025,21 @@ oo::class create ::pgwire {
 
 		my buffer_nesting
 
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+
 		set stmt_info	[my prepare_extended_query $sqlcode]
 		dict with stmt_info {}
 		# Sets:
 		#	- $stmt_name: the name of the prepared statement (as known to the server)
 		#	- $field_names:	the result column names and the local variables they are unpacked into
 		#	- $build_params: script to run to gather the input params
+		#	- $columns: a list of column names (can contain duplicates)
 		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+		#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 
 		try $build_params on ok parameters {}
-
-		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] columns
-		}
-		set columns	[dict keys $c_types]
 
 		#set max_rows_per_batch	17
 		set max_rows_per_batch	$::pgwire::default_batchsize
@@ -2996,7 +3047,12 @@ oo::class create ::pgwire {
 		#set max_rows_per_batch	500
 
 		if {$::pgwire::accelerators} {
-			set ops	[::pgwire::build_ops $as $c_types]
+			if {[dict exists $ops_cache $as]} {
+				set ops	[dict get $ops_cache $as]
+			} else {
+				set ops	[::pgwire::build_ops $as $c_types]
+				my save_ops $sqlcode $as $ops
+			}
 		} else {
 			set addrow	[format {
 				%s
@@ -3159,20 +3215,21 @@ oo::class create ::pgwire {
 
 		my buffer_nesting
 
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+
 		set stmt_info	[my prepare_extended_query $sqlcode]
 		dict with stmt_info {}
 		# Sets:
 		#	- $stmt_name: the name of the prepared statement (as known to the server)
 		#	- $field_names:	the result column names and the local variables they are unpacked into
 		#	- $build_params: script to run to gather the input params
+		#	- $columns: a list of column names (can contain duplicates)
 		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+		#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 
 		try $build_params on ok parameters {}
-
-		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] columns
-		}
-		set columns	[dict keys $c_types]
 
 		#set max_rows_per_batch	17
 		set max_rows_per_batch	$::pgwire::default_batchsize
@@ -3180,7 +3237,12 @@ oo::class create ::pgwire {
 		#set max_rows_per_batch	500
 
 		if {$::pgwire::accelerators} {
-			set ops	[::pgwire::build_ops $as $c_types]
+			if {[dict exists $ops_cache $as]} {
+				set ops	[dict get $ops_cache $as]
+			} else {
+				set ops	[::pgwire::build_ops $as $c_types]
+				my save_ops $sqlcode $as $ops
+			}
 			set foreach_batch {
 				uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script]
 			}
@@ -3272,13 +3334,22 @@ oo::class create ::pgwire {
 		#	- $stmt_name: the name of the prepared statement (as known to the server)
 		#	- $field_names:	the result column names and the local variables they are unpacked into
 		#	- $build_params: script to run to gather the input params
+		#	- $columns: a list of column names (can contain duplicates)
 		#	- $heat: how frequently this prepared statement has been used recently, relative to others
+		#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 
 		try $build_params on ok parameters {}
 
 		set max_rows_per_batch	0
 
-		if {!$::pgwire::accelerators} {
+		if {$::pgwire::accelerators} {
+			if {[dict exists $ops_cache lists]} {
+				set ops	[dict get $ops_cache lists]
+			} else {
+				set ops	[::pgwire::build_ops lists $c_types]
+				my save_ops $sql lists $ops
+			}
+		} else {
 			set makerow	[my tcl_makerow lists $c_types]
 		}
 
@@ -3291,7 +3362,7 @@ oo::class create ::pgwire {
 					CommandComplete -
 					PortalSuspended {
 						if {[llength $datarows] > 0} {
-							return [lindex [::pgwire::c_makerow2 [::pgwire::build_ops lists $c_types] [dict keys $c_types] $tcl_encoding [lindex $datarows 0]] 0]
+							return [lindex [::pgwire::c_makerow2 $ops $columns $tcl_encoding [lindex $datarows 0]] 0]
 						} else {
 							return {}
 						}

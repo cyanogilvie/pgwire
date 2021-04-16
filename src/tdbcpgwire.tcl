@@ -282,6 +282,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward foreach				pg foreach
 	forward onecolumn			pg onecolumn
 	forward prepare_extended_query	pg prepare_extended_query
+	forward save_ops			pg save_ops
 	forward preserve			pg preserve
 	forward release				pg release
 	forward rowbuffer_coro		pg rowbuffer_coro
@@ -308,6 +309,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		build_params
 		rformats
 		c_types
+		columns
+		ops_cache
 	}
 
 	constructor {instance sqlcode} { #<<<
@@ -361,14 +364,19 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		try $build_params on ok parameters {}
 
 		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] columns
+			upvar 1 [dict get $opts -columnsvariable] cols
+			set cols	$columns
 		}
-		set columns	[dict keys $c_types]
 
 		set max_rows_per_batch	$::pgwire::default_batchsize
 
 		if {$::pgwire::accelerators} {
-			set ops		[::pgwire::build_ops $as $c_types]
+			if {[dict exists $ops_cache $as]} {
+				set ops	[dict get $ops_cache $as]
+			} else {
+				set ops	[::pgwire::build_ops $as $c_types]
+				$con save_ops $sql $as $ops
+			}
 			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
 		} else {
 			set makerow	[$con tcl_makerow $as $c_types]
@@ -436,9 +444,9 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		try $build_params on ok parameters {}
 
 		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] columns
+			upvar 1 [dict get $opts -columnsvariable] cols
+			set cols	$columns
 		}
-		set columns	[dict keys $c_types]
 
 		set max_rows_per_batch	$::pgwire::default_batchsize
 
@@ -446,7 +454,12 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		coroutine $rowbuffer $con rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
 
 		if {$::pgwire::accelerators} {
-			set ops		[::pgwire::build_ops $as $c_types]
+			if {[dict exists $ops_cache $as]} {
+				set ops	[dict get $ops_cache $as]
+			} else {
+				set ops	[::pgwire::build_ops $as $c_types]
+				$con save_ops $sql $as $ops
+			}
 			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
 		} else {
 			set makerow	[$con tcl_makerow $as $c_types]
@@ -513,8 +526,11 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	method con {} {set con}
 	method build_params {} { set build_params }
 	method c_types {} { set c_types }
+	method columns {} { set columns }
 	method rformats {} { set rformats }
 	method stmt_name {} { set stmt_name }
+	method ops_cache {} { set ops_cache }
+	method sqlcode {} { set sql }
 }
 
 #>>>
@@ -531,8 +547,9 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		c_types
 		rowcount
 		stmt_name
-		ops_dict
-		ops_list
+		ops_cache
+		ops_dicts
+		ops_lists
 	}
 
 	constructor {stmt args} { #<<<
@@ -557,12 +574,19 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set datarows			{}
 		set con					[$stmt con]
 		set c_types				[$stmt c_types]
+		set columns				[$stmt columns]
 		set rformats			[$stmt rformats]
 		set stmt_name			[$stmt stmt_name]
-		set columns				[dict keys $c_types]
+		set ops_cache			[$stmt ops_cache]
 		set tcl_encoding		[$con tcl_encoding]
-		set ops_dict			[::pgwire::build_ops dicts $c_types]
-		set ops_list			[::pgwire::build_ops lists $c_types]
+		foreach format {dicts lists} {
+			if {[dict exists $ops_cache $format]} {
+				set ops_$format	[dict get $ops_cache $format]
+			} else {
+				set ops_$format	[::pgwire::build_ops $format $c_types]
+				$con save_ops [$stmt sqlcode] $format [set ops_$format]
+			}
+		}
 
 		if {!$::pgwire::accelerators} {
 			# No accelerator support, rewrite our nextdict and nextlist methods to use the statement-specific
@@ -646,7 +670,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			#::pgwire::log notice "Popped data: [string length $datarow], [llength $datarows] rows remain"
 
 			# makerow_start
-			set row	[::pgwire::c_makerow2 $ops_%format% $columns $tcl_encoding $datarow]
+			set row	[::pgwire::c_makerow2 $ops_%format%s $columns $tcl_encoding $datarow]
 			# makerow_end
 			return 1
 		}]

@@ -12,7 +12,10 @@ if {[lsearch [namespace children] ::tcltest] == -1} {
     namespace import ::tcltest::*
 }
 
-tcl::tm::path add [file join [file dirname [file dirname [file normalize [info script]]]] tm]
+set here	[file dirname [file normalize [info script]]]
+set ::argv	[lassign $::argv srcver]
+source [file join $here .. tm pgwire-$srcver.tm]; package provide pgwire $srcver
+source [file join $here .. tm tdbc pgwire-$srcver.tm]; package provide tdbc::pgwire $srcver
 
 set ::tcltest::testSingleFile false
 set ::tcltest::testsDirectory [file dir [info script]]

@@ -4,7 +4,6 @@ if {"bench" ni [info commands bench]} {
 }
 
 
-tcl::tm::path add [file join [file dirname [file dirname [file normalize [info script]]]] tm]
 package require pgwire
 package require tdbc::postgres
 package require unix_sockets
@@ -802,6 +801,119 @@ bench pgwire-7.2 {build_ops} -setup { #<<<
 	}
 	unset -nocomplain c_types obj
 } -result 14
+#>>>
+bench pgwire-7.2.1 {compile_ops} -setup { #<<<
+	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set ops				"[::pgwire::build_ops dicts $c_types] "
+	set expecting		[expr {[llength $c_types] / 2}]
+} -compare {
+	fresh_ops {
+		::pgwire::compile_ops [::pgwire::build_ops dicts $c_types] $expecting
+	}
+	cached_ops {
+		::pgwire::compile_ops $ops $expecting
+	}
+	cached_ops_string {
+		::pgwire::compile_ops [string trim $ops] $expecting
+	}
+} -cleanup {
+	foreach obj {pgwire_uds} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain c_types obj ops expecting
+} -result {}
+#>>>
+bench pgwire-7.2.2 {ops cache lookup} -setup { #<<<
+	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set ops_cache_empty	{}
+	set ops_cache_miss	[dict create lists [::pgwire::build_ops lists $c_types]]
+	set ops_cache_hit	[dict create dicts [::pgwire::build_ops dicts $c_types]]
+} -compare {
+	ops_cache_empty_try {
+		try {
+			dict get $ops_cache_empty dicts
+		} on ok ops {
+		} trap {TCL LOOKUP DICT} {} {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_empty_catch {
+		if {[catch {
+			set ops	[dict get $ops_cache_empty dicts]
+		}]} {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_empty_check {
+		if {[dict exists $ops_cache_empty dicts]} {
+			set ops	[dict get $ops_cache_empty dicts]
+		} else {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_miss_try {
+		try {
+			dict get $ops_cache_miss dicts
+		} on ok ops {
+		} trap {TCL LOOKUP DICT} {} {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_miss_catch {
+		if {[catch {
+			set ops [dict get $ops_cache_miss dicts]
+		}]} {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		} 
+		set ops
+	}
+	ops_cache_miss_check {
+		if {[dict exists $ops_cache_miss dicts]} {
+			set ops	[dict get $ops_cache_miss dicts]
+		} else {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_hit_try {
+		try {
+			dict get $ops_cache_hit dicts
+		} on ok ops {
+		} trap {TCL LOOKUP DICT} {} {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_hit_catch {
+		if {[catch {
+			set ops	[dict get $ops_cache_hit dicts]
+		}]} {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+	ops_cache_hit_check {
+		if {[dict exists $ops_cache_hit dicts]} {
+			set ops	[dict get $ops_cache_hit dicts]
+		} else {
+			dict set ops_cache dicts [set ops [::pgwire::build_ops dicts $c_types]]
+		}
+		set ops
+	}
+} -cleanup {
+	foreach obj {pgwire_uds} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain c_types obj ops ops_cache_empty ops_cache_miss ops_cache_hit ops_cache
+} -result {op_int4_dicts op_text_dicts op_text_dicts op_int4_dicts op_int2_dicts op_int2_dicts op_int2_dicts op_text_dicts op_int2_dicts op_text_dicts op_text_dicts op_text_dicts op_text_dicts op_text_dicts}
 #>>>
 bench pgwire-7.3 {foreach_batch} -setup { #<<<
 	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure

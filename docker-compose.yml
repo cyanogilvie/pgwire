@@ -33,7 +33,8 @@ services:
             PGHOST: /run/postgresql
         cap_add:
             - NET_ADMIN
-        command: tc qdisc add dev eth0 root netem delay 100ms; /usr/bin/make
+        working_dir: /src
+        entrypoint: ["make"]
 volumes:
     data:
     run:

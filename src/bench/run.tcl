@@ -35,9 +35,13 @@ proc benchmark_mode script {
 proc main {} {
 	try {
 		set here	[file dirname [file normalize [info script]]]
+		# Ensure that we load the version from our source repo even if the system already has a version
+		set srcver	[lindex $::argv 0]
+		source [file join $here .. tm pgwire-$srcver.tm]; package provide pgwire $srcver
+		source [file join $here .. tm tdbc pgwire-$srcver.tm]; package provide tdbc::pgwire $srcver
 		benchmark_mode {
 			puts "[string repeat - 80]\nStarting benchmarks\n"
-			bench::run_benchmarks $here {*}$::argv
+			bench::run_benchmarks $here {*}[lrange $::argv 1 end]
 		}
 	} on ok {} {
 		exit 0

@@ -132,6 +132,38 @@ test pgwire-1.3 {onecolumn} -setup { #<<<
 	unset -nocomplain dbchan
 } -result {DUCK RACER}
 #>>>
+test pgwire-1.4 {onecolumn -as dicts, duplicate column names in result} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	pg onecolumn {
+		select
+			*
+		from
+			film f
+		join
+			film_category fc
+		on
+			fc.film_id = f.film_id
+		join
+			category c
+		on
+			c.category_id = fc.category_id
+		where
+			f.film_id = 286
+	}
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan obj
+} -result 286
+#>>>
 test pgwire-2.1 {allrows -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
@@ -260,6 +292,40 @@ test pgwire-3.4 {allrows -as dicts, no -columnsvariable, 1 row, many columns} -s
 	}
 	unset -nocomplain dbchan rows row
 } -result {1000 500500}
+#>>>
+test pgwire-3.5 {allrows -as dicts, duplicate column names in result} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set rows	[pg allrows -as dicts {
+		select
+			*
+		from
+			film f
+		join
+			film_category fc
+		on
+			fc.film_id = f.film_id
+		join
+			category c
+		on
+			c.category_id = fc.category_id
+		where
+			f.film_id = 286
+	}]
+
+	list [dict get [lindex $rows 0] title] [lmap {k v} [lindex $rows 0] {set k}] [dict get [lindex $rows 0] name]
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan rows row obj k v
+} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
 #>>>
 test pgwire-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
@@ -398,6 +464,43 @@ test pgwire-5.4 {foreach with yield} -setup { #<<<
 	}
 	unset -nocomplain dbchan acc count row obj
 } -result {1000 500500}
+#>>>
+test pgwire-5.5 {foreach -as dicts, duplicate column names in result} -setup { #<<<
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+} -body {
+	set rows	{}
+	pg foreach -as dicts row {
+		select
+			*
+		from
+			film f
+		join
+			film_category fc
+		on
+			fc.film_id = f.film_id
+		join
+			category c
+		on
+			c.category_id = fc.category_id
+		where
+			f.film_id = 286
+	} {
+		lappend rows $row
+	}
+
+	list [dict get [lindex $rows 0] title] [lmap {k v} [lindex $rows 0] {set k}] [dict get [lindex $rows 0] name]
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	unset -nocomplain dbchan rows row obj k v
+} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
 #>>>
 test pgwire-6.1 {Transactions, rollback} -setup $std_setup -body { #<<<
 	set res	{}
