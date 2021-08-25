@@ -916,6 +916,17 @@ test pgwire-21.1 {application_name} -setup {} -body { #<<<
 	unset -nocomplain id bar
 } -result pgwire-21.1
 #>>>
+test pgwire-22.1 {select exists} -setup {} -body { #<<<
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-21.1}
+	list [pg onecolumn {
+		select exists (select 1 from information_schema.tables where table_schema='information_schema' and table_name='tables')
+	}] [pg onecolumn {
+		select exists (select 1 from information_schema.tables where table_schema='information_schema' and table_name='tablesx')
+	}]
+} -cleanup {
+	rename pg {}
+} -result {1 0}
+#>>>
 
 ::tcltest::cleanupTests
 return

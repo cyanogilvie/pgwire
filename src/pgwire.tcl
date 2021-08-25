@@ -206,7 +206,7 @@ namespace eval ::pgwire { #<<<
 			foreach {type makeval} {
 				bool	{
 					// TODO: check that this is in fact 1 byte
-					val = l->lit[(*data == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE];
+					val = l->lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE];
 				}
 				int1	{val = Tcl_NewIntObj(*(char*)(*data));}
 				int2	{val = Tcl_NewIntObj(bswap_16(*(int16_t*)(*data)));}
