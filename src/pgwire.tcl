@@ -3052,40 +3052,56 @@ oo::class create ::pgwire {
 			upvar 1 [dict get $opts -columnsvariable] columns
 		}
 
-		set stmt_info	[my prepare_extended_query $sqlcode]
-		dict with stmt_info {}
-		# Sets:
-		#	- $stmt_name: the name of the prepared statement (as known to the server)
-		#	- $field_names:	the result column names and the local variables they are unpacked into
-		#	- $build_params: script to run to gather the input params
-		#	- $columns: a list of column names (can contain duplicates)
-		#	- $heat: how frequently this prepared statement has been used recently, relative to others
-		#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+		set retries	1
+		while 1 {
+			try {
+				set stmt_info	[my prepare_extended_query $sqlcode]
+				dict with stmt_info {}
+				# Sets:
+				#	- $stmt_name: the name of the prepared statement (as known to the server)
+				#	- $field_names:	the result column names and the local variables they are unpacked into
+				#	- $build_params: script to run to gather the input params
+				#	- $columns: a list of column names (can contain duplicates)
+				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 
-		try $build_params on ok parameters {}
+				try $build_params on ok parameters {}
 
-		#set max_rows_per_batch	17
-		set max_rows_per_batch	$::pgwire::default_batchsize
-		#set max_rows_per_batch	0
-		#set max_rows_per_batch	500
+				#set max_rows_per_batch	17
+				set max_rows_per_batch	$::pgwire::default_batchsize
+				#set max_rows_per_batch	0
+				#set max_rows_per_batch	500
 
-		if {$::pgwire::accelerators} {
-			if {[dict exists $ops_cache $as]} {
-				set ops	[dict get $ops_cache $as]
-			} else {
-				set ops	[::pgwire::build_ops $as $c_types]
-				my save_ops $sqlcode $as $ops
+				if {$::pgwire::accelerators} {
+					if {[dict exists $ops_cache $as]} {
+						set ops	[dict get $ops_cache $as]
+					} else {
+						set ops	[::pgwire::build_ops $as $c_types]
+						my save_ops $sqlcode $as $ops
+					}
+				} else {
+					set addrow	[format {
+						%s
+						lappend rows	$row
+					} [my tcl_makerow $as $c_types]]
+				}
+
+				my variable coro_seq
+				set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+				coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				my close_statement $stmt_name
+				dict unset prepared $sqlcode
+				if {[incr retries -1] >= 0} {
+					continue
+				}
+				return -options $options $errmsg
 			}
-		} else {
-			set addrow	[format {
-				%s
-				lappend rows	$row
-			} [my tcl_makerow $as $c_types]]
+			break
 		}
-
-		my variable coro_seq
-		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
-		coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch
 
 		try {
 			set rows	{}
@@ -3247,69 +3263,85 @@ oo::class create ::pgwire {
 			upvar 1 [dict get $opts -columnsvariable] columns
 		}
 
-		set stmt_info	[my prepare_extended_query $sqlcode]
-		dict with stmt_info {}
-		# Sets:
-		#	- $stmt_name: the name of the prepared statement (as known to the server)
-		#	- $field_names:	the result column names and the local variables they are unpacked into
-		#	- $build_params: script to run to gather the input params
-		#	- $columns: a list of column names (can contain duplicates)
-		#	- $heat: how frequently this prepared statement has been used recently, relative to others
-		#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+		set retries	1
+		while 1 {
+			try {
+				set stmt_info	[my prepare_extended_query $sqlcode]
+				dict with stmt_info {}
+				# Sets:
+				#	- $stmt_name: the name of the prepared statement (as known to the server)
+				#	- $field_names:	the result column names and the local variables they are unpacked into
+				#	- $build_params: script to run to gather the input params
+				#	- $columns: a list of column names (can contain duplicates)
+				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 
-		try $build_params on ok parameters {}
+				try $build_params on ok parameters {}
 
-		#set max_rows_per_batch	17
-		set max_rows_per_batch	$::pgwire::default_batchsize
-		#set max_rows_per_batch	0
-		#set max_rows_per_batch	500
+				#set max_rows_per_batch	17
+				set max_rows_per_batch	$::pgwire::default_batchsize
+				#set max_rows_per_batch	0
+				#set max_rows_per_batch	500
 
-		if {$::pgwire::accelerators} {
-			if {[dict exists $ops_cache $as]} {
-				set ops	[dict get $ops_cache $as]
-			} else {
-				set ops	[::pgwire::build_ops $as $c_types]
-				my save_ops $sqlcode $as $ops
-			}
-			set foreach_batch {
-				uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script]
-			}
-		} else {
-			upvar 1 $row_varname row
-			#set makerow	[my tcl_makerow $as $c_types]
-			set foreach_batch [string map [list \
-				%makerow%		[my tcl_makerow $as $c_types] \
-				%script%		[list $script] \
-			] {
-				foreach datarow $datarows {
-					%makerow%
-					try {
-						uplevel 1 %script%
-					} on break {} {
-						set broken	1
-						break
-					} on continue {} {
-					} on return {r o} {
-						#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
-						set broken	1
-						dict incr o -level 1
-						dict set o -code return
-						set rethrow	[list -options $o $r]
-						break
-					} on error {r o} {
-						#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
-						set broken	1
-						dict incr o -level 1
-						set rethrow	[list -options $o $r]
-						break
+				if {$::pgwire::accelerators} {
+					if {[dict exists $ops_cache $as]} {
+						set ops	[dict get $ops_cache $as]
+					} else {
+						set ops	[::pgwire::build_ops $as $c_types]
+						my save_ops $sqlcode $as $ops
 					}
+					set foreach_batch {
+						uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script]
+					}
+				} else {
+					upvar 1 $row_varname row
+					#set makerow	[my tcl_makerow $as $c_types]
+					set foreach_batch [string map [list \
+						%makerow%		[my tcl_makerow $as $c_types] \
+						%script%		[list $script] \
+					] {
+						foreach datarow $datarows {
+							%makerow%
+							try {
+								uplevel 1 %script%
+							} on break {} {
+								set broken	1
+								break
+							} on continue {} {
+							} on return {r o} {
+								#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
+								set broken	1
+								dict incr o -level 1
+								dict set o -code return
+								set rethrow	[list -options $o $r]
+								break
+							} on error {r o} {
+								#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
+								set broken	1
+								dict incr o -level 1
+								set rethrow	[list -options $o $r]
+								break
+							}
+						}
+					}]
 				}
-			}]
-		}
 
-		my variable coro_seq
-		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
-		coroutine $rowbuffer my rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+				my variable coro_seq
+				set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+				coroutine $rowbuffer my rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				my close_statement $stmt_name
+				dict unset prepared $sqlcode
+				if {[incr retries -1] >= 0} {
+					continue
+				}
+				return -options $options $errmsg
+			}
+			break
+		}
 
 		try {
 			set broken	0
@@ -3356,33 +3388,49 @@ oo::class create ::pgwire {
 
 		my buffer_nesting
 
-		set stmt_info	[my prepare_extended_query $sql]
-		dict with stmt_info {}
-		# Sets:
-		#	- $stmt_name: the name of the prepared statement (as known to the server)
-		#	- $field_names:	the result column names and the local variables they are unpacked into
-		#	- $build_params: script to run to gather the input params
-		#	- $columns: a list of column names (can contain duplicates)
-		#	- $heat: how frequently this prepared statement has been used recently, relative to others
-		#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+		set retries	1
+		while 1 {
+			try {
+				set stmt_info	[my prepare_extended_query $sql]
+				dict with stmt_info {}
+				# Sets:
+				#	- $stmt_name: the name of the prepared statement (as known to the server)
+				#	- $field_names:	the result column names and the local variables they are unpacked into
+				#	- $build_params: script to run to gather the input params
+				#	- $columns: a list of column names (can contain duplicates)
+				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 
-		try $build_params on ok parameters {}
+				try $build_params on ok parameters {}
 
-		set max_rows_per_batch	0
+				set max_rows_per_batch	0
 
-		if {$::pgwire::accelerators} {
-			if {[dict exists $ops_cache lists]} {
-				set ops	[dict get $ops_cache lists]
-			} else {
-				set ops	[::pgwire::build_ops lists $c_types]
-				my save_ops $sql lists $ops
+				if {$::pgwire::accelerators} {
+					if {[dict exists $ops_cache lists]} {
+						set ops	[dict get $ops_cache lists]
+					} else {
+						set ops	[::pgwire::build_ops lists $c_types]
+						my save_ops $sql lists $ops
+					}
+				} else {
+					set makerow	[my tcl_makerow lists $c_types]
+				}
+
+				lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+					outcome details datarows
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				my close_statement $stmt_name
+				dict unset prepared $sql
+				if {[incr retries -1] >= 0} {
+					continue
+				}
+				return -options $options $errmsg
 			}
-		} else {
-			set makerow	[my tcl_makerow lists $c_types]
+			break
 		}
-
-		lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
-			outcome details datarows
 
 		try {
 			if {$::pgwire::accelerators} {

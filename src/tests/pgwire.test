@@ -927,6 +927,197 @@ test pgwire-22.1 {select exists} -setup {} -body { #<<<
 	rename pg {}
 } -result {1 0}
 #>>>
+test pgwire-23.1 {schema change: new column and stale prepared statement, allrows} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.1}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.1}
+	pgsetup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	pgsetup allrows {insert into stale (foo) values ('pgwire-23.1')}
+	pg allrows {select * from stale}
+	pgsetup allrows {alter table stale add column bar text}
+	pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.1'}
+} -body {
+	pg allrows {select * from stale}
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+} -result {{foo pgwire-23.1 bar updated}}
+#>>>
+test pgwire-23.2 {schema change: new column and stale prepared statement, foreach} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.2}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.2}
+	pgsetup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	pgsetup allrows {insert into stale (foo) values ('pgwire-23.2')}
+	pg foreach row {select * from stale} {}
+	pgsetup allrows {alter table stale add column bar text}
+	pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.2'}
+} -body {
+	set rows	{}
+	pg foreach row {select * from stale} {lappend rows $row}
+	set rows
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+	unset -nocomplain rows
+} -result {{foo pgwire-23.2 bar updated}}
+#>>>
+test pgwire-23.3 {schema change: new column and stale prepared statement, onecolumn} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.3}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.3}
+	pgsetup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	pgsetup allrows {insert into stale (foo) values ('pgwire-23.3')}
+	pg onecolumn {select * from stale}
+	pgsetup allrows {alter table stale add column bar text}
+	pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.3'}
+} -body {
+	pg onecolumn {select * from stale}
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+} -result {pgwire-23.3}
+#>>>
+test pgwire-24.1 {schema change: column type change and stale prepared statement, allrows} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.1}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.1}
+	pgsetup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key
+		)
+	}
+	pgsetup allrows {insert into stale (foo) values ('24.1')}
+	pg allrows {select foo from stale}
+	pgsetup allrows {alter table stale alter column foo type text}
+} -body {
+	pg allrows {select foo from stale}
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+} -result {{foo 24.1}}
+#>>>
+test pgwire-24.2 {schema change: column type change and stale prepared statement, foreach} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.2}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.2}
+	pgsetup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key
+		)
+	}
+	pgsetup allrows {insert into stale (foo) values ('24.2')}
+	pg foreach row {select foo from stale} {}
+	pgsetup allrows {alter table stale alter column foo type text}
+} -body {
+	set rows	{}
+	pg foreach row {select * from stale} {lappend rows $row}
+	set rows
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+	unset -nocomplain rows
+} -result {{foo 24.2}}
+#>>>
+test pgwire-24.3 {schema change: column type change and stale prepared statement, onecolumn} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.3}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.3}
+	pgsetup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key
+		)
+	}
+	pgsetup allrows {insert into stale (foo) values ('24.3')}
+	pg onecolumn {select foo from stale}
+	pgsetup allrows {alter table stale alter column foo type text}
+} -body {
+	pg onecolumn {select * from stale}
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+} -result {pgwire-24.3}
+#>>>
+test pgwire-25.1 {schema change: parameter type change and stale prepared statement, allrows} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.1}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.1}
+	pgsetup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key,
+			bar		text
+		)
+	}
+	pgsetup allrows {insert into stale (foo,bar) values ('25.1','pgwire-25.1')}
+	set id	25.1
+	pg allrows {select bar from stale where foo=:id}
+	pgsetup allrows {alter table stale alter column foo type text}
+} -body {
+	pg allrows {select bar from stale where foo=:id}
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+	unset -nocomplain id
+} -result {{bar pgwire-25.1}}
+#>>>
+test pgwire-25.2 {schema change: parameter type change and stale prepared statement, foreach} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.2}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.2}
+	pgsetup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key,
+			bar		text
+		)
+	}
+	pgsetup allrows {insert into stale (foo,bar) values ('25.2','pgwire-25.2')}
+	set id	25.2
+	pg foreach row {select bar from stale where foo=:id} {}
+	pgsetup allrows {alter table stale alter column foo type text}
+} -body {
+	set rows	{}
+	pg foreach row {select bar from stale where foo=:id} {lappend rows $row}
+	set rows
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+	unset -nocomplain id rows
+} -result {{bar pgwire-25.2}}
+#>>>
+test pgwire-25.3 {schema change: parameter type change and stale prepared statement, onecolumn} -setup { #<<<
+	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.3}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.3}
+	pgsetup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key,
+			bar		text
+		)
+	}
+	pgsetup allrows {insert into stale (foo,bar) values ('25.3','pgwire-25.3')}
+	set id	25.3
+	pg onecolumn {select bar from stale where foo=:id}
+	pgsetup allrows {alter table stale alter column foo type text}
+} -body {
+	pg onecolumn {select bar from stale where foo=:id}
+} -cleanup {
+	pgsetup allrows {drop table stale}
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info object isa object pgsetup]} {rename pgsetup {}}
+	unset -nocomplain id
+} -result {pgwire-25.3}
+#>>>
 
 ::tcltest::cleanupTests
 return
