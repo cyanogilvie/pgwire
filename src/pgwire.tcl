@@ -2756,6 +2756,12 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method reprepare sql { # If a prepared statement becomes stale (changed schema, etc), this can be used to replace it <<<
+		dict unset prepared $sql
+		my prepare_extended_query $sql
+	}
+
+	#>>>
 	method save_ops {sql format ops} { #<<<
 		if {![dict exists $prepared $sql]} return
 		dict set prepared $sql ops_cache $format $ops
@@ -3052,42 +3058,42 @@ oo::class create ::pgwire {
 			upvar 1 [dict get $opts -columnsvariable] columns
 		}
 
+		#set max_rows_per_batch	17
+		set max_rows_per_batch	$::pgwire::default_batchsize
+		#set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+
 		set retries	1
 		while 1 {
-			try {
-				set stmt_info	[my prepare_extended_query $sqlcode]
-				dict with stmt_info {}
-				# Sets:
-				#	- $stmt_name: the name of the prepared statement (as known to the server)
-				#	- $field_names:	the result column names and the local variables they are unpacked into
-				#	- $build_params: script to run to gather the input params
-				#	- $columns: a list of column names (can contain duplicates)
-				#	- $heat: how frequently this prepared statement has been used recently, relative to others
-				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			set stmt_info	[my prepare_extended_query $sqlcode]
+			dict with stmt_info {}
+			# Sets:
+			#	- $stmt_name: the name of the prepared statement (as known to the server)
+			#	- $field_names:	the result column names and the local variables they are unpacked into
+			#	- $build_params: script to run to gather the input params
+			#	- $columns: a list of column names (can contain duplicates)
+			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			try $build_params on ok parameters {}
 
-				try $build_params on ok parameters {}
-
-				#set max_rows_per_batch	17
-				set max_rows_per_batch	$::pgwire::default_batchsize
-				#set max_rows_per_batch	0
-				#set max_rows_per_batch	500
-
-				if {$::pgwire::accelerators} {
-					if {[dict exists $ops_cache $as]} {
-						set ops	[dict get $ops_cache $as]
-					} else {
-						set ops	[::pgwire::build_ops $as $c_types]
-						my save_ops $sqlcode $as $ops
-					}
+			if {$::pgwire::accelerators} {
+				if {[dict exists $ops_cache $as]} {
+					set ops	[dict get $ops_cache $as]
 				} else {
-					set addrow	[format {
-						%s
-						lappend rows	$row
-					} [my tcl_makerow $as $c_types]]
+					set ops	[::pgwire::build_ops $as $c_types]
+					my save_ops $sqlcode $as $ops
 				}
+			} else {
+				set addrow	[format {
+					%s
+					lappend rows	$row
+				} [my tcl_makerow $as $c_types]]
+			}
 
-				my variable coro_seq
-				set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+			try {
 				coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
@@ -3263,26 +3269,29 @@ oo::class create ::pgwire {
 			upvar 1 [dict get $opts -columnsvariable] columns
 		}
 
+		#set max_rows_per_batch	17
+		set max_rows_per_batch	$::pgwire::default_batchsize
+		#set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+
 		set retries	1
 		while 1 {
+			set stmt_info	[my prepare_extended_query $sqlcode]
+			dict with stmt_info {}
+			# Sets:
+			#	- $stmt_name: the name of the prepared statement (as known to the server)
+			#	- $field_names:	the result column names and the local variables they are unpacked into
+			#	- $build_params: script to run to gather the input params
+			#	- $columns: a list of column names (can contain duplicates)
+			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+
+			try $build_params on ok parameters {}
+
 			try {
-				set stmt_info	[my prepare_extended_query $sqlcode]
-				dict with stmt_info {}
-				# Sets:
-				#	- $stmt_name: the name of the prepared statement (as known to the server)
-				#	- $field_names:	the result column names and the local variables they are unpacked into
-				#	- $build_params: script to run to gather the input params
-				#	- $columns: a list of column names (can contain duplicates)
-				#	- $heat: how frequently this prepared statement has been used recently, relative to others
-				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
-
-				try $build_params on ok parameters {}
-
-				#set max_rows_per_batch	17
-				set max_rows_per_batch	$::pgwire::default_batchsize
-				#set max_rows_per_batch	0
-				#set max_rows_per_batch	500
-
 				if {$::pgwire::accelerators} {
 					if {[dict exists $ops_cache $as]} {
 						set ops	[dict get $ops_cache $as]
@@ -3325,10 +3334,8 @@ oo::class create ::pgwire {
 						}
 					}]
 				}
-
-				my variable coro_seq
-				set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
-				coroutine $rowbuffer my rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+				coroutine $rowbuffer my rowbuffer_coro \
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 				# 0A000 - happens if a schema change alters the result row format

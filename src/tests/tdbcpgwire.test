@@ -327,6 +327,181 @@ test tdbcpgwire-23.1 {application_name} -setup { #<<<
 	}
 } -result tdbcpgwire-21.1
 #>>>
+test tdbcpgwire-24.1 {schema change: new column and stale prepared statement, allrows} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.1')}
+	tdbcpgwire allrows {select * from stale}
+	tdbcpgwire_setup allrows {alter table stale add column bar text}
+	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.1'}
+} -body {
+	tdbcpgwire allrows {select * from stale}
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+} -result {{foo tdbcpgwire-24.1 bar updated}}
+#>>>
+test tdbcpgwire-24.2 {schema change: new column and stale prepared statement, foreach} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.2')}
+	tdbcpgwire foreach row {select * from stale} {}
+	tdbcpgwire_setup allrows {alter table stale add column bar text}
+	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.2'}
+} -body {
+	set rows	{}
+	tdbcpgwire foreach row {select * from stale} {lappend rows $row}
+	set rows
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	unset -nocomplain rows row
+} -result {{foo tdbcpgwire-24.2 bar updated}}
+#>>>
+test tdbcpgwire-24.3 {schema change: new column and stale prepared statement, onecolumn} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.3')}
+	tdbcpgwire onecolumn {select * from stale}
+	tdbcpgwire_setup allrows {alter table stale add column bar text}
+	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.3'}
+} -body {
+	tdbcpgwire onecolumn {select * from stale}
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+} -result {tdbcpgwire-24.3}
+#>>>
+test tdbcpgwire-26.1 {schema change: new column and stale explicitly prepared statement, allrows} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	#tdbcpgwire_setup allrows {drop table if exists stale}
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-26.1')}
+	set stmt	[tdbcpgwire prepare {select * from stale}]
+	$stmt allrows
+	tdbcpgwire_setup allrows {alter table stale add column bar text}
+	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-26.1'}
+} -body {
+	$stmt allrows
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	unset -nocomplain stmt
+} -result {{foo tdbcpgwire-26.1 bar updated}}
+#>>>
+test tdbcpgwire-26.2 {schema change: new column and stale explicitly prepared statement, foreach} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	#tdbcpgwire_setup allrows {drop table if exists stale}
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		text primary key
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-26.2')}
+	set stmt	[tdbcpgwire prepare {select * from stale}]
+	$stmt foreach row {}
+	tdbcpgwire_setup allrows {alter table stale add column bar text}
+	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-26.2'}
+} -body {
+	set rows	{}
+	$stmt foreach row {lappend rows $row}
+	set rows
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	unset -nocomplain stmt rows row
+} -result {{foo tdbcpgwire-26.2 bar updated}}
+#>>>
+test tdbcpgwire-27.1 {schema change: parameter type change and explicitly stale prepared statement, allrows} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	#tdbcpgwire_setup allrows {drop table if exists stale}
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key,
+			bar		text
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo, bar) values ('27.1', 'tdbcpgwire-27.1')}
+	set id		27.1
+	set stmt	[tdbcpgwire prepare {select bar from stale where foo=:id}]
+	$stmt allrows
+} -body {
+	$stmt allrows
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	unset -nocomplain stmt id
+} -result {{bar tdbcpgwire-27.1}}
+#>>>
+test tdbcpgwire-27.2 {schema change: parameter type change and explicitly stale prepared statement, foreach} -setup { #<<<
+	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	#tdbcpgwire_setup allrows {drop table if exists stale}
+	tdbcpgwire_setup allrows {
+		create table stale (
+			foo		numeric(10,1) primary key,
+			bar		text
+		)
+	}
+	tdbcpgwire_setup allrows {insert into stale (foo, bar) values ('27.2', 'tdbcpgwire-27.2')}
+	set id		27.2
+	set stmt	[tdbcpgwire prepare {select bar from stale where foo=:id}]
+	try {
+	$stmt foreach row {}
+	} on error {errmsg options} {
+		puts stderr "Unhandled error: $options"
+	}
+} -body {
+	set rows	{}
+	$stmt foreach row {lappend rows $row}
+	set rows
+} -cleanup {
+	tdbcpgwire_setup allrows {drop table stale}
+	if {[info exists stmt] && [info object isa object $stmt]} {
+		$stmt destroy
+	}
+	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	unset -nocomplain stmt id row rows
+} -result {{bar tdbcpgwire-27.2}}
+#>>>
 
 ::tcltest::cleanupTests
 return

@@ -285,6 +285,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward foreach				pg foreach
 	forward onecolumn			pg onecolumn
 	forward prepare_extended_query	pg prepare_extended_query
+	forward reprepare			pg reprepare
 	forward save_ops			pg save_ops
 	forward preserve			pg preserve
 	forward release				pg release
@@ -348,6 +349,32 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	}
 
 	#>>>
+	method _start_query {as opts args} { #<<<
+		$con buffer_nesting
+
+		try {uplevel 1 $build_params} on ok parameters {}
+
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 2 [dict get $opts -columnsvariable] cols
+			set cols	$columns
+		}
+
+		if {$::pgwire::accelerators} {
+			if {[dict exists $ops_cache $as]} {
+				set ops	[dict get $ops_cache $as]
+			} else {
+				set ops	[::pgwire::build_ops $as $c_types]
+				$con save_ops $sql $as $ops
+			}
+			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
+		} else {
+			set makerow	[$con tcl_makerow $as $c_types]
+		}
+
+		list $makerow $parameters $ops
+	}
+
+	#>>>
 	method allrows args { #<<<
 		variable ::tdbc::generalError
 
@@ -363,33 +390,32 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 		set as	[dict get $opts -as]
 
-		$con buffer_nesting
-
-		try $build_params on ok parameters {}
-
-		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] cols
-			set cols	$columns
-		}
-
 		set max_rows_per_batch	$::pgwire::default_batchsize
 
-		if {$::pgwire::accelerators} {
-			if {[dict exists $ops_cache $as]} {
-				set ops	[dict get $ops_cache $as]
-			} else {
-				set ops	[::pgwire::build_ops $as $c_types]
-				$con save_ops $sql $as $ops
-			}
-			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
-		} else {
-			set makerow	[$con tcl_makerow $as $c_types]
-		}
-
 		set tcl_encoding	[$con tcl_encoding]
+		lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+
 		try {
 			set rowbuffer	[namespace current]::portal
-			coroutine $rowbuffer $con rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+			try {
+				coroutine $rowbuffer $con rowbuffer_coro \
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				$con close_statement $stmt_name
+				set ops_cache	{}
+				set stmt_info	[$con reprepare $sql]
+				dict with stmt_info {}
+
+				lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+
+				coroutine $rowbuffer $con rowbuffer_coro \
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+			} on error {errmsg options} {
+				puts stderr "Unhandled error: $options"
+			}
 
 			set rows	{}
 
@@ -441,32 +467,33 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 						 ?-option value?... ?--? varName ?dictionary? script"
 			}
 		}
+		upvar 1 $row_varname row
 		set as	[dict get $opts -as]
-
-		$con buffer_nesting
-
-		try $build_params on ok parameters {}
-
-		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] cols
-			set cols	$columns
-		}
 
 		set max_rows_per_batch	$::pgwire::default_batchsize
 
-		set rowbuffer	[namespace current]::portal
-		coroutine $rowbuffer $con rowbuffer_coro $stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+		set tcl_encoding	[$con tcl_encoding]
+		lassign [my _start_query $as $opts {*}$args] makerow parameters ops
 
-		if {$::pgwire::accelerators} {
-			if {[dict exists $ops_cache $as]} {
-				set ops	[dict get $ops_cache $as]
-			} else {
-				set ops	[::pgwire::build_ops $as $c_types]
-				$con save_ops $sql $as $ops
-			}
-			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
-		} else {
-			set makerow	[$con tcl_makerow $as $c_types]
+		set rowbuffer	[namespace current]::portal
+		try {
+			coroutine $rowbuffer $con rowbuffer_coro \
+				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+		} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+		  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+			# 0A000 - happens if a schema change alters the result row format
+			# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+			$con close_statement $stmt_name
+			set ops_cache	{}
+			set stmt_info	[$con reprepare $sql]
+			dict with stmt_info {}
+
+			lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+
+			coroutine $rowbuffer $con rowbuffer_coro \
+				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+		} on error {errmsg options} {
+			puts stderr "Unhandled error: $options"
 		}
 
 		set tcl_encoding	[$con tcl_encoding]
