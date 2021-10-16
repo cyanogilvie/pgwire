@@ -323,6 +323,7 @@ done:
 			{
 				int			retcode = TCL_OK;
 				int			expecting;
+				col_op**	ops = NULL;
 
 				if (objc != 3) {
 					Tcl_WrongNumArgs(interp, 1, objv, "ops expecting");
@@ -333,14 +334,13 @@ done:
 				if (TCL_OK != (retcode = Tcl_GetIntFromObj(interp, objv[2], &expecting)))
 					goto done;
 
-				{
-					col_op*	ops[expecting];
+				ops = (col_op**)malloc(sizeof(col_op*) * expecting);
 
-					if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops, expecting)))
-						goto done;
-				}
+				if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops, expecting)))
+					goto done;
 
 			done:
+				if (ops) { free(ops); ops = NULL; }
 				return retcode;
 			}
 		}]
@@ -351,6 +351,7 @@ done:
 	# C code <<<
 	set c_code	[string map [list \
 		%accel_ops%	$::pgwire::accel_ops \
+		%line%		[expr {34 + [dict get [info frame 0] line]}] \
 	] {
 		#include <byteswap.h>
 		#include <stdint.h>
@@ -384,6 +385,7 @@ done:
 		};
 
 		%accel_ops%
+		#line %line%
 
 		struct foreach_state {
 			struct column_cx	col;
@@ -870,6 +872,8 @@ done:
 			struct interp_cx*	l = get_interp_cx(interp);
 			Tcl_Obj*			rowvar = NULL;
 			Tcl_Encoding		encoding;
+			col_op**			ops = NULL;
+			Tcl_Obj**			rowv = NULL;
 
 			if (objc != 7) {
 				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script");
@@ -886,10 +890,10 @@ done:
 				return TCL_ERROR;
 			Tcl_IncrRefCount(script = objv[6]);
 
+			ops = (col_op**)malloc(sizeof(col_op*) * colc);
+			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
 			{
 				const int			colcount = colc;
-				col_op*				ops[colcount];		// Is the concern about stack consumption here for a very large number of columns valid?
-				Tcl_Obj*			rowv[colcount*2];	// *2: dict format can use up to 2 slots per col
 				int					r;
 				struct column_cx	col;
 
@@ -956,6 +960,8 @@ done:
 			*/
 
 done:
+			if (ops) { free(ops); ops = NULL; }
+			if (rowv) { free(rowv); rowv = NULL; }
 			if (script) {
 				Tcl_DecrRefCount(script); script = NULL;
 			}
@@ -976,6 +982,8 @@ done:
 			struct interp_cx*	l = get_interp_cx(interp);
 			Tcl_Encoding		encoding;
 			Tcl_Obj*			rows = NULL;
+			col_op**			ops = NULL;
+			Tcl_Obj**			rowv = NULL;
 
 			if (objc != 6) {
 				Tcl_WrongNumArgs(interp, 1, objv, "rowsvar ops columns tcl_encoding datarows");
@@ -999,10 +1007,10 @@ done:
 				rows = Tcl_DuplicateObj(rows);
 			}
 
+			ops = (col_op**)malloc(sizeof(col_op*) * colc);
+			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
 			{
 				const int			colcount = colc;
-				col_op*				ops[colcount];		// Is the concern about stack consumption here for a very large number of columns valid?
-				Tcl_Obj*			rowv[colcount*2];	// *2: dict format can use up to 2 slots per col
 				int					r;
 				struct column_cx	col;
 
@@ -1062,6 +1070,8 @@ done:
 				Tcl_IncrRefCount(rows);
 				Tcl_DecrRefCount(rows); rows = NULL;
 			}
+			if (ops) { free(ops); ops = NULL; }
+			if (rowv) { free(rowv); ops = NULL; }
 			return retcode;
 		}
 
@@ -1075,6 +1085,8 @@ done:
 			Tcl_Encoding		encoding;
 			unsigned char*		data = NULL;
 			int					data_len;
+			col_op**			ops = NULL;
+			Tcl_Obj**			rowv = NULL;
 
 			if (objc != 5) {
 				Tcl_WrongNumArgs(interp, 1, objv, "ops columns tcl_encoding datarow");
@@ -1087,10 +1099,10 @@ done:
 				return TCL_ERROR;
 			data = Tcl_GetByteArrayFromObj(objv[4], &data_len);
 
+			ops = (col_op**)malloc(sizeof(col_op*) * colc);
+			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
 			{
 				const int			colcount = colc;
-				col_op*				ops[colcount];		// Is the concern about stack consumption here for a very large number of columns valid?
-				Tcl_Obj*			rowv[colcount*2];	// *2: dict format can use up to 2 slots per col
 				int					r;
 				struct column_cx	col;
 				int					c;
@@ -1116,6 +1128,8 @@ done:
 			}
 
 done:
+			if (ops) { free(ops); ops = NULL; }
+			if (rowv) { free(rowv); rowv = NULL; }
 			return retcode;
 		}
 
@@ -1203,7 +1217,7 @@ if {![info exists ::pgwire::block_accelerators]} {
 				rename tcc {}
 				# With a little help from my friends (c) >>>
 				set ::pgwire::accelerators	1
-				::pgwire::log notice "build pgwire accelerators with tcc: [format {%.3f ms} [expr {([clock microseconds] - $start)/1e6}]]"
+				::pgwire::log notice "build pgwire accelerators with tcc: [format {%.3f ms} [expr {([clock microseconds] - $start)/1e3}]]"
 			}
 		}
 	}
