@@ -42,6 +42,9 @@ namespace eval ::pgwire { #<<<
 	}
 	if {![info exists include_path]} {
 		variable include_path	/usr/include
+		if {[info exists ::env(SNAP)]} {
+			lappend include_path	[file join $::env(SNAP) include]
+		}
 	}
 
 	namespace eval tapchan {
