@@ -41,9 +41,10 @@ namespace eval ::pgwire { #<<<
 		variable default_batchsize	1000
 	}
 	if {![info exists include_path]} {
-		variable include_path	/usr/include
 		if {[info exists ::env(SNAP)]} {
-			lappend include_path	[file join $::env(SNAP) include]
+			lappend include_path	[file join $::env(SNAP) usr/include]
+		} else {
+			variable include_path	/usr/include
 		}
 	}
 
