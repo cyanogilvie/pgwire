@@ -1389,7 +1389,7 @@ oo::class create ::pgwire {
 				if {[lindex $args 0] eq "-attach"} {
 					my attach [lindex $args 1]
 				} else {
-					error "Wrong number of arguments, must be {chan db user password} or -attach \$handle"
+					error "Wrong number of arguments, must be {chan db user password ?params?} or -attach \$handle"
 				}
 			}
 
@@ -1398,7 +1398,7 @@ oo::class create ::pgwire {
 			}
 
 			default {
-				error "Wrong number of arguments, must be {chan db user password} or -attach \$handle"
+				error "Wrong number of arguments, must be {chan db user password ?params?} or -attach \$handle"
 			}
 		}
 	}
@@ -1452,6 +1452,8 @@ oo::class create ::pgwire {
 			-translation	binary \
 			-encoding		binary \
 			-buffering		full
+
+		chan event $socket readable [namespace code {my read_async}]
 
 		my _startup $db $user $password $params
 	}
@@ -1745,6 +1747,63 @@ oo::class create ::pgwire {
 
 		#>>>
 	}
+	method read_async {} { #<<<
+		if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+		#::pgwire::log notice "got msgtype ($msgtype)"
+		incr len -4		;# len includes itself
+		set data	[read $socket $len]
+		if {[eof $socket]} {my connection_lost}
+
+		try {
+			dict get $msgtypes backend $msgtype
+		} trap {TCL LOOKUP DICT} {errmsg options} {
+			my _error "Invalid msgtype: \"$msgtype\", [binary encode hex $msgtype], probably a sync issue, abandoning connection"
+		} on ok messagename {}
+		switch -exact -- $messagename {
+			NotificationResponse { # NotificationResponse <<<
+				binary scan $data I pid
+				set i 4
+				set channel	[my _get_string $data i]
+				set payload	[my _get_string $data i]
+				my NotificationResponse $pid $channel $payload
+				#>>>
+			}
+			ParameterStatus { # ParameterStatus <<<
+				set i	0
+				set param	[my _get_string $data i]
+				set value	[my _get_string $data i]
+				#?? {::pgwire::log debug "Server ParameterStatus \"$param\" -> \"$value\""}
+				dict set server_params $param $value
+				if {$param eq "client_encoding"} {
+					if {[dict exists $encodings_map $value]} {
+						set tcl_encoding	[dict get $encodings_map $value]
+					} else {
+						::pgwire::log warning "No tcl encoding equivalent defined for \"$value\""
+						set tcl_encoding	ascii
+					}
+				}
+				#>>>
+			}
+			NoticeResponse { # NoticeResponse <<<
+				set i	0
+				set fields	{}
+				while {$i < [string length $data]} {
+					set field_type	[string index $data $i]
+					if {$field_type eq "\0"} break
+					incr i
+					set string	[my _get_string $data i]
+					lappend fields	[dict get $errorfields $field_type] $string
+				}
+				my NoticeResponse $fields
+				#>>>
+			}
+			default {
+				my _error "Async read got unexpected message type $messagename"
+			}
+		}
+	}
+
+	#>>>
 	method read_one_message {} { #<<<
 		while 1 {
 			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
@@ -2308,6 +2367,11 @@ oo::class create ::pgwire {
 			CommandComplete {} {}
 			ReadyForQuery transaction_status break
 		}
+	}
+
+	#>>>
+	method server_params {} { #<<<
+		set server_params
 	}
 
 	#>>>
