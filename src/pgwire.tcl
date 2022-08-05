@@ -1,3 +1,5 @@
+# Useful: https://www.pgcon.org/2014/schedule/attachments/330_postgres-for-the-wire.pdf
+
 package require Thread
 
 apply {{} {
@@ -3141,8 +3143,8 @@ oo::class create ::pgwire {
 		}
 
 		#set max_rows_per_batch	17
-		set max_rows_per_batch	$::pgwire::default_batchsize
-		#set max_rows_per_batch	0
+		#set max_rows_per_batch	$::pgwire::default_batchsize
+		set max_rows_per_batch	0
 		#set max_rows_per_batch	500
 
 		my variable coro_seq

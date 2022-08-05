@@ -390,7 +390,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 		set as	[dict get $opts -as]
 
-		set max_rows_per_batch	$::pgwire::default_batchsize
+		#set max_rows_per_batch	$::pgwire::default_batchsize
+		set max_rows_per_batch	0
 
 		set tcl_encoding	[$con tcl_encoding]
 		lassign [my _start_query $as $opts {*}$args] makerow parameters ops
