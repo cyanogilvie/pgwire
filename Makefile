@@ -4,6 +4,9 @@ all:
 test: all
 	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)"
 
+valgrind: all
+	docker-compose run --rm pgwire valgrind TESTFLAGS="$(TESTFLAGS)"
+
 gdb: all
 	docker-compose run --rm pgwire gdb TESTFLAGS="$(TESTFLAGS)"
 

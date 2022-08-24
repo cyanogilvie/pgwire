@@ -9,6 +9,7 @@ apply {{} {
 		block_accelerators
 		default_batchsize
 		include_path
+		_force_generic_array
 	} {
 		if {[info exists ::pgwire::$v]} {
 			lappend preserved $v [set ::pgwire::$v]
@@ -49,6 +50,11 @@ namespace eval ::pgwire { #<<<
 			variable include_path	/usr/include
 		}
 	}
+
+	variable arr_fmt_cache	{}
+
+	# Testing toggles
+	variable _force_generic_array	0
 
 	namespace eval tapchan {
 		namespace export *
@@ -176,10 +182,155 @@ namespace eval ::pgwire { #<<<
 		#>>>
 	}
 
+	variable parse_pgarray_regexes	{}
+	proc parse_pgarray {str {delim ,} {idx 0} {nested 0}} { #<<<
+		# TODO: handle the backslash quoted case (without double quotes)
+		#if {$nested == 0} {
+		#	puts stderr "-> parse_pgarray $idx ([string range $str $idx end])"
+		#}
+		set end		[string length $str]
+		set elems	{}
+		set ended	0
+
+		set regex {{name delim} { # Customize the patterns for a specific delimiter <<<
+			variable ::pgwire::parse_pgarray_regexes
+			if {![dict exists $parse_pgarray_regexes $name $delim]} {
+				regsub -all {[^a-zA-Z0-9,;_-]} $delim {\\\0} qdelim
+
+				dict set parse_pgarray_regexes $name $delim [string map [list %qdelim% $qdelim] [switch -exact -- $name {
+					elem {
+						return -level 0 {
+							\A\s*(?:
+								(\x7b) |
+								(?:
+									(?:
+										(NULL) |
+										([^%qdelim%\\\x7d\x7b\x22]+) |
+										(?: \x22 \\ \\ x ([0-9a-fA-F]+) \x22 )
+									) \s* (?: (%qdelim%)|(\x7d) )
+								) |
+								(\x22) |
+								(\x7d \s*)
+							)
+						}
+					}
+
+					quotedstring {
+						return -level 0 {\A ([^\x22\\]*) (?: (\x22) \s* (?: (%qdelim%)|(\x7d) ) | \\(.) )}
+					}
+
+					afterclosebrace {
+						return -level 0 {\A\s* (?: (\x7d) | (%qdelim%) | $)}
+					}
+
+					default {
+						error "Unrecognised regex name \"$name\""
+					}
+				}]]
+			}
+			#puts "regex $name: ([dict get $parse_pgarray_regexes $name $delim])"
+			dict get $parse_pgarray_regexes $name $delim
+		}}
+		#>>>
+
+		while {$idx < $end} {
+			#puts "regex elem match @ $idx: ([string range $str $idx end])"
+			if {![regexp -start $idx -indices -expanded -nocase [apply $regex elem $delim] $str all b null chars bin nd nend q fini]
+			} {
+				error "Could not match at $idx: ([string range $str $idx end])"
+			}
+
+			#puts "matched: ([string range $str {*}$all]), q: ($q), b: ($b), null: ($null), bin: ($bin), chars: ($chars), nd: ($nd), nend: ($nend), fini: ($fini)"
+
+			lassign $all all_from all_to
+
+			if {[lindex $nend 0] >= 0} {
+				set ended	1
+			}
+			if {[lindex $fini 0] >= 0} {
+				incr idx	[expr {$all_to+1}]
+				#puts "<- parse_pgarray fini, returning [list $elems $idx]"
+				return [list $elems $idx]
+			}
+
+			if {[lindex $bin 0] >= 0} {
+				lappend elems [binary decode hex [string range $str {*}$bin]]
+				set idx	[expr {$all_to + 1}]
+			} elseif {[lindex $q 0] >= 0} {
+				#puts "q: ($q)"
+				set qidx	$idx
+				set idx	[expr {[lindex $q 1] + 1}]
+				set elem	{}
+				while 1 {
+					if {![regexp -start $idx -indices -expanded [apply $regex quotedstring $delim] $str qall preamble q qnd qnend bs]} {
+						error "Couldn't match quote scan at $idx: ([string range $str $idx end]), regex: [apply $regex quotedstring $delim]"
+					}
+					#puts "quotescan match: ([string range $str {*}$qall]), preamble: ($preamble), q: ($q), qnd: ($qnd), qnend: ($qnend), bs: ($bs)"
+					lassign $qall qall_from qall_to
+					append elem [string range $str {*}$preamble]
+					incr idx [expr {$qall_to - $qall_from+1}]
+					if {[lindex $q 0] >= 0} {
+						#puts "Found close quote, adding ($elem)"
+						lappend elems $elem
+						break
+					} elseif {[lindex $bs 0] >= 0} {
+						append elem	[string index $str [lindex $bs 0]]
+					} else {
+						error "Unterminated quoted string starting at $qidx"
+					}
+				}
+				if {[lindex $qnend 0] >= 0} {
+					#puts "<- parse_pgarray pnend, returning [list $elems $idx]"
+					return [list $elems $idx]
+				}
+			} elseif {[lindex $b 0] >= 0} {
+				set idx	[expr {[lindex $b 1] + 1}]
+				lassign [parse_pgarray $str $delim $idx 1] subelems idx
+				lappend elems $subelems
+				if {![regexp -indices -start $idx -expanded [apply $regex afterclosebrace $delim] $str next_all closebrace d]} {
+					error "Unexpected characters after close brace @ $idx: ([string range $str $idx end])"
+				}
+				set idx	[expr {[lindex $next_all 1]+1}]
+				if {[lindex $d 0] == -1} {
+					set ended	1
+				}
+			} elseif {[lindex $null 0] >= 0} {
+				#puts "null: ($null)"
+				lappend elems {}
+				incr idx [expr {$all_to - $all_from + 1}]
+			} elseif {[lindex $chars 0] >= 0} {
+				lassign $chars from to
+				set elemstr	[string range $str $from $to]
+				lappend elems	$elemstr
+				#puts "chars: ($chars): \"$elemstr\""
+				incr idx [expr {$all_to - $all_from + 1}]
+			} else {
+				error "no matches"
+			}
+
+			if {$ended} {
+				#puts "<- parse_pgarray ended, nested: ($nested), returning [list $elems $idx]"
+				if {$nested} {
+					return [list $elems $idx]
+				} else {
+					return [lindex $elems 0]
+				}
+			}
+		}
+
+		error "Unterminated array literal: ($str)"
+	}
+
+	#>>>
+
 	# accel_ops: generate c code for each combination of type, format and null handling, and a function "compile_ops" that takes a Tcl list of ops and populates an array of addresses to those op functions <<<
 	proc build_ops {format c_types} { #<<<
-		lmap {column type} $c_types {
-			return -level 0 op_${type}_${format}
+		lmap {column type delim} $c_types {
+			if {$delim eq {}} {
+				return -level 0 op_${type}_${format}
+			} else {
+				return -level 0 op_${type}_${format}_array
+			}
 		}
 	}
 
@@ -187,44 +338,44 @@ namespace eval ::pgwire { #<<<
 	set accel_ops	[apply {{} {
 		set res	{}
 
-		set opargs	{const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], struct interp_cx* l}
+		set opargs	{const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], struct interp_cx* l, Tcl_Obj* delim}
 		append res "typedef void (col_op)($opargs);\n"
 
 		set opnames	{}
 		foreach {format add_column_key handle_null} {
 			lists {
 			} {
-				val = l->lit[PGWIRE_LIT_BLANK];
+				replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
 			}
 
 			dicts {
-				rowv[c->rs++] = c->cols[colnum];
+				replace_tclobj(rowv + c->rs++, c->cols[colnum]);
 			} {
 				return;
 			}
 
 			dicts_no_nulls {
-				rowv[c->rs++] = c->cols[colnum];
+				replace_tclobj(rowv + c->rs++, c->cols[colnum]);
 			} {
-				val = l->lit[PGWIRE_LIT_BLANK];
+				replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
 			}
 		} { 
 			foreach {type makeval} {
 				bool	{
 					// TODO: check that this is in fact 1 byte
-					val = l->lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE];
+					replace_tclobj(&val, l->lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE]);
 				}
-				int1	{val = Tcl_NewIntObj(*(char*)(*data));}
-				int2	{val = Tcl_NewIntObj(bswap_16(*(int16_t*)(*data)));}
-				int4	{val = Tcl_NewIntObj(bswap_32(*(int32_t*)(*data)));}
-				int8	{val = Tcl_NewIntObj(bswap_64(*(int64_t*)(*data)));}
-				bytea	{val = Tcl_NewByteArrayObj(*data, collen);}
+				int1	{replace_tclobj(&val, Tcl_NewIntObj(*(char*)(*data)));}
+				int2	{replace_tclobj(&val, Tcl_NewIntObj(bswap_16(*(int16_t*)(*data))));}
+				int4	{replace_tclobj(&val, Tcl_NewIntObj(bswap_32(*(int32_t*)(*data))));}
+				int8	{replace_tclobj(&val, Tcl_NewIntObj(bswap_64(*(int64_t*)(*data))));}
+				bytea	{replace_tclobj(&val, Tcl_NewByteArrayObj(*data, collen));}
 				float4	{
 					{
 						char buf[4];
 
 						*(uint32_t*)buf = bswap_32(*(uint32_t*)(*data));
-						val = Tcl_NewDoubleObj(*(float*)buf);
+						replace_tclobj(&val, Tcl_NewDoubleObj(*(float*)buf));
 					}
 				}
 				float8 {
@@ -232,7 +383,7 @@ namespace eval ::pgwire { #<<<
 						char buf[8];
 
 						*(uint64_t*)buf = bswap_64(*(uint64_t*)(*data));
-						val = Tcl_NewDoubleObj(*(double*)buf);
+						replace_tclobj(&val, Tcl_NewDoubleObj(*(double*)buf));
 					}
 				}
 				text {
@@ -240,18 +391,18 @@ namespace eval ::pgwire { #<<<
 						Tcl_DString		utf8;
 
 						if (collen == 0) {
-							val = l->lit[PGWIRE_LIT_BLANK];
+							replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
 						} else {
 							Tcl_DStringInit(&utf8);
-							Tcl_ExternalToUtfDString(c->encoding, *data, collen, &utf8);
-							val = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8));
+							Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
+							replace_tclobj(&val, Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
 							Tcl_DStringFree(&utf8);
 						}
 					}
 				}
 			} {
 				set opname	op_${type}_${format}
-				lappend opnames	$opname
+				lappend opnames	$opname ${opname}_array
 				append res [string map [list \
 					%format%			$format \
 					%handle_null%		$handle_null \
@@ -262,7 +413,7 @@ namespace eval ::pgwire { #<<<
 				] {
 					static void %opname%(%opargs%) //<<<
 					{
-						Tcl_Obj*	val;
+						Tcl_Obj*	val = NULL;
 
 						if (collen != -1) {
 							%makeval%
@@ -272,12 +423,331 @@ namespace eval ::pgwire { #<<<
 						}
 
 						%add_column_key%
-						rowv[c->rs++] = val;
+						replace_tclobj(&rowv[c->rs++], val);
+						replace_tclobj(&val, NULL);
+					}
+
+					//>>>
+					static void %opname%_array(%opargs%) //<<<
+					{
+						Tcl_Obj*	val = NULL;
+
+						if (collen != -1) {
+							const uint32_t		ndim     = bswap_32(((int32_t*)(*data))[0]);
+							//const uint32_t	hasnull  = bswap_32(((int32_t*)(*data))[1]);
+							//const uint32_t	elem_oid = bswap_32(((int32_t*)(*data))[2]);	// Unused
+							uint32_t			i, j;
+							uint32_t			dims[ndim];
+							//uint32_t			lbs[ndim];
+							uint32_t			di[ndim];	// iterators for each dim;
+							const unsigned char*	oi = (*data)+12 + ndim*8;
+
+							for (i=3, j=0; j<ndim; i+=2, j++) {
+								dims[j] = bswap_32(((int32_t*)(*data))[i]);
+								//lbs[j]  = bswap_32(((int32_t*)(*data))[i+1]);
+								di[j]	= dims[j];
+							}
+
+							/*
+							fprintf(stderr, "ndim: %d", ndim);
+							for (i=0; i<ndim; i++) fprintf(stderr, ", dims[%d]: %d", i, dims[i]);
+							fprintf(stderr, ", bytes:");
+							{
+								const unsigned char*	end = *data + collen;
+								const unsigned char*	p = oi;
+
+								while (p < end) fprintf(stderr, " %02x", *p++);
+							}
+							fprintf(stderr, "\n");
+							*/
+
+							{
+								const uint32_t			inner_dim = dims[ndim-1];
+								const unsigned char**	data = &oi;		// Intentionally shadows data in the outer scope
+								Tcl_Obj*				dimlists[ndim];
+
+								memset(dimlists, 0, sizeof(Tcl_Obj*)*ndim);
+
+								for (i=0; i<ndim-1; i++) {
+									replace_tclobj(&dimlists[i], Tcl_NewListObj(0, NULL));
+								}
+								while (di[0] > 0) {
+									Tcl_Obj*	inner[inner_dim];
+									int32_t		i;
+
+									//memset(inner, 0, sizeof(Tcl_Obj*)*inner_dim);
+
+									// Read inner elems
+									for (i=0; i<inner_dim; i++) {
+										const int32_t	collen	= bswap_32(*(int32_t*)(*data));	// Intentionally shadows collen in the outer scope
+										Tcl_Obj*		val = NULL;	// Intentionally shadows val in the outer scope
+
+										if (collen == -1) {
+											replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+											*data += 4;
+										} else {
+											*data += 4;
+											%makeval%
+											*data += collen;
+										}
+										inner[i] = val;	val = NULL;		// Transfer val's reference
+									}
+									replace_tclobj(&dimlists[ndim-1], Tcl_NewListObj(inner_dim, inner));
+									for (i=0; i<inner_dim; i++)
+										replace_tclobj(inner+i, NULL);
+
+									if (ndim > 1) {
+										for (i=ndim-2; i>=0; i--) {
+											//fprintf(stderr, "adding dim %d to %d\n", i+1, i);
+											//fprintf(stderr, "dimlists[%d]: %p, dimlists[%d]: %p\n", i, dimlists[i], i+1, dimlists[i+1]);
+											if (TCL_OK != Tcl_ListObjAppendElement(NULL, dimlists[i], dimlists[i+1]))
+												Tcl_Panic("Unable to accumulate results to next-higher dimension %d", i);
+											replace_tclobj(dimlists+i+1, Tcl_NewListObj(0, NULL));
+											di[i+1] = dims[i+1];			// Reset waiting counter
+											//fprintf(stderr, "di[%d]: %d\n", i, di[i]-1);
+											if (--di[i] > 0) break;			// Still waiting for more elements in dim[i]
+										}
+									} else {
+										break;
+									}
+								}
+
+								replace_tclobj(&val, dimlists[0]);
+								for (i=0; i<ndim; i++)
+									replace_tclobj(dimlists+i, NULL);
+							}
+
+							*data += collen;
+						} else {
+							%handle_null%
+						}
+
+						%add_column_key%
+						replace_tclobj(rowv + c->rs++, val);
+						replace_tclobj(&val, NULL);
 					}
 
 					//>>>
 				}]
 			}
+
+			set opname	op_generic_${format}
+			lappend opnames ${opname}_array
+			append res [string map [list \
+				%format%			$format \
+				%handle_null%		$handle_null \
+				%add_column_key%	$add_column_key \
+				%opname%			$opname \
+				%opargs%			$opargs \
+			] { // @begin=c@
+				static void %opname%_array(%opargs%) //<<<
+				{
+					Tcl_Obj*	val = NULL;
+
+					if (collen != -1) {
+						if (collen == 0) {
+							replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+						} else {
+							Tcl_DString		utf8;
+							Tcl_DString		res;
+
+							Tcl_DStringInit(&res);
+							Tcl_DStringInit(&utf8);
+							Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
+
+							const char*const	str = Tcl_DStringValue(&utf8);
+							const int			str_len = Tcl_DStringLength(&utf8);
+							const char*const	end = str + str_len;
+							const char*			p = str;
+							int					level = 0;
+							Tcl_UniChar			delimchar;
+
+							if (0 == Tcl_UtfToUniChar(Tcl_GetString(delim), &delimchar)) {
+								fprintf(stderr, "delim is not a valid unicode character\n");
+								goto failed;
+							}
+
+#define CONSUME_WHITESPACE while ((*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') && p < end) p++	// TODO: Find out what exactly constitutes whitespace in pgarray syntax
+
+							if (str_len == 0) goto failed;
+							CONSUME_WHITESPACE;
+							if (*p != '{') goto failed;
+
+							while (p < end) {
+								// Consume leading whitespace
+								CONSUME_WHITESPACE;
+
+								// Start of element position
+								switch (*p) {
+									case '{':
+										level++;
+										if (level > 1) Tcl_DStringStartSublist(&res);
+										p++;
+										continue;
+
+									case '\"':
+										{
+											Tcl_DString		elem;
+											const char*		from = ++p;
+
+											Tcl_DStringInit(&elem);
+											while (p < end) {
+												switch (*p) {
+													case '\\':
+														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+														if (
+															p < end-6 &&
+															p[1] == '\\' &&
+															p[2] == 'x'
+														) {
+															p += 3;
+															while (
+																p < end-2 &&
+																((p[0] >= '0' && p[0] <= '9') || (p[0] >= 'A' && p[0] <= 'F')  || (p[0] >= 'a' && p[0] <= 'f')) &&
+																((p[1] >= '0' && p[1] <= '9') || (p[1] >= 'A' && p[1] <= 'F')  || (p[1] >= 'a' && p[1] <= 'f'))
+															) {
+																const uint8_t		h = p[0];
+																const uint8_t		l = p[1];
+																const Tcl_UniChar	byte = ((h<='9' ? h-'0' : h<='F' ? 10+h-'A' : 10+h-'a') << 4) | (l<='9' ? l-'0' : l<='F' ? 10+l-'A' : 10+l-'a');
+																Tcl_UniCharToUtfDString(&byte, 1, &elem); 
+																p += 2;
+															}
+															from = p;
+														} else {
+															const char*	next = Tcl_UtfNext(++p);
+															const int	bytes = next - p;
+															Tcl_DStringAppend(&elem, p, bytes);
+															from = p = next;
+														}
+														continue;
+
+													case '\"':
+														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+														p++;
+														break;
+
+													default:
+														p = Tcl_UtfNext(p);
+														continue;
+												}
+												break;
+											}
+											Tcl_DStringAppendElement(&res, Tcl_DStringValue(&elem));
+											Tcl_DStringFree(&elem);
+										}
+										break;
+
+									default:
+										{
+											Tcl_DString		elem;
+											const char*		from = p;
+											int				has_escapes = 0;
+
+											Tcl_DStringInit(&elem);
+
+											while (p < end) {
+												Tcl_UniChar		c;
+												int				charlen;
+
+												if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
+												if (c == delimchar) {
+													if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+													break;
+												}
+												switch (c) {
+													case '}':
+													case ' ':
+													case '\t':
+													case '\n':
+													case '\r':
+														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+														break;
+
+													case '\\':
+														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+														p++;
+														if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
+														Tcl_DStringAppend(&elem, p, charlen);
+														p += charlen;
+														from = p;
+														has_escapes = 1;
+														continue;
+
+													default:
+														p += charlen;
+														continue;
+												}
+												break;
+											}
+
+											{
+												const char*	elemstr = Tcl_DStringValue(&elem);
+
+												if (
+													!has_escapes &&
+													Tcl_DStringLength(&elem) == 4 &&
+													strcasecmp("NULL", elemstr) == 0
+												) {
+													Tcl_DStringAppendElement(&res, "");
+												} else {
+													Tcl_DStringAppendElement(&res, elemstr);
+												}
+												Tcl_DStringFree(&elem);
+											}
+										}
+								}
+
+								// End of elem position
+								while (p < end) {
+									Tcl_UniChar	c;
+									int			charlen;
+
+									// Consume trailing whitespace
+									CONSUME_WHITESPACE;
+									if (p >= end) goto failed;
+
+									if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
+									if (c == delimchar) {
+										p += charlen;
+										break;
+									} else if (c == '}') {
+										p++;
+										if (level > 1) Tcl_DStringEndSublist(&res);
+										level--;
+									} else {
+										fprintf(stderr, "Junk after elem: %c\n", c);
+										goto failed;
+									}
+								}
+							}
+#undef CONSUME_WHITESPACE
+
+							if (level != 0) goto failed;
+
+							//fprintf(stderr, "Saving result: (%*s)\n", Tcl_DStringLength(&res), Tcl_DStringValue(&res));
+							replace_tclobj(&val, Tcl_NewStringObj(Tcl_DStringValue(&res), Tcl_DStringLength(&res)));
+							goto done;
+failed:
+							// Couldn't parse array format, treat it as a NULL (no way to signal errors from this context)
+							fprintf(stderr, "Failed to parse postgres array format: (%*s)\n", str_len, str);
+							replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+done:
+							Tcl_DStringFree(&utf8);
+							Tcl_DStringFree(&res);
+							*data += collen;
+						}
+					} else {
+						%handle_null%
+					}
+
+					%add_column_key%
+					replace_tclobj(&rowv[c->rs++], val);
+					replace_tclobj(&val, NULL);
+				}
+
+				//>>>
+				// @end=c@
+			}]
 		}
 
 		set opname_strings	[join [lmap opname $opnames {
@@ -357,11 +827,12 @@ done:
 	# C code <<<
 	set c_code	[string map [list \
 		%accel_ops%	$::pgwire::accel_ops \
-		%line%		[expr {34 + [dict get [info frame 0] line]}] \
+		%line%		[expr {46 + [dict get [info frame 0] line]}] \
 	] {
 		#include <byteswap.h>
 		#include <stdint.h>
 		#include <string.h>
+		#include <stdlib.h>
 
 		struct column_cx {
 			Tcl_Encoding	encoding;
@@ -390,8 +861,20 @@ done:
 			Tcl_Obj*	lit[PGWIRE_LIT_SIZE];
 		};
 
+		static inline void replace_tclobj(Tcl_Obj** target, Tcl_Obj* replacement) //<<<
+		{
+			if (*target) {
+				Tcl_DecrRefCount(*target);
+				*target = NULL;
+			}
+			*target = replacement;
+			if (*target) Tcl_IncrRefCount(*target);
+		}
+
+		//>>>
+
 		%accel_ops%
-		#line %line%
+		//#line %line%
 
 		struct foreach_state {
 			struct column_cx	col;
@@ -405,6 +888,8 @@ done:
 			Tcl_Obj*			rowvar;
 			Tcl_Obj*			script;
 			col_op**			ops;
+			int					delimc;
+			Tcl_Obj**			delimv;
 		};
 
 		int c_makerow(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
@@ -418,7 +903,6 @@ done:
 			const char* restrict		p = NULL;
 			const char* restrict		e = NULL;
 			uint16_t					colcount;
-			Tcl_Obj*					row = NULL;
 			int							retcode = TCL_OK;
 			static const char* types[] = {
 				"bool",
@@ -470,7 +954,7 @@ done:
 				return TCL_ERROR;
 			}
 
-			p = data = Tcl_GetByteArrayFromObj(objv[1], &data_len);
+			p = data = (const char*)Tcl_GetByteArrayFromObj(objv[1], &data_len);
 			e = p + data_len;
 			if (Tcl_ListObjGetElements(interp, objv[2], &c_types_len, &c_types) != TCL_OK)
 				return TCL_ERROR;
@@ -479,8 +963,8 @@ done:
 			if (Tcl_GetIndexFromObj(interp, objv[4], formats, "format", TCL_EXACT, &format) != TCL_OK)
 				return TCL_ERROR;
 
-			if (c_types_len % 2 != 0) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("c_types must be an even number of elements"));
+			if (c_types_len % 3 != 0) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("c_types length must be a multiple of 3"));
 				return TCL_ERROR;
 			}
 
@@ -490,8 +974,8 @@ done:
 			}
 
 			colcount = bswap_16(*(uint16_t*)p); p+=2;
-			if (colcount != c_types_len/2) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+			if (colcount != c_types_len/3) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
 				return TCL_ERROR;
 			}
 
@@ -509,7 +993,7 @@ done:
 				/* Zero the pointers, so that we don't leak partial rows of Tcl_Objs on error */
 				memset(rowv, 0, sizeof(Tcl_Obj*) * rslots);
 
-				for (i=0, c=1, rs=0; i<c_types_len; i+=2, c++) {
+				for (i=0, c=1, rs=0; i<c_types_len; i+=3, c++) {
 					const int collen = bswap_32(*(uint32_t*)p);
 
 					p += 4;
@@ -561,7 +1045,7 @@ done:
 							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_64(*(int64_t*)p)));	// Signed?
 							break;
 						case TYPE_BYTEA:
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj(p, collen));
+							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj((const unsigned char*)p, collen));
 							break;
 						case TYPE_FLOAT4:
 							{
@@ -673,7 +1157,9 @@ done:
 				}
 
 				if (s->rowv) {
-					// TODO: somehow know which entries in rowv we should decref?
+					int i;
+					for (i = 0; i < s->colcount * 2; i++)
+						replace_tclobj(&s->rowv[i], NULL);
 					ckfree(s->rowv); s->rowv = NULL;
 				}
 
@@ -723,11 +1209,12 @@ done:
 			Tcl_Obj*			rowvar = NULL;
 			Tcl_Encoding		encoding;
 			int					i;
-			int					ops_len;
+			Tcl_Obj**			delimv = NULL;
+			int					delimc;
 
 			//fprintf(stderr, "c_foreach_batch_nr_setup\n");
-			if (objc != 7) {
-				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script");
+			if (objc != 8) {
+				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script delims");
 				return TCL_ERROR;
 			}
 
@@ -743,6 +1230,8 @@ done:
 				return TCL_OK;
 
 			Tcl_IncrRefCount(script = objv[6]);
+			if (Tcl_ListObjGetElements(interp, objv[7], &delimc, &delimv) != TCL_OK)
+				return TCL_ERROR;
 
 			s = ckalloc(sizeof(*s));
 			memset(s, 0, sizeof(*s));
@@ -765,6 +1254,8 @@ done:
 			Tcl_IncrRefCount(s->rowvar = rowvar);
 			Tcl_IncrRefCount(s->script = script);
 			s->ops = ckalloc(colc * sizeof(col_op*));
+			s->delimc = delimc;
+			s->delimv = delimv;
 			if (TCL_OK != (retcode = compile_ops(interp, objv[2], s->ops, colc)))
 				goto err;
 
@@ -798,8 +1289,8 @@ done:
 			}
 
 			colcount = bswap_16(*(int16_t*)p); p+=2;
-			if (colcount != c_types_len/2) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+			if (colcount != c_types_len/3) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
 				retcode = TCL_ERROR;
 				goto done;
 			}
@@ -808,10 +1299,12 @@ done:
 			//fprintf(stderr, "data_len: %d\n", data_len);
 			for (c=0; c < s->colcount; c++) {
 				const int	collen = bswap_32(*(int32_t*)p);
+				//const int	old_rs = s->col.rs;
 
-				//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, s->col.rs, p-data, collen);
+				//fprintf(stderr, "-> c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, s->col.rs, s->rowv[s->col.rs], s->col.rs+1, s->rowv[s->col.rs+1]);
 				p += 4;
-				s->ops[c](c, collen, &p, &s->col, s->rowv, s->l);
+				s->ops[c](c, collen, &p, &s->col, s->rowv, s->l, s->delimv[c]);
+				//fprintf(stderr, "<- c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, old_rs, s->rowv[old_rs], old_rs+1, s->rowv[old_rs+1]);
 			}
 
 			if (s->row) Tcl_DecrRefCount(s->row);
@@ -880,9 +1373,11 @@ done:
 			Tcl_Encoding		encoding;
 			col_op**			ops = NULL;
 			Tcl_Obj**			rowv = NULL;
+			Tcl_Obj**			delimv = NULL;
+			int					delimc;
 
-			if (objc != 7) {
-				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script");
+			if (objc != 8) {
+				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script delims");
 				return TCL_ERROR;
 			}
 
@@ -895,9 +1390,12 @@ done:
 			if (Tcl_ListObjGetElements(interp, objv[5], &datarowc, &datarowv) != TCL_OK)
 				return TCL_ERROR;
 			Tcl_IncrRefCount(script = objv[6]);
+			if (Tcl_ListObjGetElements(interp, objv[7], &delimc, &delimv) != TCL_OK)
+				return TCL_ERROR;
 
 			ops = (col_op**)malloc(sizeof(col_op*) * colc);
 			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
+			memset(rowv, 0, sizeof(Tcl_Obj*)*colc*2);
 			{
 				const int			colcount = colc;
 				int					r;
@@ -922,7 +1420,7 @@ done:
 
 						//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
 						p += 4;
-						ops[c](c, collen, &p, &col, rowv, l);
+						ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
 					}
 
 					if (row) Tcl_DecrRefCount(row);
@@ -958,8 +1456,8 @@ done:
 			}
 
 			colcount = bswap_16(*(int16_t*)p); p+=2;
-			if (colcount != c_types_len/2) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+			if (colcount != c_types_len/3) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
 				retcode = TCL_ERROR;
 				goto done;
 			}
@@ -967,7 +1465,13 @@ done:
 
 done:
 			if (ops) { free(ops); ops = NULL; }
-			if (rowv) { free(rowv); rowv = NULL; }
+			if (rowv) {
+				int i;
+				for (i=0; i<colc*2; i++)
+					replace_tclobj(&rowv[i], NULL);
+				free(rowv);
+				rowv = NULL;
+			}
 			if (script) {
 				Tcl_DecrRefCount(script); script = NULL;
 			}
@@ -990,9 +1494,11 @@ done:
 			Tcl_Obj*			rows = NULL;
 			col_op**			ops = NULL;
 			Tcl_Obj**			rowv = NULL;
+			Tcl_Obj**			delimv = NULL;
+			int					delimc;
 
-			if (objc != 6) {
-				Tcl_WrongNumArgs(interp, 1, objv, "rowsvar ops columns tcl_encoding datarows");
+			if (objc != 7) {
+				Tcl_WrongNumArgs(interp, 1, objv, "rowsvar ops columns tcl_encoding datarows delims");
 				return TCL_ERROR;
 			}
 
@@ -1004,6 +1510,8 @@ done:
 				return TCL_ERROR;
 			if (datarowc == 0)
 				return TCL_OK;
+			if (Tcl_ListObjGetElements(interp, objv[6], &delimc, &delimv) != TCL_OK)
+				return TCL_ERROR;
 
 			/* Retrieve the existing value from $rowsvar and ensure it's unshared */
 			rows = Tcl_ObjGetVar2(interp, objv[1], NULL, 0);
@@ -1015,6 +1523,7 @@ done:
 
 			ops = (col_op**)malloc(sizeof(col_op*) * colc);
 			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
+			memset(rowv, 0, sizeof(Tcl_Obj*)*colc*2);
 			{
 				const int			colcount = colc;
 				int					r;
@@ -1037,7 +1546,7 @@ done:
 						const int	collen = bswap_32(*(int32_t*)p);
 
 						p += 4;
-						ops[c](c, collen, &p, &col, rowv, l);
+						ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
 					}
 
 					if (TCL_OK != (retcode = Tcl_ListObjAppendElement(interp, rows, Tcl_NewListObj(col.rs, rowv))))
@@ -1056,8 +1565,8 @@ done:
 			}
 
 			colcount = bswap_16(*(int16_t*)p); p+=2;
-			if (colcount != c_types_len/2) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/2));
+			if (colcount != c_types_len/3) {
+				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
 				retcode = TCL_ERROR;
 				goto done;
 			}
@@ -1077,7 +1586,13 @@ done:
 				Tcl_DecrRefCount(rows); rows = NULL;
 			}
 			if (ops) { free(ops); ops = NULL; }
-			if (rowv) { free(rowv); ops = NULL; }
+			if (rowv) {
+				int i;
+				for (i=0; i<colc*2; i++)
+					replace_tclobj(&rowv[i], NULL);
+				free(rowv);
+				rowv = NULL;
+			}
 			return retcode;
 		}
 
@@ -1093,9 +1608,12 @@ done:
 			int					data_len;
 			col_op**			ops = NULL;
 			Tcl_Obj**			rowv = NULL;
+			Tcl_Obj**			delimv = NULL;
+			int					delimc;
 
-			if (objc != 5) {
-				Tcl_WrongNumArgs(interp, 1, objv, "ops columns tcl_encoding datarow");
+
+			if (objc != 6) {
+				Tcl_WrongNumArgs(interp, 1, objv, "ops columns tcl_encoding datarow delims");
 				return TCL_ERROR;
 			}
 
@@ -1104,12 +1622,14 @@ done:
 			if (Tcl_GetEncodingFromObj(interp, objv[3], &encoding) != TCL_OK)
 				return TCL_ERROR;
 			data = Tcl_GetByteArrayFromObj(objv[4], &data_len);
+			if (Tcl_ListObjGetElements(interp, objv[5], &delimc, &delimv) != TCL_OK)
+				return TCL_ERROR;
 
 			ops = (col_op**)malloc(sizeof(col_op*) * colc);
 			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
+			memset(rowv, 0, sizeof(Tcl_Obj*)*colc*2);
 			{
 				const int			colcount = colc;
-				int					r;
 				struct column_cx	col;
 				int					c;
 				unsigned char*		p = data+2;
@@ -1127,7 +1647,7 @@ done:
 
 					//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
 					p += 4;
-					ops[c](c, collen, &p, &col, rowv, l);
+					ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
 				}
 
 				Tcl_SetObjResult(interp, Tcl_NewListObj(col.rs, rowv));
@@ -1135,7 +1655,13 @@ done:
 
 done:
 			if (ops) { free(ops); ops = NULL; }
-			if (rowv) { free(rowv); rowv = NULL; }
+			if (rowv) {
+				int i;
+				for (i=0; i<colc*2; i++)
+					replace_tclobj(&rowv[i], NULL);
+				free(rowv);
+				rowv = NULL;
+			}
 			return retcode;
 		}
 
@@ -1147,6 +1673,12 @@ done:
 }
 #>>>
 
+
+proc writefile {fn chars} {
+	set h	[open $fn w]
+	try {puts -nonewline $h $chars} finally {close $h}
+}
+writefile /tmp/pgwire_accel.c "#include <tcl.h>\n$::pgwire::c_code"
 
 set ::pgwire::accelerators	0
 if {![info exists ::pgwire::block_accelerators]} {
@@ -1237,6 +1769,7 @@ oo::class create ::pgwire {
 		transaction_status
 		type_oids
 		type_oids_rev
+		type_elem
 		tcl_encoding
 		server_params
 		name_seq
@@ -1474,6 +2007,7 @@ oo::class create ::pgwire {
 				transaction_status	$transaction_status \
 				type_oids			$type_oids \
 				type_oids_rev		$type_oids_rev \
+				type_elem			$type_elem \
 				tcl_encoding		$tcl_encoding \
 				server_params		$server_params \
 				name_seq			$name_seq \
@@ -1624,17 +2158,28 @@ oo::class create ::pgwire {
 
 		my simple_query_dict row {
 			select
-				oid,
-				typname
+				t.oid,
+				t.typname,
+				t.typelem,
+				a.typname	as a_typname,
+				t.typdelim
 			from
-				pg_type
+				pg_type t
+			left outer join
+				pg_type a
+			on
+				a.oid = t.typarray
 			where
-				oid < 10000 and
-				oid is not null and
-				typname is not null
+				t.oid < 10000 and
+				t.oid is not null and
+				t.typname is not null
 		} {
 			dict set type_oids		[dict get $row oid] [dict get $row typname]
 			dict set type_oids_rev	[dict get $row typname] [dict get $row oid]
+			if {[dict exists $row a_typname]} {
+				dict set type_elem [dict get $row a_typname] oid   [dict get $row oid]
+				dict set type_elem [dict get $row a_typname] delim [dict get $row typdelim]
+			}
 		}
 		#::pgwire::log notice "server_params: $server_params"
 	}
@@ -2525,6 +3070,106 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method _compile_encode_field type_name { #<<<
+		if {[dict exists $type_elem $type_name oid]} { # Array type
+			set elem_oid		[dict get $type_elem $type_name oid]
+			if {[dict exists $type_oids $elem_oid]} {
+				set elem_type_name	[dict get $type_oids $elem_oid]
+
+				# Array of something
+				switch -exact $elem_type_name {
+					bool - int1		{set elem_fmt c;  set elem_bytelen 1}
+					int2			{set elem_fmt S;  set elem_bytelen 2}
+					int4			{set elem_fmt I;  set elem_bytelen 4}
+					int8			{set elem_fmt W;  set elem_bytelen 8}
+					float4			{set elem_fmt R;  set elem_bytelen 4}
+					float8			{set elem_fmt Q;  set elem_bytelen 8}
+					text - varchar	{set elem_fmt a*; set elem_bytelen -1}
+					bytea			{set elem_fmt a*; set elem_bytelen -2}
+					default			{set elem_fmt {}}
+				}
+
+				if {$elem_fmt eq {}} {
+					# Unsupported element oid, fall back to array literal string format
+					return -level 0 [string map [list \
+						%delim%	[list [dict get $type_elem $type_name delim]] \
+					] {
+						set bytes	[encoding convertto $tcl_encoding "{[join [lmap e $value {
+							switch -regexp -nocase -- $e {
+								"\[\x22\\\\\]" {
+									return -level 0 \"[string map [list "\"" "\\\"" "\\" "\\\\"] $e]\"
+								}
+								{^$} - {^NULL$} - "\[{},\[:space:\]\]" {
+									return -level 0 \"$e\"
+								}
+								default {
+									set e
+								}
+							}
+						}] %delim%]}"]
+						set bytelen	[string length $bytes]
+						append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
+					}]
+				} else {
+					if {$elem_bytelen == -1} {
+						set encode_e		{set e [encoding convertto $tcl_encoding $e]}
+					} else {
+						set encode_e		{}
+					}
+					if {$elem_bytelen < 0} {
+						set elem_bytelen	{[string length $e]}
+					}
+					string map [list \
+						%ndim%			1 \
+						%hasnull%		0 \
+						%lb%			1 \
+						%elem_oid%		[list $elem_oid] \
+						%encode_e%		$encode_e \
+						%elem_bytelen%	$elem_bytelen \
+						%elem_fmt%		$elem_fmt \
+					] {
+					set elembytes		{}
+						foreach e $value {
+							%encode_e%
+							append elembytes	[binary format I%elem_fmt% %elem_bytelen% $e]
+						}
+						set payload		[binary format IIIIIa* %ndim% %hasnull% %elem_oid% [llength $value] %lb% $elembytes]
+						append pformats \u0\u1; append pdesc [binary format Ia* [string length $payload] $payload]
+					}
+				}
+			} else {
+			}
+		} else {
+			switch -glob -- $type_name {
+				bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
+				int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
+				int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 2 $value]}}
+				int4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format II 4 $value]}}
+				int8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IW 8 $value]}}
+				bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ia* [string length $value] $value]}}
+				float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IR 4 $value]}}
+				float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IQ 8 $value]}}
+				text -
+				varchar {
+					return -level 0 {
+						set bytes	[encoding convertto $tcl_encoding $value]
+						set bytelen	[string length $bytes]
+						append pformats \u0\u1; append pdesc [binary format Ia* $bytelen $bytes]
+					}
+				}
+
+				default {
+					return -level 0 {
+						set bytes	[encoding convertto $tcl_encoding $value]
+						set bytelen	[string length $bytes]
+						append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
+					}
+				}
+			}
+		}
+	}
+
+	#>>>
 	method prepare_extended_query sql { #<<<
 		set busy_sql	$sql
 
@@ -2632,34 +3277,7 @@ oo::class create ::pgwire {
 								}
 								lappend param_types $name $type_name
 
-								set encode_field	[switch -exact -- $type_name {
-									bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
-									int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
-									smallint -
-									int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 2 $value]}}
-									int4 -
-									integer	{return -level 0 {append pformats \u0\u1; append pdesc [binary format II 4 $value]}}
-									bigint -
-									int8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IW 8 $value]}}
-									bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ia* [string length $value] $value]}}
-									float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IR 4 $value]}}
-									float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IQ 8 $value]}}
-									text -
-									varchar {
-										return -level 0 {
-											set bytes	[encoding convertto $tcl_encoding $value]
-											set bytelen	[string length $bytes]
-											append pformats \u0\u1; append pdesc [binary format Ia* $bytelen $bytes]
-										}
-									}
-									default {
-										return -level 0 {
-											set bytes	[encoding convertto $tcl_encoding $value]
-											set bytelen	[string length $bytes]
-											append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
-										}
-									}
-								}]
+								set encode_field	[my _compile_encode_field $type_name]
 
 								append build_params_vars	[string map [list \
 									%v%				[list $name] \
@@ -2742,28 +3360,65 @@ oo::class create ::pgwire {
 									set type_name	text
 								}
 
-								switch -glob -- $type_name {
-									bool	-
-									int1	-
-									smallint -
-									int2	-
-									int4	-
-									integer	-
-									bigint	-
-									int8	-
-									bytea	-
-									float4	-
-									float8	{
-										set colfmt		\u0\u1	;# binary
+								unset -nocomplain colfmt
+								if {[dict exists $type_elem $type_name oid]} { # Array type
+									set elem_oid		[dict get $type_elem $type_name oid]
+									if {[dict exists $type_elem $type_name delim]} {
+										set elem_delim	[dict get $type_elem $type_name delim]
+									} else {
+										set elem_delim	,
 									}
-									default	{
-										set colfmt		\u0\u0	;# text
-										set type_name	text
+									if {[dict exists $type_oids $elem_oid]} {
+										set elem_type_name	[dict get $type_oids $elem_oid]
+										switch -exact -- $elem_type_name {
+											bool	-
+											int1	-
+											int2	-
+											int4	-
+											integer	-
+											bigint	-
+											int8	-
+											bytea	-
+											float4	-
+											text	-
+											float8	{
+												set colfmt		\u0\u1	;# binary
+											}
+											varchar	{
+												set elem_type_name	text
+												set colfmt		\u0\u1	;# binary
+											}
+										}
 									}
+									if {$::pgwire::_force_generic_array || ![info exists colfmt]} {
+										set colfmt			\u0\u0	;# text
+										#puts stderr	"No binary handler for elem_type_name: ($elem_type_name) (type_name: ($type_name)), falling back to generic array with delim ($elem_delim)"
+										set elem_type_name	generic
+									}
+									lappend c_types	$field_name $elem_type_name $elem_delim
+								} else {
+									switch -exact -- $type_name {
+										bool	-
+										int1	-
+										int2	-
+										int4	-
+										integer	-
+										bigint	-
+										int8	-
+										bytea	-
+										float4	-
+										float8	{
+											set colfmt		\u0\u1	;# binary
+										}
+										default	{
+											set colfmt		\u0\u0	;# text
+											set type_name	text
+										}
+									}
+									lappend c_types	$field_name $type_name {}
 								}
 
 								append rformats	$colfmt
-								lappend c_types	$field_name $type_name
 								lappend columns	$field_name
 							}
 
@@ -2801,7 +3456,8 @@ oo::class create ::pgwire {
 					heat				0 \
 					ops_cache			{} \
 					param_types			$param_types \
-				]]
+					delims				[lmap {name type delim} $c_types {set delim}] \
+			]]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
 				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
@@ -3063,34 +3719,140 @@ oo::class create ::pgwire {
 				}
 			}
 
-			set remain	[expr {[llength $c_types] / 2}]
-			foreach {field_name type_name} $c_types {
+			set remain	[expr {[llength $c_types] / 3}]
+			foreach {field_name type_name elem_delim} $c_types {
 				append makerow	"binary scan \$datarow @\${o}I collen; incr o 4\n"
 				append makerow	"if {\$collen != -1} \{\n"
-				append makerow	[switch -glob -- $type_name {
-					bool	{return -level 0 {	binary scan $datarow @${o}c val}}
-					int1	{return -level 0 {	binary scan $datarow @${o}c val}}
-					smallint -
-					int2	{return -level 0 {	binary scan $datarow @${o}S val}}
-					int4 -
-					integer	{return -level 0 {	binary scan $datarow @${o}I val}}
-					bigint -
-					int8	{return -level 0 {	binary scan $datarow @${o}W val}}
-					bytea	{return -level 0 {	binary scan $datarow @${o}a val}}
-					float4	{return -level 0 {	binary scan $datarow @${o}R val}}
-					float8	{return -level 0 {	binary scan $datarow @${o}Q val}}
-					text {
-						string cat {
-							if {$collen == 0} {
-								set val	{}
+				append makerow	[if {$elem_delim eq {}} { # scalar <<<
+					switch -glob -- $type_name {
+						bool	{return -level 0 {	binary scan $datarow @${o}c val}}
+						int1	{return -level 0 {	binary scan $datarow @${o}c val}}
+						int2	{return -level 0 {	binary scan $datarow @${o}S val}}
+						int4	{return -level 0 {	binary scan $datarow @${o}I val}}
+						int8	{return -level 0 {	binary scan $datarow @${o}W val}}
+						bytea	{return -level 0 {	binary scan $datarow @${o}a val}}
+						float4	{return -level 0 {	binary scan $datarow @${o}R val}}
+						float8	{return -level 0 {	binary scan $datarow @${o}Q val}}
+						text {
+							string cat {
+								if {$collen == 0} {
+									set val	{}
+								} else {
+									set val	[encoding convertfrom $tcl_encoding [string range $datarow $o [expr {$o + $collen -1}]]]
+								}
+							} \n
+						}
+						default {
+							error "Unhandled type: \"$type_name\""
+						}
+					}
+					#>>>
+				} else { # Array type <<<
+					set decode_e	{}
+					switch -exact -- $type_name {
+						bool		{set elem_fmt	c;	set elem_bytelen	1}
+						int1		{set elem_fmt	c;	set elem_bytelen	1}
+						int2		{set elem_fmt	S;	set elem_bytelen	2}
+						int4		{set elem_fmt	I;	set elem_bytelen	4}
+						int8		{set elem_fmt	W;	set elem_bytelen	8}
+						bytea		{set elem_fmt	{a${elem_bytelen}};	set elem_bytelen	-1}
+						float4		{set elem_fmt	R;	set elem_bytelen	4}
+						float8		{set elem_fmt	Q;	set elem_bytelen	8}
+						text		-
+						varchar		{set elem_fmt	{a${elem_bytelen}};	set elem_bytelen	-2; set decode_e	{set e [encoding convertfrom $tcl_encoding $e]}}
+						default		{set elem_fmt	{}}
+					}
+					if {$elem_fmt eq {}} { # Unsupported type - fall back to string encoding
+						string map [list \
+							%elem_delim%	[list $elem_delim] \
+						] {
+							binary scan $datarow @${o}a${collen} bytes
+							set val	[::pgwire::parse_pgarray [encoding convertfrom $tcl_encoding $bytes] %elem_delim%]
+						}
+					} else {
+						string map [list \
+							%type_name%		$type_name \
+							%elem_fmt%		$elem_fmt \
+							%elem_bytelen%	$elem_bytelen \
+							%decode_e%		$decode_e \
+						] {
+							#puts stderr "%type_name% bytes: [regexp -all -inline .. [binary encode hex [string range $datarow $o $o+$collen]]]"
+							#binary scan $datarow @${o}III ndim hasnull elem_oid
+							binary scan $datarow @${o}I ndim
+							binary scan $datarow @${o}a[expr {12+8*$ndim}] arr_fmt_key
+							set oi		[expr {$o + 12}]
+							if {[dict exists $arr_fmt_cache $arr_fmt_key]} {
+								set unpack_array	[dict get $arr_fmt_cache $arr_fmt_key]
 							} else {
-								set val	[encoding convertfrom $tcl_encoding [string range $datarow $o [expr {$o + $collen -1}]]]
+								#binary scan $datarow @${o}x4II hasnull elem_oid
+								binary scan $datarow @${o}x4I hasnull
+								set dims	{}
+								set lbs		{}
+								for {set i 0} {$i < $ndim} {incr i; incr oi 8} {
+									binary scan $datarow @${oi}II dim lb
+									lappend dims	$dim
+									lappend lbs		$lb		;# TODO: something with this
+								}
+								set innerdim	[lindex $dims end]
+								if {%elem_bytelen% < 0 || $hasnull} { # Each element size is dynamic (or is possibly null), read length for each <<<
+									set inner	{list }
+									for {set i 0} {$i < $innerdim} {incr i} {
+										append inner {[
+											binary scan $datarow @${oi}I elem_bytelen
+											incr oi 4
+											if {$elem_bytelen == -1} {
+												set e {}
+											} else {
+												binary scan $datarow @${oi}%elem_fmt% e
+												incr oi $elem_bytelen
+											}
+											%decode_e%
+											set e
+										] }
+									}
+									#>>>
+								} else { # Each elemnt size is known, unpack them all in one step <<<
+									set inner_regs		{}
+									set inner_reg_vals	{}
+									for {set i 0} {$i < $innerdim} {incr i} {
+										set reg_varname	__reg$i
+										append inner_regs		" $reg_varname"
+										append inner_reg_vals	" \$$reg_varname"
+									}
+									set inner	[string map [list \
+										%inner_fmt%			[string repeat {x4%elem_fmt%} $innerdim] \
+										%inner_regs%		$inner_regs \
+										%inner_reg_vals%	$inner_reg_vals \
+										%inner_span%		[expr {(4 + %elem_bytelen%) * $innerdim}] \
+									] {binary scan $datarow @${oi}%inner_fmt% %inner_regs%; incr oi %inner_span%; list %inner_reg_vals%}]
+									#>>>
+								}
+								set unpack_array	$inner
+								foreach dim [lrange [lreverse $dims] 1 end] {
+									#set unpack_array "list \x5c[string repeat "\n\t\[$unpack_array\] \x5c" $dim]"
+									set unpack_array "list [string repeat " \[$unpack_array\]" $dim]"
+								}
+								set unpack_array	[list {datarow oi tcl_encoding} $unpack_array\n]
+								dict set $arr_fmt_cache $arr_fmt_key $unpack_array
 							}
-						} \n
+							if 0 {
+							puts stderr "set unpack_array  [list $unpack_array]\nset oi [list $oi]; set datarow \[binary decode hex [binary encode hex $datarow]\]\nbytecode:\n\t[join [lmap {k v} [tcl::unsupported::getbytecode lambda $unpack_array] {
+								switch -exact -- $k {
+									instructions {
+										set v \n\t\t\t[join [lmap {ofs instr} $v {
+											format {%4d:          %s} $ofs $instr
+										}] \n\t\t\t]
+									}
+									literals {
+									}
+								}
+								format {%20s: %s} $k $v
+							}] \n\t]"
+							}
+							set val	[apply $unpack_array $datarow $oi $tcl_encoding]
+						}
 					}
-					default {
-						error "Unhandled type: \"$type_name\""
-					}
+					#>>>
 				}] \n
 
 				switch -exact -- $as {
@@ -3123,6 +3885,7 @@ oo::class create ::pgwire {
 	#>>>
 	method allrows args { #<<<
 		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
 
 		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
 		switch -exact -- [llength $args] {
@@ -3161,6 +3924,7 @@ oo::class create ::pgwire {
 			#	- $columns: a list of column names (can contain duplicates)
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
 			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 			try $build_params on ok parameters {}
 
 			if {$::pgwire::accelerators} {
@@ -3203,7 +3967,7 @@ oo::class create ::pgwire {
 						CommandComplete - \
 						PortalSuspended {
 							#::pgwire::log notice "before c_allrows_batch: [tcl::unsupported::representation $rows]"
-							::pgwire::c_allrows_batch rows $ops $columns $tcl_encoding $datarows
+							::pgwire::c_allrows_batch rows $ops $columns $tcl_encoding $datarows $delims
 						}
 				} else {
 					switch -exact -- $outcome \
@@ -3334,6 +4098,7 @@ oo::class create ::pgwire {
 	#>>>
 	method foreach args { #<<<
 		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
 
 		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
 		switch -exact -- [llength $args] {
@@ -3372,6 +4137,7 @@ oo::class create ::pgwire {
 			#	- $columns: a list of column names (can contain duplicates)
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
 			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 
 			try $build_params on ok parameters {}
 
@@ -3384,7 +4150,7 @@ oo::class create ::pgwire {
 						my save_ops $sqlcode $as $ops
 					}
 					set foreach_batch {
-						uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script]
+						uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script $delims]
 					}
 				} else {
 					upvar 1 $row_varname row
@@ -3476,6 +4242,7 @@ oo::class create ::pgwire {
 	#>>>
 	method onecolumn sql { #<<<
 		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
 
 		my buffer_nesting
 
@@ -3491,6 +4258,7 @@ oo::class create ::pgwire {
 				#	- $columns: a list of column names (can contain duplicates)
 				#	- $heat: how frequently this prepared statement has been used recently, relative to others
 				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+				#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 
 				try $build_params on ok parameters {}
 
@@ -3529,7 +4297,7 @@ oo::class create ::pgwire {
 					CommandComplete -
 					PortalSuspended {
 						if {[llength $datarows] > 0} {
-							return [lindex [::pgwire::c_makerow2 $ops $columns $tcl_encoding [lindex $datarows 0]] 0]
+							return [lindex [::pgwire::c_makerow2 $ops $columns $tcl_encoding [lindex $datarows 0] $delims] 0]
 						} else {
 							return {}
 						}

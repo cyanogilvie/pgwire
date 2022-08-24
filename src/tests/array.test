@@ -1,0 +1,132 @@
+set here	[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
+
+test array_param-1.1 {Bound array variable: integer[]} -setup { #<<<
+	if {[info exists ::pgwire::accelerators]} {set old_block	$::pgwire::accelerators}
+	set ::pgwire::accelerators 0
+	pgwire create pg [try $connect] pagila postgres insecure {application_name array_param-1.1}
+	set film_ids	{259 256}
+} -body {
+	pg allrows {select title from film where film_id = any(:film_ids::integer[])}
+} -cleanup {
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info exists old_block]} {
+		set ::pgwire::accelerators	$old_block
+	} else {
+		unset ::pgwire::accelerators
+	}
+	unset -nocomplain old_block film_ids
+} -result {{title {DROP WATERFRONT}} {title {DUCK RACER}}}
+#>>>
+
+foreach impl {tcl c} {
+	foreach transport {bin string} {
+		unset -nocomplain saved_accelerators saved_force_generic_array
+
+		if {[info exists ::pgwire::accelerators]} {set saved_accelerators $::pgwire::accelerators}
+		if {[info exists ::pgwire::_force_generic_array]} {set saved_force_generic_array $::pgwire::_force_generic_array}
+
+		set ::pgwire::accelerators			[expr {$impl eq "c"}]
+		set ::pgwire::_force_generic_array	[expr {$transport eq "string"}]
+
+		# common -setup and -cleanup <<<
+		set commonargs	[list -setup {
+			pgwire create pg [try $connect] pagila postgres insecure "application_name $::testname"
+			if 0 {
+			oo::objdefine pg method tcl_makerow {as c_types} {
+				return "set __before \[clock microseconds\]; try {[next $as $c_types]} finally {puts stderr \"tcl_makerow [list $as  $c_types]: \[expr {\[clock microseconds\] - \$__before}\] μs\"}"
+			}
+
+			set entercmd	{apply {{cmd args} {
+				global cmdtimes
+				dict set cmdtimes $cmd [clock microseconds]
+			}}}
+
+			set leavecmd	{apply {{cmd args} {
+				global cmdtimes
+				puts stderr "[lindex $cmd 0]: [expr {[clock microseconds] - [dict get $cmdtimes $cmd]}] μs"
+				dict unset cmdtimes $cmd
+			}}}
+
+			set timecmds	{c_makerow2 c_foreach_batch c_allrows_batch compile_ops}
+			apply {{timecmds entercmd leavecmd} {
+				foreach cmd $timecmds {
+					trace add execution ::pgwire::$cmd enter $entercmd
+					trace add execution ::pgwire::$cmd leave $leavecmd
+				}
+			}} $timecmds $entercmd $leavecmd
+			}
+		} -cleanup {
+			if {[info object isa object pg]} {rename pg {}}
+			if 0 {
+			apply {{timecmds entercmd leavecmd} {
+				foreach cmd $timecmds {
+					trace remove execution ::pgwire::$cmd enter $entercmd
+					trace remove execution ::pgwire::$cmd leave $leavecmd
+				}
+			}} $timecmds $entercmd $leavecmd
+			unset -nocomplain entercmd leavecmd timecmds cmdtimes
+			}
+		}]
+		#>>>
+
+		set desc	{$impl implementation, $transport transport}
+
+		test array_${impl}_${transport}-1.1 "result column 1 dimensional array: integer\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[1,2,3]::integer[]}
+		} -result {1 2 3}
+		#>>>
+		test array_${impl}_${transport}-2.1 "result column 2 dimensional array: integer\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[[1,4],[2,5],[3,6]]::integer[]}
+		} -result {{1 4} {2 5} {3 6}}
+		#>>>
+		test array_${impl}_${transport}-3.1 "result column 2 dimensional array: text\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[['foo','bar'],['baz','quux'],['unicode',E'hello\u306fworld']]::text[]}
+		} -result [list {foo bar} {baz quux} [list unicode "hello\u306fworld"]]
+		#>>>
+		test array_${impl}_${transport}-4.1 "result column 2 dimensional array: bytea\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[['foo','bar'],['baz','quux'],['unicode',E'hello\u306fworld']]::bytea[]}
+		} -result [list {foo bar} {baz quux} [list unicode [encoding convertto utf-8 "hello\u306fworld"]]]
+		#>>>
+		test array_${impl}_${transport}-5.1 "result column 3 dimensional array: integer\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[[[1,2],[3,4]],[[5,NULL],[7,8]]]::integer[]}
+		} -result {{{1 2} {3 4}} {{5 {}} {7 8}}}
+		#>>>
+		test array_${impl}_${transport}-6.1 "result column 3 dimensional array: text\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[[['1','2'],['3','4']],[['5',NULL],['7','8']]]::text[]}
+		} -result {{{1 2} {3 4}} {{5 {}} {7 8}}}
+		#>>>
+		test array_${impl}_${transport}-7.1 "result column array: box\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY['(0,0),(1,1)','(2,2),(3,3)']::box[]}
+		} -result {(1,1),(0,0) (3,3),(2,2)}
+		#>>>
+		test array_${impl}_${transport}-8.1 "result column array: char(5)\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY['foo','bar','quuxx']::char(5)[]}
+		} -result {{foo  } {bar  } quuxx}
+		#>>>
+		test array_${impl}_${transport}-9.1 "result column array: varchar\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			#pg onecolumn {select '{foo,bar,"baz quux","",NULL,"NULL", "hello, \"world\"","a backslash: \\ rest",{1,2,3},{4,5,6}, {{x,y},{z,a}} }'::varchar[]}
+			pg onecolumn {select '{foo,bar,"baz quux","",NULL,"NULL", NuLL , "hello, \"world\"","a backslash: \\ rest" }'::varchar[]}
+		} -result [list foo bar {baz quux} {} {} NULL {} {hello, "world"} {a backslash: \ rest}]
+		#>>>
+
+		if {[info exists saved_accelerators]} {
+			set ::pgwire::accelerators $saved_accelerators
+		} else {
+			unset -nocomplain ::pgwire::accelerators
+		}
+		if {[info exists saved_force_generic_array]} {
+			set ::pgwire::_force_generic_array $saved_force_generic_array
+		} else {
+			unset -nocomplain ::pgwire::_force_generic_array
+		}
+	}
+}
+
+unset -nocomplain saved_accelerators saved_force_generic_array impl transport commonargs desc
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
+

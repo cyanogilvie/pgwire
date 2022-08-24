@@ -316,6 +316,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		columns
 		ops_cache
 		param_types
+		delims
 	}
 
 	constructor {instance sqlcode} { #<<<
@@ -366,7 +367,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 				set ops	[::pgwire::build_ops $as $c_types]
 				$con save_ops $sql $as $ops
 			}
-			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow]}
+			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow $delims]}
 		} else {
 			set makerow	[$con tcl_makerow $as $c_types]
 		}
@@ -594,6 +595,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	method stmt_name {} { set stmt_name }
 	method ops_cache {} { set ops_cache }
 	method sqlcode {} { set sql }
+	method delims {} { set delims }
 }
 
 #>>>
@@ -613,6 +615,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		ops_cache
 		ops_dicts
 		ops_lists
+		delims
 	}
 
 	constructor {stmt args} { #<<<
@@ -641,6 +644,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set rformats			[$stmt rformats]
 		set stmt_name			[$stmt stmt_name]
 		set ops_cache			[$stmt ops_cache]
+		set delims				[$stmt delims]
 		set tcl_encoding		[$con tcl_encoding]
 		foreach format {dicts lists} {
 			if {[dict exists $ops_cache $format]} {
@@ -733,7 +737,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			#::pgwire::log notice "Popped data: [string length $datarow], [llength $datarows] rows remain"
 
 			# makerow_start
-			set row	[::pgwire::c_makerow2 $ops_%format%s $columns $tcl_encoding $datarow]
+			set row	[::pgwire::c_makerow2 $ops_%format%s $columns $tcl_encoding $datarow $delims]
 			# makerow_end
 			return 1
 		}]

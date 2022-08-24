@@ -1,5 +1,5 @@
 # First two numbers are the PostgreSQL protocol version number, rest is ours
-VER=3.0.0b12
+VER=3.0.0b13
 
 all: tm/pgwire-$(VER).tm tm/tdbc/pgwire-$(VER).tm
 
@@ -16,6 +16,9 @@ gdb: all
 
 test: all
 	tclsh tests/all.tcl $(VER) $(TESTFLAGS)
+
+valgrind: all
+	valgrind tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 benchmark: all
 	tc qdisc add dev eth0 root netem delay .5ms

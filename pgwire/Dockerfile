@@ -1,5 +1,5 @@
 FROM cyanogilvie/tcl:8.7pre1
 WORKDIR /src
-RUN apk --update --no-cache add make postgresql-client gdb iproute2
+RUN apk --update --no-cache add make postgresql-client gdb iproute2 valgrind
 ENTRYPOINT ["/usr/bin/make"]
 CMD ["test"]
