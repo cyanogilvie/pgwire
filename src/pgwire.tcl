@@ -7,7 +7,6 @@ apply {{} {
 	set preserved	{}
 	foreach v {
 		block_accelerators
-		default_batchsize
 		include_path
 		_force_generic_array
 	} {
@@ -40,9 +39,6 @@ namespace eval ::pgwire { #<<<
 		}
 	}
 
-	if {![info exists default_batchsize]} {
-		variable default_batchsize	1000
-	}
 	if {![info exists include_path]} {
 		if {[info exists ::env(SNAP)]} {
 			lappend include_path	[file join $::env(SNAP) usr/include]
@@ -54,7 +50,9 @@ namespace eval ::pgwire { #<<<
 	variable arr_fmt_cache	{}
 
 	# Testing toggles
-	variable _force_generic_array	0
+	if {![info exists _force_generic_array]} {
+		variable _force_generic_array	0
+	}
 
 	namespace eval tapchan {
 		namespace export *
@@ -1674,11 +1672,11 @@ done:
 #>>>
 
 
-proc writefile {fn chars} {
-	set h	[open $fn w]
-	try {puts -nonewline $h $chars} finally {close $h}
-}
-writefile /tmp/pgwire_accel.c "#include <tcl.h>\n$::pgwire::c_code"
+#proc writefile {fn chars} {
+#	set h	[open $fn w]
+#	try {puts -nonewline $h $chars} finally {close $h}
+#}
+#writefile /tmp/pgwire_accel.c "#include <tcl.h>\n$::pgwire::c_code"
 
 set ::pgwire::accelerators	0
 if {![info exists ::pgwire::block_accelerators]} {
@@ -1786,6 +1784,7 @@ oo::class create ::pgwire {
 		sync_outstanding
 		pending_rowbuffer
 		preserved
+		batchsize
 	}
 
 	constructor args { #<<<
@@ -1915,6 +1914,7 @@ oo::class create ::pgwire {
 		my variable makerow_cache
 		set makerow_cache	{}
 		set preserved		{}
+		set batchsize		0
 
 		switch -exact [llength $args] {
 			0 {
@@ -2210,10 +2210,9 @@ oo::class create ::pgwire {
 			}
 		}
 		dict set compiled_actions ErrorResponse \
-			[list fields	[format {%s $fields} [namespace code {my ErrorResponse}]]]
+			[list fields	[format {catch {%s $fields} r o; list $r $o} [namespace code {my ErrorResponse}]]]
 		dict set compiled_actions NoticeResponse \
-			[list fields	[format {%s $fields} [namespace code {my NoticeResponse}]]]
-
+			[list fields	[format {catch {%s $fields} r o; list $r $o} [namespace code {my NoticeResponse}]]]
 	}
 
 	#>>>
@@ -2574,35 +2573,45 @@ oo::class create ::pgwire {
 	#>>>
 	method on_response actions { #<<<
 		set compiled_actions	[my _compile_actions $actions]
-		while 1 {
-			set messages	[my read_one_message]
-			set chainres	{}
-			foreach {messagetype messageparams} $messages {
-				#::pgwire::log notice "messagetype: ($messagetype), messageparams: ($messageparams)"
-				try {
-					lassign [apply [dict get $compiled_actions $messagetype] {*}$messageparams] \
-						res options
-					return -options $options $res
-				} on break {res options} {
-					set chainres	[list $res $options]
-					break
-				} trap {TCL LOOKUP DICT} {errmsg options} {
-					::pgwire::log error "Unhandled message: $messagetype:\n$messageparams\n-----------\n[join $compiled_actions \n]\n[dict get $options -errorinfo]"
-					set frames	{}
-					for {set i [info frame]} {$i > 1} {incr i -1} {
-						lappend frames	[info frame $i]
+		set saw_Z				0
+		try {
+			while 1 {
+				set messages	[my read_one_message]
+				set chainres	{}
+				foreach {messagetype messageparams} $messages {
+					if {$messagetype eq "ReadyForQuery"} {set saw_Z 1}
+					#::pgwire::log notice "messagetype: ($messagetype), messageparams: ($messageparams)"
+					try {
+						lassign [apply [dict get $compiled_actions $messagetype] {*}$messageparams] \
+							res options
+						#::pgwire::log notice "on_response handler for $messagetype, res: ($res), options: ($options)"
+						return -options $options $res
+					} on break {res options} {
+						set chainres	[list $res $options]
+						break
+					} trap {TCL LOOKUP DICT} {errmsg options} {
+						::pgwire::log error "Unhandled message: $messagetype:\n$messageparams\n-----------\n[join $compiled_actions \n]\n[dict get $options -errorinfo]"
+						set frames	{}
+						for {set i [info frame]} {$i > 1} {incr i -1} {
+							lappend frames	[info frame $i]
+						}
+						::pgwire::log error "frames:\n-*- [join $frames "\n-*- "]"
+						my Terminate
+						my destroy
+						throw {PGWIRE UNSYNCED} "Unexpected message \"$messagetype\" in current context"
+					} on error {errmsg options} {
+						return -options $options "Action $messagetype handler error: $errmsg"
 					}
-					::pgwire::log error "frames:\n-*- [join $frames "\n-*- "]"
-					my Terminate
-					my destroy
-					throw {PGWIRE UNSYNCED} "Unexpected message \"$messagetype\" in current context"
-				} on error {errmsg options} {
-					return -options $options "Action $messagetype handler error: $errmsg"
+				}
+				if {[llength $chainres] > 0} {
+					lassign $chainres res options
+					return -options $options $res
 				}
 			}
-			if {[llength $chainres] > 0} {
-				lassign $chainres res options
-				return -options $options $res
+		} finally {
+			if {!$saw_Z && [dict exists $compiled_actions ReadyForQuery]} {
+				::pgwire::log warning "on_response terminating without seeing ReadyForQuery, skipping to sync"
+				my skip_to_sync
 			}
 		}
 	}
@@ -3906,7 +3915,7 @@ oo::class create ::pgwire {
 		}
 
 		#set max_rows_per_batch	17
-		#set max_rows_per_batch	$::pgwire::default_batchsize
+		#set max_rows_per_batch	$batchsize
 		set max_rows_per_batch	0
 		#set max_rows_per_batch	500
 
@@ -4119,7 +4128,7 @@ oo::class create ::pgwire {
 		}
 
 		#set max_rows_per_batch	17
-		set max_rows_per_batch	$::pgwire::default_batchsize
+		set max_rows_per_batch	$batchsize
 		#set max_rows_per_batch	0
 		#set max_rows_per_batch	500
 
@@ -4344,6 +4353,24 @@ oo::class create ::pgwire {
 			$pending_rowbuffer preread_all
 		}
 	}
+	method batch_results {max_rows_per_batch script} { # Enable result datarow batching for the context of this script <<<
+		set savedval	$batchsize
+		try {
+			uplevel 1 $script
+		} on error {r o} - on break {r o} - on continue {r o} {
+			dict incr options -level 1
+			return -options $o $r
+		} on return {r o} {
+			dict incr options -level 1
+			dict set options -code return
+			return -options $o $r
+		} finally {
+			set batchsize	$savedval
+		}
+	}
+
+	#>>>
+	method batchsize {} {set batchsize}
 }
 
 # vim: foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

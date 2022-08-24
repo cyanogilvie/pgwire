@@ -4,6 +4,9 @@ all:
 test: all
 	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)"
 
+tcpdump: all
+	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" TCPDUMP="/tmp/testdump-"
+
 valgrind: all
 	docker-compose run --rm pgwire valgrind TESTFLAGS="$(TESTFLAGS)"
 

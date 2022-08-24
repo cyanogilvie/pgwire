@@ -126,10 +126,10 @@ test pgwire-2.2 {allrows -as lists, no -columnsvariable, 1 row, many columns} -s
 test pgwire-2.4 {allrows -as lists, no -columnsvariable, 1000 rows, 2 columns} -setup { #<<<
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 } -body {
-	set rows	[pg allrows -as lists {select film_id,rating from film}]
+	pg batch_results 17 {
+		set rows	[pg allrows -as lists {select film_id,rating from film}]
+	}
 
 	list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {lindex $row 0}]]
 } -cleanup {
@@ -141,8 +141,7 @@ test pgwire-2.4 {allrows -as lists, no -columnsvariable, 1000 rows, 2 columns} -
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan rows row hold
+	unset -nocomplain dbchan rows row
 } -result {1000 500500}
 #>>>
 test pgwire-3.1 {allrows -as dicts, 1 row, 2 columns} -setup { #<<<
@@ -540,32 +539,32 @@ test pgwire-7.3 {ready_for_query} -setup $std_setup -body { #<<<
 
 #>>>
 test pgwire-8.1 {nested foreach, no transaction} -setup { #<<<
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
 	set sum_film_id	0
-	pg foreach film {select * from film order by film_id} {
-		if {[dict get $film film_id] == 286} {
-			pg foreach actor {
-				select
-					a.first_name,
-					a.last_name
-				from
-					actor a
-				join
-					film_actor fa
-				using
-					(actor_id)
-				where
-					fa.film_id = :film_id
-			} $film {
-				lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+	pg batch_results 17 {
+		pg foreach film {select * from film order by film_id} {
+			if {[dict get $film film_id] == 286} {
+				pg foreach actor {
+					select
+						a.first_name,
+						a.last_name
+					from
+						actor a
+					join
+						film_actor fa
+					using
+						(actor_id)
+					where
+						fa.film_id = :film_id
+				} $film {
+					lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+				}
 			}
+			incr sum_film_id	[dict get $film film_id]
 		}
-		incr sum_film_id	[dict get $film film_id]
 	}
 	list $res $sum_film_id
 } -cleanup {
@@ -577,41 +576,40 @@ test pgwire-8.1 {nested foreach, no transaction} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan film actor res hold
+	unset -nocomplain dbchan film actor res
 } -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
 #>>>
 test pgwire-8.2 {nested foreach, within transaction} -setup { #<<<
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
 	set sum_film_id	0
-	pg begintransaction
-	pg foreach film {select * from film order by film_id} {
-		if {[dict get $film film_id] == 286} {
-			pg foreach actor {
-				select
-					a.first_name,
-					a.last_name
-				from
-					actor a
-				join
-					film_actor fa
-				using
-					(actor_id)
-				where
-					fa.film_id = :film_id
-			} $film {
-				lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+	pg batch_results 17 {
+		pg begintransaction
+		pg foreach film {select * from film order by film_id} {
+			if {[dict get $film film_id] == 286} {
+				pg foreach actor {
+					select
+						a.first_name,
+						a.last_name
+					from
+						actor a
+					join
+						film_actor fa
+					using
+						(actor_id)
+					where
+						fa.film_id = :film_id
+				} $film {
+					lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+				}
 			}
-		}
 
-		incr sum_film_id	[dict get $film film_id]
+			incr sum_film_id	[dict get $film film_id]
+		}
+		pg commit
 	}
-	pg commit
 	list $res $sum_film_id
 } -cleanup {
 	foreach obj {pg} {
@@ -622,36 +620,35 @@ test pgwire-8.2 {nested foreach, within transaction} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan film actor res hold
+	unset -nocomplain dbchan film actor res
 } -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
 #>>>
 test pgwire-8.3 {nested onecolumn, no transaction} -setup { #<<<
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
 	set sum_film_id	0
-	pg foreach film {select * from film order by film_id} {
-		if {[dict get $film film_id] == 286} {
-			set film_id	[dict get $film film_id]
-			lappend res	[pg onecolumn {
-				select
-					a.first_name || ' ' || a.last_name
-				from
-					actor a
-				join
-					film_actor fa
-				using
-					(actor_id)
-				where
-					fa.film_id = :film_id
-				limit 1
-			}]
+	pg batch_results 17 {
+		pg foreach film {select * from film order by film_id} {
+			if {[dict get $film film_id] == 286} {
+				set film_id	[dict get $film film_id]
+				lappend res	[pg onecolumn {
+					select
+						a.first_name || ' ' || a.last_name
+					from
+						actor a
+					join
+						film_actor fa
+					using
+						(actor_id)
+					where
+						fa.film_id = :film_id
+					limit 1
+				}]
+			}
+			incr sum_film_id	[dict get $film film_id]
 		}
-		incr sum_film_id	[dict get $film film_id]
 	}
 	list $res $sum_film_id
 } -cleanup {
@@ -663,39 +660,38 @@ test pgwire-8.3 {nested onecolumn, no transaction} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan film actor res film_id hold
+	unset -nocomplain dbchan film actor res film_id
 } -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
 #>>>
 test pgwire-8.4 {nested onecolumn, within transaction} -setup { #<<<
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
 	set sum_film_id	0
-	pg begintransaction
-	pg foreach film {select * from film order by film_id} {
-		if {[dict get $film film_id] == 286} {
-			set film_id	[dict get $film film_id]
-			lappend res	[pg onecolumn {
-				select
-					a.first_name || ' ' || a.last_name
-				from
-					actor a
-				join
-					film_actor fa
-				using
-					(actor_id)
-				where
-					fa.film_id = :film_id
-				limit 1
-			}]
+	pg batch_results 17 {
+		pg begintransaction
+		pg foreach film {select * from film order by film_id} {
+			if {[dict get $film film_id] == 286} {
+				set film_id	[dict get $film film_id]
+				lappend res	[pg onecolumn {
+					select
+						a.first_name || ' ' || a.last_name
+					from
+						actor a
+					join
+						film_actor fa
+					using
+						(actor_id)
+					where
+						fa.film_id = :film_id
+					limit 1
+				}]
+			}
+			incr sum_film_id	[dict get $film film_id]
 		}
-		incr sum_film_id	[dict get $film film_id]
+		pg commit
 	}
-	pg commit
 	list $res $sum_film_id
 } -cleanup {
 	foreach obj {pg} {
@@ -706,35 +702,34 @@ test pgwire-8.4 {nested onecolumn, within transaction} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan film actor res film_id hold
+	unset -nocomplain dbchan film actor res film_id
 } -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
 #>>>
 test pgwire-8.5 {nested allrows, no transaction} -setup { #<<<
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 	set dbchan	[try $connect]
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
 	set sum_film_id	0
-	pg foreach film {select * from film order by film_id} {
-		if {[dict get $film film_id] == 286} {
-			lappend res	{*}[pg allrows -as lists {
-				select
-					a.first_name || ' ' || a.last_name
-				from
-					actor a
-				join
-					film_actor fa
-				using
-					(actor_id)
-				where
-					fa.film_id = :film_id
-				limit 2
-			} $film]
+	pg batch_results 17 {
+		pg foreach film {select * from film order by film_id} {
+			if {[dict get $film film_id] == 286} {
+				lappend res	{*}[pg allrows -as lists {
+					select
+						a.first_name || ' ' || a.last_name
+					from
+						actor a
+					join
+						film_actor fa
+					using
+						(actor_id)
+					where
+						fa.film_id = :film_id
+					limit 2
+				} $film]
+			}
+			incr sum_film_id	[dict get $film film_id]
 		}
-		incr sum_film_id	[dict get $film film_id]
 	}
 	list $res $sum_film_id
 } -cleanup {
@@ -746,38 +741,37 @@ test pgwire-8.5 {nested allrows, no transaction} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan film actor res hold
+	unset -nocomplain dbchan film actor res
 } -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
 #>>>
 test pgwire-8.6 {nested allrows, no transaction} -setup { #<<<
 	set dbchan	[try $connect]
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	17
 	pgwire create pg $dbchan pagila postgres insecure
 } -body {
 	set res	{}
 	set sum_film_id	0
-	pg begintransaction
-	pg foreach film {select * from film order by film_id} {
-		if {[dict get $film film_id] == 286} {
-			lappend res	{*}[pg allrows -as lists {
-				select
-					a.first_name || ' ' || a.last_name
-				from
-					actor a
-				join
-					film_actor fa
-				using
-					(actor_id)
-				where
-					fa.film_id = :film_id
-				limit 2
-			} $film]
+	pg batch_results 17 {
+		pg begintransaction
+		pg foreach film {select * from film order by film_id} {
+			if {[dict get $film film_id] == 286} {
+				lappend res	{*}[pg allrows -as lists {
+					select
+						a.first_name || ' ' || a.last_name
+					from
+						actor a
+					join
+						film_actor fa
+					using
+						(actor_id)
+					where
+						fa.film_id = :film_id
+					limit 2
+				} $film]
+			}
+			incr sum_film_id	[dict get $film film_id]
 		}
-		incr sum_film_id	[dict get $film film_id]
+		pg commit
 	}
-	pg commit
 	list $res $sum_film_id
 } -cleanup {
 	foreach obj {pg} {
@@ -788,8 +782,7 @@ test pgwire-8.6 {nested allrows, no transaction} -setup { #<<<
 	if {[info exists dbchan] && $dbchan in [chan names]} {
 		close $dbchan
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain dbchan film actor res hold
+	unset -nocomplain dbchan film actor res
 } -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
 #>>>
 test pgwire-10.1 {casts vs params} -setup { #<<<

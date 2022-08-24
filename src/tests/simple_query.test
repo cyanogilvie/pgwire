@@ -42,7 +42,65 @@ test simple_query_dict-2.1 {Multiple queries} {*}$commonargs -body { #<<<
 	} {
 		puts "row: ($row)"
 	}
-} -output "row: (foo Foo)\nrow: (bar Bar)\n"
+	pg allrows {select 1 as foo}
+} -result {{foo 1}} -output "row: (foo Foo)\nrow: (bar Bar)\n"
+#>>>
+test simple_query_dict-3.1 {create schema} {*}$commonargs -body { #<<<
+	set cleanup {
+		pg simple_query_dict row {
+			drop function if exists servicediscovery_changed() cascade;
+			drop table if exists servicediscovery cascade;
+		} {}
+		unset -nocomplain i
+	}
+
+	try $cleanup
+
+	for {set i 0} {$i < 2} {incr i} {
+		pg simple_query_dict row {
+			create table if not exists servicediscovery (
+				service		text not null,
+				stage		text not null,
+				ip			inet not null,
+				port		integer not null,
+				heartbeat	timestamp with time zone default current_timestamp,
+				CONSTRAINT uniqueservice UNIQUE(service, stage, ip, port)
+			);
+
+			create or replace function servicediscovery_changed() returns trigger as $$
+				declare
+					payload		jsonb = '{}';
+				begin
+					payload := jsonb_set(payload, ARRAY['op'], to_jsonb(TG_OP));
+					if TG_OP = 'DELETE' or TG_OP = 'UPDATE' then
+						payload = jsonb_set(payload, ARRAY['old'], to_jsonb(old));
+					end if;
+					if TG_OP = 'INSERT' or TG_OP = 'UPDATE' then
+						payload = jsonb_set(payload, ARRAY['new'], to_jsonb(new));
+					end if;
+					perform pg_notify('servicediscovery', payload::text);
+					return NULL;
+				end;
+			$$ language plpgsql;
+
+			drop trigger if exists servicediscovery_changed on servicediscovery;
+			create trigger
+				servicediscovery_changed
+			after
+				insert or
+				update or
+				delete
+			on
+				servicediscovery
+			for each
+				row
+			execute procedure
+				servicediscovery_changed();
+		} {}
+	}
+
+	pg allrows {select 1 as foo}
+} -result {{foo 1}}
 #>>>
 
 unset -nocomplain commonargs

@@ -25,8 +25,6 @@ proc get_batch_vars {db sql batchsize as} { #<<<
 
 	try $build_params on ok parameters {}
 
-	set columns	[dict keys $c_types]
-
 	set max_rows_per_batch	$batchsize
 
 	set ops	[::pgwire::build_ops $as $c_types]
@@ -41,6 +39,7 @@ proc get_batch_vars {db sql batchsize as} { #<<<
 			tcl_encoding	[$db tcl_encoding] \
 			datarows		$datarows \
 			c_types			$c_types \
+			delims			$delims \
 			tcl_makerow		[$db tcl_makerow $as $c_types]
 	} finally {
 		if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
@@ -168,9 +167,6 @@ bench pgwire-2.1 {allrows, large number of columns, lists} -setup { #<<<
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
 	set q {select * from film}
-	set hold	$::pgwire::default_batchsize
-	#set ::pgwire::default_batchsize	17
-	#set ::pgwire::default_batchsize	0
 } -compare {
 	pgwire_lo     { llength [pgwire_lo  allrows -as lists $q] }
 	pgwire_uds    { llength [pgwire_uds allrows -as lists $q] }
@@ -188,8 +184,7 @@ bench pgwire-2.1 {allrows, large number of columns, lists} -setup { #<<<
 			$obj destroy
 		}
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain q hold
+	unset -nocomplain q
 } -result 1000
 #>>>
 bench pgwire-2.2 {allrows, large number of columns, dicts} -setup { #<<<
@@ -250,8 +245,6 @@ bench pgwire-2.4 {allrows, one row, one column, dicts} -setup { #<<<
 } -result {ENOUGH RAGING}
 #>>>
 bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	0
 	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
 	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
@@ -312,8 +305,7 @@ bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
 			$obj destroy
 		}
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain q count hold
+	unset -nocomplain q count
 } -result 1000
 #>>>
 bench pgwire-3.2 {foreach, medium number of columns} -setup { #<<<
@@ -369,8 +361,6 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
 
 	set q {select film_id,title from film}
-	set hold	$::pgwire::default_batchsize
-	set ::pgwire::default_batchsize	0
 } -compare {
 	pgwire_uds_dicts {
 		set count	0
@@ -426,8 +416,7 @@ bench pgwire-3.3 {foreach, small number of columns} -setup { #<<<
 			$obj destroy
 		}
 	}
-	set ::pgwire::default_batchsize	$hold
-	unset -nocomplain q count hold
+	unset -nocomplain q count
 } -result 1000
 #>>>
 bench pgwire-4.1 {foreach, large number of columns, dicts} -setup { #<<<
@@ -756,24 +745,38 @@ bench pgwire-7.1 {makerow} -setup { #<<<
 	set ops_dict		{op_int4_dicts op_text_dicts op_text_dicts op_int4_dicts op_int2_dicts op_int2_dicts op_int2_dicts op_text_dicts op_int2_dicts op_text_dicts op_text_dicts op_text_dicts op_text_dicts op_text_dicts}
 	set columns 		{film_id title description release_year language_id original_language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext}
 	set tcl_encoding	utf-8
-	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set c_types			{
+		film_id int4 {}
+		title text {}
+		description text {}
+		release_year int4 {}
+		language_id int2 {}
+		original_language_id int2 {}
+		rental_duration int2 {}
+		rental_rate text {}
+		length int2 {}
+		replacement_cost text {}
+		rating text {}
+		last_update text {}
+		special_features text {}
+		fulltext text {}
+	}
+	set delims	[lrepeat [llength $columns] {}] 
 	set datarow	[binary decode hex 000e00000004000003e8000000095a4f52524f2041524b000000554120496e7472657069642050616e6f72616d61206f662061204d616420536369656e7469737420416e64206120426f792077686f206d7573742052656465656d206120426f7920696e2041204d6f6e61737465727900000004000007d6000000020001ffffffff00000002000300000004342e39390000000200320000000531382e3939000000054e432d31370000001d323032302d30392d31302031363a34363a30332e3930353739352b30300000002b7b547261696c6572732c436f6d6d656e7461726965732c22426568696e6420746865205363656e6573227d000000722761726b273a322027626f79273a31322c31372027696e747265706964273a3420276d6164273a3820276d6f6e617374657269273a323020276d757374273a3134202770616e6f72616d61273a35202772656465656d273a31352027736369656e74697374273a3920277a6f72726f273a31]
-	set tcl_makerow_lists	[pgwire_uds tcl_makerow lists $c_types]
-	set tcl_makerow_dicts	[pgwire_uds tcl_makerow dicts $c_types]
+	set tcl_makerow_lists	[list {datarow ops_list ops_dict columns tcl_encoding c_types delims} "variable ::pgwire::arr_fmt_cache\n[pgwire_uds tcl_makerow lists $c_types]\nlindex \$row 1"]
+	set tcl_makerow_dicts	[list {datarow ops_list ops_dict columns tcl_encoding c_types delims} "variable ::pgwire::arr_fmt_cache\n[pgwire_uds tcl_makerow dicts $c_types]\ndict get \$row title"]
 } -compare {
 	tcl_makerow_list {
-		try $tcl_makerow_lists
-		lindex $row 1
+		apply $tcl_makerow_lists $datarow $ops_list $ops_dict $columns $tcl_encoding $c_types $delims
 	}
 	tcl_makerow_dict {
-		try $tcl_makerow_dicts
-		dict get $row title
+		apply $tcl_makerow_dicts $datarow $ops_list $ops_dict $columns $tcl_encoding $c_types $delims
 	}
 	c_makerow2_list {
-		lindex [::pgwire::c_makerow2 $ops_list $columns $tcl_encoding $datarow] 1
+		lindex [::pgwire::c_makerow2 $ops_list $columns $tcl_encoding $datarow $delims] 1
 	}
 	c_makerow2_dict {
-		dict get [::pgwire::c_makerow2 $ops_dict $columns $tcl_encoding $datarow] title
+		dict get [::pgwire::c_makerow2 $ops_dict $columns $tcl_encoding $datarow $delims] title
 	}
 } -cleanup {
 	foreach obj {pgwire_uds} {
@@ -781,11 +784,26 @@ bench pgwire-7.1 {makerow} -setup { #<<<
 			$obj destroy
 		}
 	}
-	unset -nocomplain row ops_list ops_dict columns tcl_encoding c_types datarow tcl_makerow_lists tcl_makerow_dicts collen val o obj
+	unset -nocomplain row ops_list ops_dict columns tcl_encoding c_types datarow tcl_makerow_lists tcl_makerow_dicts collen val o obj delims
 } -result {ZORRO ARK}
 #>>>
 bench pgwire-7.2 {build_ops} -setup { #<<<
-	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set c_types			{
+		film_id int4 {}
+		title text {}
+		description text {}
+		release_year int4 {}
+		language_id int2 {}
+		original_language_id int2 {}
+		rental_duration int2 {}
+		rental_rate text {}
+		length int2 {}
+		replacement_cost text {}
+		rating text {}
+		last_update text {}
+		special_features text {}
+		fulltext text {}
+	}
 } -compare {
 	dicts {
 		llength [::pgwire::build_ops dicts $c_types]
@@ -803,9 +821,24 @@ bench pgwire-7.2 {build_ops} -setup { #<<<
 } -result 14
 #>>>
 bench pgwire-7.2.1 {compile_ops} -setup { #<<<
-	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set c_types			{
+		film_id int4 {}
+		title text {}
+		description text {}
+		release_year int4 {}
+		language_id int2 {}
+		original_language_id int2 {}
+		rental_duration int2 {}
+		rental_rate text {}
+		length int2 {}
+		replacement_cost text {}
+		rating text {}
+		last_update text {}
+		special_features text {}
+		fulltext text {}
+	}
 	set ops				"[::pgwire::build_ops dicts $c_types] "
-	set expecting		[expr {[llength $c_types] / 2}]
+	set expecting		[expr {[llength $c_types] / 3}]
 } -compare {
 	fresh_ops {
 		::pgwire::compile_ops [::pgwire::build_ops dicts $c_types] $expecting
@@ -826,7 +859,22 @@ bench pgwire-7.2.1 {compile_ops} -setup { #<<<
 } -result {}
 #>>>
 bench pgwire-7.2.2 {ops cache lookup} -setup { #<<<
-	set c_types			{film_id int4 title text description text release_year int4 language_id int2 original_language_id int2 rental_duration int2 rental_rate text length int2 replacement_cost text rating text last_update text special_features text fulltext text}
+	set c_types			{
+		film_id int4 {}
+		title text {}
+		description text {}
+		release_year int4 {}
+		language_id int2 {}
+		original_language_id int2 {}
+		rental_duration int2 {}
+		rental_rate text {}
+		length int2 {}
+		replacement_cost text {}
+		rating text {}
+		last_update text {}
+		special_features text {}
+		fulltext text {}
+	}
 	set ops_cache_empty	{}
 	set ops_cache_miss	[dict create lists [::pgwire::build_ops lists $c_types]]
 	set ops_cache_hit	[dict create dicts [::pgwire::build_ops dicts $c_types]]
@@ -918,16 +966,21 @@ bench pgwire-7.2.2 {ops cache lookup} -setup { #<<<
 bench pgwire-7.3 {foreach_batch} -setup { #<<<
 	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
 	set cleanup	{}
+	set params	{}
+	set vals	{}
 	foreach {k v} [get_batch_vars pgwire_uds {select * from film} 0 dicts] {
+		lappend params	$k
+		lappend vals	$v
 		set $k $v
 		lappend cleanup $k
 	}
+	set tcl_makerow_lambda [list [list datarow {*}$params] "variable ::pgwire::arr_fmt_cache; $tcl_makerow; set row"]
 } -compare {
 	tcl_makerow {
 		set acc		0
 		set count	0
 		foreach datarow $datarows {
-			try $tcl_makerow
+			set row	[apply $tcl_makerow_lambda $datarow {*}$vals]
 			try {
 				incr count
 				incr acc	[dict get $row film_id]
@@ -961,7 +1014,7 @@ bench pgwire-7.3 {foreach_batch} -setup { #<<<
 		::pgwire::c_foreach_batch row $ops $columns $tcl_encoding $datarows {
 			incr count
 			incr acc	[dict get $row film_id]
-		}
+		} $delims
 		list $count $acc
 	}
 	c_foreach_batch_nr {
@@ -970,7 +1023,7 @@ bench pgwire-7.3 {foreach_batch} -setup { #<<<
 		::pgwire::c_foreach_batch_nr row $ops $columns $tcl_encoding $datarows {
 			incr count
 			incr acc	[dict get $row film_id]
-		}
+		} $delims
 		list $count $acc
 	}
 } -cleanup {
@@ -979,7 +1032,7 @@ bench pgwire-7.3 {foreach_batch} -setup { #<<<
 			$obj destroy
 		}
 	}
-	unset -nocomplain {*}cleanup row datarow tcl_makerow_dicts collen val o obj cleanup k v acc count rethrow broken r
+	unset -nocomplain {*}$cleanup row datarow tcl_makerow_dicts collen val o obj cleanup k v acc count rethrow broken r params vals tcl_makerow_lambda
 } -result {1000 500500}
 if 0 {
 }

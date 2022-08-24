@@ -299,6 +299,8 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward sync_outstanding	pg sync_outstanding
 	forward tcl_makerow			pg tcl_makerow
 	forward buffer_nesting		pg buffer_nesting
+	forward batch_results		pg batch_results
+	forward batchsize			pg batchsize
 }
 
 #>>>
@@ -391,7 +393,6 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		}
 		set as	[dict get $opts -as]
 
-		#set max_rows_per_batch	$::pgwire::default_batchsize
 		set max_rows_per_batch	0
 
 		set tcl_encoding	[$con tcl_encoding]
@@ -472,7 +473,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		upvar 1 $row_varname row
 		set as	[dict get $opts -as]
 
-		set max_rows_per_batch	$::pgwire::default_batchsize
+		set max_rows_per_batch	[$con batchsize]
 
 		set tcl_encoding	[$con tcl_encoding]
 		lassign [my _start_query $as $opts {*}$args] makerow parameters ops
@@ -635,7 +636,6 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		}
 		if {[self next] ne ""} next
 
-		set max_rows_per_batch	$::pgwire::default_batchsize
 		set rowcount			0
 		set datarows			{}
 		set con					[$stmt con]
@@ -646,6 +646,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set ops_cache			[$stmt ops_cache]
 		set delims				[$stmt delims]
 		set tcl_encoding		[$con tcl_encoding]
+		set max_rows_per_batch	[$con batchsize]
 		foreach format {dicts lists} {
 			if {[dict exists $ops_cache $format]} {
 				set ops_$format	[dict get $ops_cache $format]
