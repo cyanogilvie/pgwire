@@ -1,0 +1,53 @@
+set here	[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
+
+# common -setup and -cleanup <<<
+set commonargs	[list -setup {
+	pgwire create pg [try $connect] pagila postgres insecure "application_name $::testname"
+	unset -nocomplain cleanup
+} -cleanup {
+	if {[info exists cleanup]} {
+		try $cleanup on error {errmsg options} {
+			puts stderr "Error running cleanup: [dict get $options -errorinfo]"
+		}
+	}
+	unset -nocomplain cleanup
+	if {[info object isa object pg]} {rename pg {}}
+}]
+#>>>
+
+test simple_query_dict-1.1 {basic query} {*}$commonargs -body { #<<<
+	set cleanup {
+		unset -nocomplain foo
+	}
+
+	set foo	Foo
+	pg simple_query_dict row {
+		select :foo as foo
+	} {
+		puts "row: ($row)"
+	}
+} -output "row: (foo Foo)\n"
+#>>>
+test simple_query_dict-2.1 {Multiple queries} {*}$commonargs -body { #<<<
+	set cleanup {
+		unset -nocomplain foo bar
+	}
+
+	set foo	Foo
+	set bar Bar
+	pg simple_query_dict row {
+		select :foo as foo;
+		select :bar as bar;
+	} {
+		puts "row: ($row)"
+	}
+} -output "row: (foo Foo)\nrow: (bar Bar)\n"
+#>>>
+
+unset -nocomplain commonargs
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

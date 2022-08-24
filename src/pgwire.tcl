@@ -2807,7 +2807,7 @@ oo::class create ::pgwire {
 			switch -glob -- $tok {
 				::* {
 					# Prevent PG casts from looking like params
-					append compiled	$tok
+					append quoted	$tok
 				}
 
 				:* - $* - @* {
@@ -2816,7 +2816,7 @@ oo::class create ::pgwire {
 						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
 						# to be parameters from us, but refer to the argument of functions).  Not
 						# watertight, but would require a SQL-dialect aware parser to do properly.
-						append compiled $tok
+						append quoted $tok
 						continue
 					}
 					set exists	[uplevel 1 [list info exists $name]]
@@ -2829,7 +2829,7 @@ oo::class create ::pgwire {
 				}
 
 				; {
-					append compiled $tok
+					append quoted $tok
 				}
 
 				default {
@@ -2871,7 +2871,7 @@ oo::class create ::pgwire {
 			switch -glob -- $tok {
 				::* {
 					# Prevent PG casts from looking like params
-					append compiled	$tok
+					append quoted	$tok
 				}
 
 				:* - $* - @* {
@@ -2880,7 +2880,7 @@ oo::class create ::pgwire {
 						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
 						# to be parameters from us, but refer to the argument of functions).  Not
 						# watertight, but would require a SQL-dialect aware parser to do properly.
-						append compiled $tok
+						append quoted $tok
 						continue
 					}
 					set exists	[uplevel 1 [list info exists $name]]
@@ -2893,7 +2893,7 @@ oo::class create ::pgwire {
 				}
 
 				; {
-					append compiled $tok
+					append quoted $tok
 				}
 
 				default {
