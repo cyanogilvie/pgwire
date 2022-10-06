@@ -408,7 +408,7 @@ namespace eval ::pgwire { #<<<
 					%makeval%			$makeval \
 					%opname%			$opname \
 					%opargs%			$opargs \
-				] {
+				] { //@begin=c@
 					static void %opname%(%opargs%) //<<<
 					{
 						Tcl_Obj*	val = NULL;
@@ -426,6 +426,7 @@ namespace eval ::pgwire { #<<<
 					}
 
 					//>>>
+						//@end=c@@begin=c@
 					static void %opname%_array(%opargs%) //<<<
 					{
 						Tcl_Obj*	val = NULL;
@@ -526,7 +527,7 @@ namespace eval ::pgwire { #<<<
 					}
 
 					//>>>
-				}]
+				//@end=c@}]
 			}
 
 			set opname	op_generic_${format}
@@ -827,6 +828,7 @@ done:
 		%accel_ops%	$::pgwire::accel_ops \
 		%line%		[expr {46 + [dict get [info frame 0] line]}] \
 	] {
+		//@begin=c@
 		#include <byteswap.h>
 		#include <stdint.h>
 		#include <string.h>
@@ -837,6 +839,8 @@ done:
 			int				rs;
 			Tcl_Obj**		cols;
 		};
+
+		//@end=c@@begin=c@
 
 		enum {
 			PGWIRE_LIT_BLANK,
@@ -1664,7 +1668,7 @@ done:
 		}
 
 		//>>>
-	}]
+	//@end=c@}]
 	# C code >>>
 	set lineno	0
 	#::pgwire::log notice "c code:\n[join [lmap line [split $c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
@@ -1680,85 +1684,21 @@ done:
 
 set ::pgwire::accelerators	0
 if {![info exists ::pgwire::block_accelerators]} {
-	if {[llength [lsearch -all -inline -exact -not [package versions critcl] 0]] > 0} {
-		try {
-			rename ::interp ::pgwire::_interp
-			try {
-				proc ::interp {op args} {
-					# Prevent critcl turning on interp frame debug (about 10% slowdown)
-					switch -exact -- $op {
-						debug return
-					}
-					tailcall ::pgwire::_interp $op {*}$args
-				}
+	try {
+		package require jitc
 
-				package require critcl 3
-			} finally {
-				rename ::interp {}
-				rename ::pgwire::_interp ::interp
-			}
-		} on error {} {
-		} on ok ver {
-			#::pgwire::log notice "Have critcl $ver"
-			# With a little help from my friends (c) <<<
-			if {[critcl::compiling]} {
-				#::pgwire::log notice "critcl::compiling: [critcl::compiling]"
-				foreach path $::pgwire::include_path {
-					critcl::cheaders -I$path
-				}
-				#critcl::tcl [info tclversion]
-				critcl::tcl 8.6
-				#critcl::debug memory
-				critcl::debug symbols
-				critcl::cflags -O2 -g
-				#critcl::cflags -O3 -march=native
-				critcl::ccode $::pgwire::c_code;	set baseline	[dict get [info frame 0] line]; set lineno	[expr {$baseline-1}]
-				#::pgwire::log notice "c code:\n[join [lmap line [split $::pgwire::c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
-				#critcl::ccommand ::pgwire::c_makerow           c_makerow
-				critcl::ccommand ::pgwire::c_makerow2           c_makerow2
-				critcl::ccommand ::pgwire::c_foreach_batch      c_foreach_batch
-				critcl::ccommand ::pgwire::c_allrows_batch      c_allrows_batch
-				critcl::ccommand ::pgwire::compile_ops          compile_ops_cmd
-				critcl::cinit {
-					Tcl_NRCreateCommand(interp, "::pgwire::c_foreach_batch_nr", c_foreach_batch_nr, c_foreach_batch_nr_setup, NULL, NULL);
-				} {}
+		set accel [list options {-Wall -Werror -gdwarf-5} code $::pgwire::c_code]
 
-				# Force compile and load.  Not necessary, without it commands will lazy compile and load when called
-				critcl::load
-			}
-			# With a little help from my friends (c) >>>
-			set ::pgwire::accelerators	1
-		}
-	}
-	if {!$::pgwire::accelerators} {
-		try {
-			package require Thread	;# Thread: tcc appears to have concurrency issues, so we need to ensure that we're only running in a single thread at at time
-			package require tcc4tcl
-		} on error {} {
-		} on ok ver {
-			tsv::lock pgwire {
-				set start	[clock microseconds]
-				#::pgwire::log notice "Have tcc4tcl $ver"
-				# With a little help from my friends (c) <<<
-				tcc4tcl $::tcc4tcl::dir memory tcc
-				foreach path $::pgwire::include_path {
-					tcc add_include_path $path
-				}
-				tcc compile "#include <tcl.h>\n$::pgwire::c_code"
-				tcc command ::pgwire::c_makerow2             c_makerow2
-				tcc command ::pgwire::c_foreach_batch        c_foreach_batch
-				tcc nrcommand ::pgwire::c_foreach_batch_nr   c_foreach_batch_nr c_foreach_batch_nr_setup
-				tcc command ::pgwire::c_allrows_batch        c_allrows_batch
-				tcc command ::pgwire::compile_ops            compile_ops_cmd
-				rename tcc {}
-				# With a little help from my friends (c) >>>
-				set ::pgwire::accelerators	1
-				::pgwire::log notice "build pgwire accelerators with tcc: [format {%.3f ms} [expr {([clock microseconds] - $start)/1e3}]]"
-			}
-		}
+		interp alias {} ::pgwire::c_makerow2			{} ::jitc::capply $accel c_makerow2
+		interp alias {} ::pgwire::c_foreach_batch		{} ::jitc::capply $accel c_foreach_batch
+		interp alias {} ::pgwire::c_foreach_batch_nr	{} ::jitc::capply $accel c_foreach_batch_nr
+		interp alias {} ::pgwire::c_allrows_batch		{} ::jitc::capply $accel c_allrows_batch
+		interp alias {} ::pgwire::compile_ops			{} ::jitc::capply $accel compile_ops
+	} on ok {} {
+		set ::pgwire::accelerators	1
 	}
 } else {
-	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], critcl versions: ([package versions critcl]), tcc4tcl versions: ([package versions tcc4tcl])"
+	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], jitc versions: ([package versions jitc])"
 }
 
 oo::class create ::pgwire {
