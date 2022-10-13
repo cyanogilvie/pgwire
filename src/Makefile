@@ -1,5 +1,5 @@
 # First two numbers are the PostgreSQL protocol version number, rest is ours
-VER=3.0.0b15
+VER=3.0.0b16
 
 all: tm/pgwire-$(VER).tm tm/tdbc/pgwire-$(VER).tm
 

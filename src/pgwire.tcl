@@ -1855,6 +1855,7 @@ oo::class create ::pgwire {
 		set makerow_cache	{}
 		set preserved		{}
 		set batchsize		0
+		set type_elem		{}
 
 		switch -exact [llength $args] {
 			0 {
