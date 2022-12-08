@@ -1679,9 +1679,9 @@ if {![info exists ::pgwire::block_accelerators]} {
 
 		interp alias {} ::pgwire::c_makerow2			{} ::jitc::capply $accel c_makerow2
 		interp alias {} ::pgwire::c_foreach_batch		{} ::jitc::capply $accel c_foreach_batch
-		interp alias {} ::pgwire::c_foreach_batch_nr	{} ::jitc::capply $accel c_foreach_batch_nr
+		interp alias {} ::pgwire::c_foreach_batch_nr	{} ::jitc::capply $accel c_foreach_batch_nr_setup
 		interp alias {} ::pgwire::c_allrows_batch		{} ::jitc::capply $accel c_allrows_batch
-		interp alias {} ::pgwire::compile_ops			{} ::jitc::capply $accel compile_ops
+		interp alias {} ::pgwire::compile_ops			{} ::jitc::capply $accel compile_ops_cmd
 	} on ok {} {
 		set ::pgwire::accelerators	1
 	}

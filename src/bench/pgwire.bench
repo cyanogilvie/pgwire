@@ -277,7 +277,7 @@ bench pgwire-3.1 {foreach, large number of columns} -setup { #<<<
 	}
 	pgwire_lo_lists {
 		set count	0
-		pgwire_uds foreach -as lists row $q {
+		pgwire_lo foreach -as lists row $q {
 			lindex $row 0
 			incr count
 		}
