@@ -1,6 +1,7 @@
 version: "3.9"
 services:
     db:
+        platform: linux/amd64
         build: sampledb
         volumes:
             - run:/run
@@ -20,6 +21,7 @@ services:
         cap_add:
             - NET_ADMIN
     pgwire:
+        platform: linux/amd64
         build: pgwire
         depends_on:
             db:

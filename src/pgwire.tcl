@@ -863,18 +863,6 @@ done:
 			Tcl_Obj*	lit[PGWIRE_LIT_SIZE];
 		};
 
-		static inline void replace_tclobj(Tcl_Obj** target, Tcl_Obj* replacement) //<<<
-		{
-			if (*target) {
-				Tcl_DecrRefCount(*target);
-				*target = NULL;
-			}
-			*target = replacement;
-			if (*target) Tcl_IncrRefCount(*target);
-		}
-
-		//>>>
-
 		%accel_ops%
 		//#line %line%
 
