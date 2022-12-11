@@ -1671,11 +1671,15 @@ done:
 #writefile /tmp/pgwire_accel.c "#include <tcl.h>\n$::pgwire::c_code"
 
 set ::pgwire::accelerators	0
-if {![info exists ::pgwire::block_accelerators]} {
+if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BLOCK_ACCELERATORS)]} {
 	try {
 		package require jitc
 
-		set accel [list options {-Wall -Werror -gdwarf-5} code $::pgwire::c_code]
+		set accel	{}
+		if {[info exists ::env(PGWIRE_JITC_DEBUG)]} {
+			lappend accel	debug $::env(PGWIRE_JITC_DEBUG)
+		}
+		lappend accel	options {-Wall -Werror -gdwarf-5} code $::pgwire::c_code
 
 		interp alias {} ::pgwire::c_makerow2			{} ::jitc::capply $accel c_makerow2
 		interp alias {} ::pgwire::c_foreach_batch		{} ::jitc::capply $accel c_foreach_batch
@@ -1686,7 +1690,7 @@ if {![info exists ::pgwire::block_accelerators]} {
 		set ::pgwire::accelerators	1
 	}
 } else {
-	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], jitc versions: ([package versions jitc])"
+	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], env block: [info exists ::env(PGWIRE_BLOCK_ACCELERATORS)], jitc versions: ([package versions jitc])"
 }
 
 oo::class create ::pgwire {
