@@ -830,7 +830,8 @@ done:
 		Tcl_Interp*	g_interp = NULL;
 
 		INIT {
-			Tcl_Eval(interp, "puts \"Init pgwire cdef, tid: [file tail [file readlink /proc/thread-self]], [thread::id], name: [if {[info exists ::ns_shim::interp_name]} {set ::ns_shim::interp_name}][if {[info exists ::ns_shim::interp_name_suffix]} {string cat / $::ns_shim::interp_name_suffix}]\"");
+			Tcl_Eval(interp,
+				"puts \"Init pgwire cdef, tid: [file tail [file readlink /proc/thread-self]], [thread::id], name: [if {[info exists ::ns_shim::interp_name]} {set ::ns_shim::interp_name}][if {[info exists ::ns_shim::interp_name_suffix]} {string cat / $::ns_shim::interp_name_suffix}]\"");
 			Tcl_Preserve(g_interp = interp);
 			return TCL_OK;
 		}
@@ -1683,31 +1684,29 @@ done:
 #writefile /tmp/pgwire_accel.c "#include <tcl.h>\n$::pgwire::c_code"
 
 set ::pgwire::accelerators	0
-if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BLOCK_ACCELERATORS)]} {
-	try {
-		package require jitc
+if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BLOCK_ACCELERATORS)] && ![catch {package require jitc}]} {
+	apply {{} {
+		variable accel	{}
+		variable accelerators
+		variable c_code
 
-		namespace eval ::pgwire {
-			variable accel	{}
-			if {[info exists ::env(PGWIRE_JITC_DEBUG)]} {
-				lappend accel	debug $::env(PGWIRE_JITC_DEBUG)
-			}
-			lappend accel	options {-Wall -Werror -gdwarf-5} code $::pgwire::c_code
-			unset ::pgwire::c_code
-
-			foreach {cmd c_cmd} {
-				c_makerow2			c_makerow2
-				c_foreach_batch		c_foreach_back
-				c_foreach_batch_nr	c_foreach_batch_nr_setup
-				c_allrows_batch		c_allrows_batch
-				compile_ops			compile_ops_cmd
-			} {
-				proc $cmd args "variable accel; tailcall ::jitc::capply \$accel [list $c_cmd] {*}\$args"
-			}
+		if {[info exists ::env(PGWIRE_JITC_DEBUG)]} {
+			lappend accel	debug $::env(PGWIRE_JITC_DEBUG)
 		}
-	} on ok {} {
-		set ::pgwire::accelerators	1
-	}
+		lappend accel	options {-Wall -Werror -gdwarf-5} code $c_code
+		unset c_code
+
+		foreach {cmd c_cmd} {
+			c_makerow2			c_makerow2
+			c_foreach_batch		c_foreach_back
+			c_foreach_batch_nr	c_foreach_batch_nr_setup
+			c_allrows_batch		c_allrows_batch
+			compile_ops			compile_ops_cmd
+		} {
+			proc $cmd args "variable accel; tailcall ::jitc::capply \$accel [list $c_cmd] {*}\$args"
+		}
+		set accelerators	1
+	} ::pgwire}
 } else {
 	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], env block: [info exists ::env(PGWIRE_BLOCK_ACCELERATORS)], jitc versions: ([package versions jitc])"
 }
