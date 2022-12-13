@@ -39,14 +39,6 @@ namespace eval ::pgwire { #<<<
 		}
 	}
 
-	if {![info exists include_path]} {
-		if {[info exists ::env(SNAP)]} {
-			lappend include_path	[file join $::env(SNAP) usr/include]
-		} else {
-			variable include_path	/usr/include
-		}
-	}
-
 	variable arr_fmt_cache	{}
 
 	# Testing toggles
@@ -833,6 +825,25 @@ done:
 		#include <stdint.h>
 		#include <string.h>
 		#include <stdlib.h>
+
+		/*
+		Tcl_Interp*	g_interp = NULL;
+
+		INIT {
+			Tcl_Eval(interp, "puts \"Init pgwire cdef, tid: [file tail [file readlink /proc/thread-self]], [thread::id], name: [if {[info exists ::ns_shim::interp_name]} {set ::ns_shim::interp_name}][if {[info exists ::ns_shim::interp_name_suffix]} {string cat / $::ns_shim::interp_name_suffix}]\"");
+			Tcl_Preserve(g_interp = interp);
+			return TCL_OK;
+		}
+
+		RELEASE {
+			fprintf(stderr, "pgwire cdef release\n");
+			if (TCL_OK != Tcl_Eval(g_interp, "puts \"pgwire cdef release, callframes: [callframes_fingerprint 0]\"")) {
+				fprintf(stderr, "Eval error: %s\n", Tcl_GetString(Tcl_GetObjResult(g_interp)));
+			}
+			Tcl_Release(g_interp); g_interp = NULL;
+			//Tcl_GetString((Tcl_Obj*)NULL);
+		}
+		*/
 
 		struct column_cx {
 			Tcl_Encoding	encoding;
@@ -1658,6 +1669,7 @@ done:
 		//>>>
 	//@end=c@}]
 	# C code >>>
+	unset accel_ops
 	set lineno	0
 	#::pgwire::log notice "c code:\n[join [lmap line [split $c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
 }
@@ -1675,17 +1687,24 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 	try {
 		package require jitc
 
-		set accel	{}
-		if {[info exists ::env(PGWIRE_JITC_DEBUG)]} {
-			lappend accel	debug $::env(PGWIRE_JITC_DEBUG)
-		}
-		lappend accel	options {-Wall -Werror -gdwarf-5} code $::pgwire::c_code
+		namespace eval ::pgwire {
+			variable accel	{}
+			if {[info exists ::env(PGWIRE_JITC_DEBUG)]} {
+				lappend accel	debug $::env(PGWIRE_JITC_DEBUG)
+			}
+			lappend accel	options {-Wall -Werror -gdwarf-5} code $::pgwire::c_code
+			unset ::pgwire::c_code
 
-		interp alias {} ::pgwire::c_makerow2			{} ::jitc::capply $accel c_makerow2
-		interp alias {} ::pgwire::c_foreach_batch		{} ::jitc::capply $accel c_foreach_batch
-		interp alias {} ::pgwire::c_foreach_batch_nr	{} ::jitc::capply $accel c_foreach_batch_nr_setup
-		interp alias {} ::pgwire::c_allrows_batch		{} ::jitc::capply $accel c_allrows_batch
-		interp alias {} ::pgwire::compile_ops			{} ::jitc::capply $accel compile_ops_cmd
+			foreach {cmd c_cmd} {
+				c_makerow2			c_makerow2
+				c_foreach_batch		c_foreach_back
+				c_foreach_batch_nr	c_foreach_batch_nr_setup
+				c_allrows_batch		c_allrows_batch
+				compile_ops			compile_ops_cmd
+			} {
+				proc $cmd args "variable accel; tailcall ::jitc::capply \$accel [list $c_cmd] {*}\$args"
+			}
+		}
 	} on ok {} {
 		set ::pgwire::accelerators	1
 	}
