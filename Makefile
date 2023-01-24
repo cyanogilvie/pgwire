@@ -2,7 +2,7 @@ all:
 	make -C src all
 
 test: all
-	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)"
+	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 tcpdump: all
 	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" TCPDUMP="/tmp/testdump-"

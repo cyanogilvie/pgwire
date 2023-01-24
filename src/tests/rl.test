@@ -1,0 +1,25 @@
+set here	[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
+
+test rl-1.1 {Auth to RDS proxy} -constraints rl -setup { #<<<
+	package require aws 2
+	package require rl_json
+	set db_connection_info	[rl_json::json get [aws secretsmanager get_secret_value -secret_id dev/db] SecretString]
+	set dbchan	[socket devproxy.proxy-cu7xypv0kced.us-east-1.rds.amazonaws.com [rl_json::json get $db_connection_info port]]
+} -body {
+	pgwire create pg $dbchan \
+		[rl_json::json get $db_connection_info db] \
+		[rl_json::json get $db_connection_info username] \
+		[rl_json::json get $db_connection_info password]
+	pg onecolumn {select 1}
+} -cleanup {
+	if {[info object isa object pg]} {pg destroy}
+	catch {close $dbchan}
+	unset -nocomplain db_connection_info dbchan
+} -result 1
+#>>>
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

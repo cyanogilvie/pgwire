@@ -142,14 +142,14 @@ namespace eval ::pgwire { #<<<
 
 			set i	0
 			while {$i < [string length $bytes]} {
-				binary scan $bytes @${i}aI msgtype len
+				binary scan $bytes @${i}aIu msgtype len
 				if {$msgtype eq "\u0"} {
 					# Probably the startup message
-					binary scan $bytes @${i}I len
+					binary scan $bytes @${i}Iu len
 					incr i 4
 					incr len -4		;# len includes itself
 					binary scan $bytes @${i}a${len} payload
-					binary scan $payload Ia* ver fields
+					binary scan $payload Iua* ver fields
 					incr i $len
 					::pgwire::log notice "hello message, version: [expr {$ver >> 16}].[expr {$ver & 0xff}], fields:\n[join [lmap {k v} [split [string trimright $fields \u0] \u0] {format {	%30s: %s} $k $v}] \n]"
 					continue
@@ -1773,6 +1773,9 @@ oo::class create ::pgwire {
 				R7	AuthenticationGSS
 				R8	AuthenticationGSSContinue
 				R9	AuthenticationSSPI
+				R10	AuthenticationSASL
+				R11	AuthenticationSASLContinue
+				R12	AuthenticationSASLFinal
 				K	BackendKeyData
 				2	BindComplete
 				3	CloseComplete
@@ -1984,7 +1987,7 @@ oo::class create ::pgwire {
 			puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
 			flush $socket
 			while 1 {
-				if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+				if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 				incr len -4	;# len includes itself
 
 				switch -exact -- $msgtype {
@@ -2069,7 +2072,7 @@ oo::class create ::pgwire {
 	}
 	# Try to find a suitable md5 command >>>
 	method _startup {db user password params} { #<<<
-		set payload	[binary format I [expr {
+		set payload	[binary format Iu [expr {
 			3 << 16 | 0
 		}]]	;# Version 3.0
 
@@ -2080,11 +2083,12 @@ oo::class create ::pgwire {
 			standard_conforming_strings	on \
 			{*}$params
 		] {
+			if {$k eq "standard_conforming_strings"} continue	;# Default since 9.1, not supported by AWS RDS proxy
 			append payload $k \0 $v \0
 		}
 		append payload \0
 
-		puts -nonewline $socket [binary format Ia* [expr {4+[string length $payload]}] $payload]
+		puts -nonewline $socket [binary format Iua* [expr {4+[string length $payload]}] $payload]
 		flush $socket
 
 		my on_response {
@@ -2097,6 +2101,113 @@ oo::class create ::pgwire {
 			AuthenticationCleartextPassword	{} {
 				my PasswordMessage [encoding convertto $tcl_encoding $password]
 				flush $socket
+			}
+			AuthenticationSASL mechanisms {
+				upvar 1 _sasl_cx _sasl_cx
+				unset -nocomplain _sasl_cx
+				array set _sasl_cx	{}
+				set selected	{}
+				set initial_response	{}
+				foreach mechanism $mechanisms {
+					if {$mechanism in {SCRAM-SHA-256}} {
+						#package require stringprep	;# from tclilib
+						package require crypto
+						#stringprep::register SASLprep \
+						#	-mapping		{B.1} \
+						#	-normalization	KC \
+						#	-prohibited		{C.1.2 C.2.1 C.2.2 C.3 C.4 C.5 C.6 C.7 C.8 C.9} \
+						#	-prohibitedBidi	true
+						set selected	$mechanism
+						set nonce		{}			;# printable ascii, excluding ,
+						while {[string length $nonce] < 24} {	;# 24 - selected arbitrarily
+							append nonce	[regsub -all {[^\x21-\x2b\x2d-\x73]} [crypto::blowfish::csprng 64] {}]
+						}
+						set nonce	[string range $nonce 0 23]
+						set gs2header	n,,
+						set _sasl_cx(gs2header)		$gs2header
+						set _sasl_cx(nonce_client)	$nonce
+						#set _sasl_cx(client_first_message_bare)	"n=[stringprep::stringprep SASLprep [string map {, =2C = =3D} $user]],r=$nonce"		;# n= is ignored - backend uses username sent in the startup message instead
+						set _sasl_cx(client_first_message_bare)	"n=,r=$nonce"		;# n= is ignored - backend uses username sent in the startup message instead
+						append initial_response	$gs2header$_sasl_cx(client_first_message_bare)
+						break
+					}
+				}
+				if {$selected eq {}} {
+					my _error "No shared SASL mechanisms supported from list: $mechanisms"
+				}
+				my SASLInitialResponse $mechanism $initial_response
+				flush $socket
+			}
+			AuthenticationSASLContinue bytes {
+				package require hmac	;# from aws 2 (but should be factored out?)
+				upvar 1 _sasl_cx _sasl_cx
+				foreach part [split [encoding convertfrom utf-8 $bytes] ,] {
+					if {![regexp {^([a-z])=(.*)$} $part - attrib val]} {
+						my _error "Could not parse SASL attrib: ($part)"
+					}
+					switch -exact -- $attrib {
+						r	{set nonce_full	$val}
+						s	{set salt		[binary decode base64 $val]}
+						i	{set it			$val}
+						default {
+							my _error "Unhandled SASL attrib \"$attrib\""
+						}
+					}
+				}
+				if {[string range $nonce_full 0 [string length $_sasl_cx(nonce_client)]-1] ne $_sasl_cx(nonce_client)} {
+					my _error "SASL server response nonce doesn't start with our supplied client nonce"
+				}
+
+				set Hi {{str salt it} { #<<<
+					set res		[hmac::HMAC_SHA256 $str $salt[binary format Iu 1]]
+					set next	$res
+					for {set i 1} {$i < $it} {incr i} {
+						set next	[hmac::HMAC_SHA256 $str $next]
+						set res	[hmac::xor $res $next]
+					}
+					set res
+				}}
+				#>>>
+
+				package require stringprep	;# from tclilib
+				stringprep::register SASLprep \
+					-mapping		{B.1} \
+					-normalization	KC \
+					-prohibited		{C.1.2 C.2.1 C.2.2 C.3 C.4 C.5 C.6 C.7 C.8 C.9} \
+					-prohibitedBidi	true
+
+				set salted_password		[apply $Hi [stringprep::stringprep SASLprep $password] $salt $it]
+				set client_key			[hmac::HMAC_SHA256 $salted_password {Client Key}]
+				set stored_key			[binary decode hex [hash::sha256 $client_key]]
+				set client_final_message_without_proof	"c=[binary encode base64 $_sasl_cx(gs2header)],r=$nonce_full"
+				set auth_message		$_sasl_cx(client_first_message_bare),[encoding convertfrom utf-8 $bytes],$client_final_message_without_proof
+				set client_signature	[hmac::HMAC_SHA256 $stored_key $auth_message]
+				set client_proof		[hmac::xor $client_key $client_signature]
+
+				set client_final_message	"c=[binary encode base64 $_sasl_cx(gs2header)],r=$nonce_full,p=[binary encode base64 $client_proof]"
+				my SASLResponse [encoding convertto utf-8 $client_final_message]
+				flush $socket
+
+				set server_key			[hmac::HMAC_SHA256 $salted_password {Server Key}]
+				set server_signature	[hmac::HMAC_SHA256 $server_key $auth_message]
+				set _sasl_cx(server_signature)	$server_signature
+				return -level 0
+			}
+			AuthenticationSASLFinal bytes {
+				upvar 1 _sasl_cx _sasl_cx
+				foreach part [split [encoding convertfrom utf-8 $bytes] ,] {
+					if {![regexp {^([a-z])=(.*)$} $part - attrib val]} {
+						my _error "Could not parse SASL attrib: ($part)"
+					}
+					switch -exact -- $attrib {
+						v		{set server_signature	[binary decode base64 $val]}
+						default {my _error "Unhandled SASL attrib \"$attrib\""}
+					}
+				}
+				if {$server_signature ne $_sasl_cx(server_signature)} {
+					my _error "Server signature from backend: ($server_signature) doesn't match what we're expecting: ($_sasl_cx(server_signature))"
+				}
+				unset -nocomplain _sasl_cx
 			}
 
 			AuthenticationKerberosV5		args {my _error "Authentication method not supported"}
@@ -2160,8 +2271,9 @@ oo::class create ::pgwire {
 				error "Error compiling action handlers: \"$key\" is not a valid message type, must be one of: [join $valid_messagenames {, }]"
 			}
 		}
+		# Additional apply wrapper: hack around the -level 2 thrown by method ErrorResponse
 		dict set compiled_actions ErrorResponse \
-			[list fields	[format {catch {%s $fields} r o; list $r $o} [namespace code {my ErrorResponse}]]]
+			[list fields	[format {catch {apply {fields {%s $fields}} $fields} r o; list $r $o} [namespace code {my ErrorResponse}]]]
 		dict set compiled_actions NoticeResponse \
 			[list fields	[format {catch {%s $fields} r o; list $r $o} [namespace code {my NoticeResponse}]]]
 	}
@@ -2245,7 +2357,7 @@ oo::class create ::pgwire {
 		#>>>
 	}
 	method read_async {} { #<<<
-		if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+		if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 		#::pgwire::log notice "got msgtype ($msgtype)"
 		incr len -4		;# len includes itself
 		set data	[read $socket $len]
@@ -2258,7 +2370,7 @@ oo::class create ::pgwire {
 		} on ok messagename {}
 		switch -exact -- $messagename {
 			NotificationResponse { # NotificationResponse <<<
-				binary scan $data I pid
+				binary scan $data Iu pid
 				set i 4
 				set channel	[my _get_string $data i]
 				set payload	[my _get_string $data i]
@@ -2303,7 +2415,7 @@ oo::class create ::pgwire {
 	#>>>
 	method read_one_message {} { #<<<
 		while 1 {
-			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 			#::pgwire::log notice "got msgtype ($msgtype)"
 			incr len -4		;# len includes itself
 			set data	[read $socket $len]
@@ -2322,7 +2434,7 @@ oo::class create ::pgwire {
 			set messageparams	{}
 			switch -exact -- $messagename {
 				Authentication* { #<<<
-					binary scan $data I subtype
+					binary scan $data Iu subtype
 					set msgtype	R$subtype
 					try {
 						set messagename	[dict get $msgtypes backend $msgtype]
@@ -2351,6 +2463,23 @@ oo::class create ::pgwire {
 							#>>>
 						}
 						AuthenticationSSPI { # AuthenticationSSPI <<<
+							#>>>
+						}
+						AuthenticationSASL { # AuthenticationSASL <<<
+							set i	4
+							while 1 {
+								set mechanism	[my _get_string $data i]
+								if {$mechanism eq {}} break
+								lappend messageparams	$mechanism
+							}
+							#>>>
+						}
+						AuthenticationSASLContinue { # AuthenticationSASLContinue <<<
+							lappend messageparams	[string range $data 4 end]
+							#>>>
+						}
+						AuthenticationSASLFinal { # # AuthenticationSASLFinal <<<
+							lappend messageparams	[string range $data 4 end]
 							#>>>
 						}
 
@@ -2437,7 +2566,7 @@ oo::class create ::pgwire {
 					set i	2
 					set row	{}
 					for {set c 0} {$c < $column_count} {incr c} {
-						binary scan $data @${i}I len
+						binary scan $data @${i}Iu len
 						#?? {::pgwire::log debug "Reading column, len: $len"}
 						incr i 4
 						if {$len == -1} {
@@ -2459,7 +2588,7 @@ oo::class create ::pgwire {
 					set column_desc	{}
 					for {set c 0} {$c < $fields_per_row} {incr c} {
 						set field_name	[my _get_string $data i]
-						binary scan $data @${i}ISISIS \
+						binary scan $data @${i}IuSuIuSuIuSu \
 								table_oid \
 								attrib_num \
 								type_oid \
@@ -2487,7 +2616,7 @@ oo::class create ::pgwire {
 				}
 				ParameterDescription { # ParameterDescription <<<
 					binary scan $data S count
-					binary scan $data @2I${count} parameter_type_oids
+					binary scan $data @2Iu${count} parameter_type_oids
 					#lappend messageparams [lmap oid $parameter_type_oids {expr {[dict exists $type_oids $oid] ? [dict get $type_oids $oid] : $oid}}]
 
 					lappend messageparams [lmap e $parameter_type_oids {dict get $type_oids $e}]
@@ -2559,10 +2688,27 @@ oo::class create ::pgwire {
 					return -options $options $res
 				}
 			}
+		} trap {PGWIRE ErrorResponse} {errmsg options} {
+			set pending_error	[list $errmsg $options]
+			#puts stderr "onresponse ErrorResponse: $errmsg\n$options"
+			return -options $options $errmsg
+			#return -level 2 -code error -errorcode [list PGWIRE ErrorResponse $severity $code $fields] "Postgres error: [dict get $fields Message]"
+		} on error {errmsg options} {
+			#puts stderr "onresponse unhandled error: $errmsg\n$options"
 		} finally {
 			if {!$saw_Z && [dict exists $compiled_actions ReadyForQuery]} {
 				::pgwire::log warning "on_response terminating without seeing ReadyForQuery, skipping to sync"
-				my skip_to_sync
+				try {
+					my skip_to_sync
+				} trap {PG CONNECTION LOST} {errmsg options} {
+					if {[info exists pending_error]} {
+						# Don't wipe out a backend error that closes the connection
+						lassign $pending_error pending_errmsg pending_options
+						return -options $pending_options $pending_errmsg
+					} else {
+						return -options $options $errmsg
+					}
+				}
 			}
 		}
 	}
@@ -2580,7 +2726,7 @@ oo::class create ::pgwire {
 	#>>>
 	method read_to_sync {} { #<<<
 		while 1 {
-			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 			#::pgwire::log notice "read_to_sync msgtype ($msgtype)"
 			incr len -4
 			if {$msgtype eq "Z"} { # ReadyForQuery
@@ -2607,7 +2753,7 @@ oo::class create ::pgwire {
 	method skip_to_sync {} { #<<<
 		if {[info exists socket] && $socket in [chan names]} {
 			while 1 {
-				if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+				if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 				incr len -4	;# len includes itself
 
 				switch -exact -- $msgtype {
@@ -2661,19 +2807,36 @@ oo::class create ::pgwire {
 	#>>>
 	method PasswordMessage password { #<<<
 		set payload	[encoding convertto $tcl_encoding $password]\u0
-		puts -nonewline $socket [binary format aIa* p [+ 4 [string length $payload]] $payload]
+		puts -nonewline $socket [binary format aIua* p [+ 4 [string length $payload]] $payload]
+	}
+
+	#>>>
+	method SASLInitialResponse {mechanism {initial_response {}}} { #<<<
+		set payload	[encoding convertto $tcl_encoding $mechanism]\u0
+		if {$initial_response eq {}} {
+			append payload	\uff\uff\uff\uff	;# -1
+		} else {
+			set bytes		[encoding convertto utf-8 $initial_response]
+			append payload	[binary format Iua* [string length $bytes] $bytes]
+		}
+		puts -nonewline $socket [binary format aIua* p [+ 4 [string length $payload]] $payload]
+	}
+
+	#>>>
+	method SASLResponse bytes { #<<<
+		puts -nonewline $socket [binary format aIua* p [+ 4 [string length $bytes]] $bytes]
 	}
 
 	#>>>
 	method Query sql { #<<<
 		set payload	[encoding convertto $tcl_encoding $sql]\u0
-		puts -nonewline $socket [binary format aIa* Q [+ 4 [string length $payload]] $payload]
+		puts -nonewline $socket [binary format aIua* Q [+ 4 [string length $payload]] $payload]
 	}
 
 	#>>>
 	method Close {type name} { #<<<
 		set payload	$type[encoding convertto $tcl_encoding $name]\u0
-		puts -nonewline $socket [binary format aIa* C [+ 4 [string length $payload]] $payload]
+		puts -nonewline $socket [binary format aIua* C [+ 4 [string length $payload]] $payload]
 	}
 
 	#>>>
@@ -2712,10 +2875,10 @@ oo::class create ::pgwire {
 	#>>>
 	method _basic_query_noresult sql { #<<<
 		set payload [encoding convertto $tcl_encoding $sql]\u0
-		puts -nonewline $socket [binary format aIa* Q [+ 4 [string length $payload]] $payload]
+		puts -nonewline $socket [binary format aIua* Q [+ 4 [string length $payload]] $payload]
 		flush $socket
 		while 1 {
-			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 			incr len -4
 			switch -exact -- $msgtype {
 				Z { # ReadyForQuery <<<
@@ -2950,7 +3113,7 @@ oo::class create ::pgwire {
 			A { # NotificationResponse <<<
 				set data	[read $socket $len]
 				if {[eof $socket]} {my connection_lost}
-				binary scan $data I pid
+				binary scan $data Iu pid
 				set i 4
 
 				set idx	[string first "\u0" $data $i]
@@ -3068,7 +3231,7 @@ oo::class create ::pgwire {
 							}
 						}] %delim%]}"]
 						set bytelen	[string length $bytes]
-						append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
+						append pformats \u0\u0; append pdesc [binary format Iua* $bytelen $bytes]
 					}]
 				} else {
 					if {$elem_bytelen == -1} {
@@ -3091,30 +3254,30 @@ oo::class create ::pgwire {
 					set elembytes		{}
 						foreach e $value {
 							%encode_e%
-							append elembytes	[binary format I%elem_fmt% %elem_bytelen% $e]
+							append elembytes	[binary format Iu%elem_fmt% %elem_bytelen% $e]
 						}
 						set payload		[binary format IIIIIa* %ndim% %hasnull% %elem_oid% [llength $value] %lb% $elembytes]
-						append pformats \u0\u1; append pdesc [binary format Ia* [string length $payload] $payload]
+						append pformats \u0\u1; append pdesc [binary format Iua* [string length $payload] $payload]
 					}
 				}
 			} else {
 			}
 		} else {
 			switch -glob -- $type_name {
-				bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 [expr {!!($value)}]]}}
-				int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ic 1 $value]}}
-				int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IS 2 $value]}}
-				int4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format II 4 $value]}}
-				int8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IW 8 $value]}}
-				bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Ia* [string length $value] $value]}}
-				float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IR 4 $value]}}
-				float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IQ 8 $value]}}
+				bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Iuc 1 [expr {!!($value)}]]}}
+				int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Iuc 1 $value]}}
+				int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuS 2 $value]}}
+				int4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuI 4 $value]}}
+				int8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuW 8 $value]}}
+				bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Iua* [string length $value] $value]}}
+				float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuR 4 $value]}}
+				float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuQ 8 $value]}}
 				text -
 				varchar {
 					return -level 0 {
 						set bytes	[encoding convertto $tcl_encoding $value]
 						set bytelen	[string length $bytes]
-						append pformats \u0\u1; append pdesc [binary format Ia* $bytelen $bytes]
+						append pformats \u0\u1; append pdesc [binary format Iua* $bytelen $bytes]
 					}
 				}
 
@@ -3122,7 +3285,7 @@ oo::class create ::pgwire {
 					return -level 0 {
 						set bytes	[encoding convertto $tcl_encoding $value]
 						set bytelen	[string length $bytes]
-						append pformats \u0\u0; append pdesc [binary format Ia* $bytelen $bytes]
+						append pformats \u0\u0; append pdesc [binary format Iua* $bytelen $bytes]
 					}
 				}
 			}
@@ -3152,7 +3315,7 @@ oo::class create ::pgwire {
 						if {[dict exists $preserved $sql]} continue
 						if {[dict get $info heat] == 0} {
 							set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
-							puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
+							puts -nonewline $socket [binary format aIua* C [+ 4 [string length $closemsg]] $closemsg]
 							incr expired
 							dict unset prepared $sql
 						}
@@ -3166,7 +3329,7 @@ oo::class create ::pgwire {
 							set heat	[expr {[dict get $info heat] >> 1}]
 							if {$heat eq 0} {
 								set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
-								puts -nonewline $socket [binary format aIa* C [+ 4 [string length $closemsg]] $closemsg]
+								puts -nonewline $socket [binary format aIua* C [+ 4 [string length $closemsg]] $closemsg]
 								incr expired
 								dict unset prepared $sql
 							} else {
@@ -3188,13 +3351,13 @@ oo::class create ::pgwire {
 				set parsemsg	[encoding convertto $tcl_encoding $stmt_name]\u0[encoding convertto $tcl_encoding $compiled]\u0\u0\u0
 				set describemsg	S[encoding convertto $tcl_encoding $stmt_name]\u0
 				set busy_sql	$sql
-				puts -nonewline $socket [binary format aI P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}H\u0\u0\u0\u4
+				puts -nonewline $socket [binary format aIu P [+ 4 [string length $parsemsg]]]$parsemsg[binary format aI D [expr {4+[string length $describemsg]}]]${describemsg}H\u0\u0\u0\u4
 
 				flush $socket
 
 				# Parse responses <<<
 				while 1 {
-					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+					if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 					incr len -4	;# len includes itself
 					if {$msgtype eq 1} break elseif {$msgtype eq 3} {
 						# Eat any CloseComplete (3) msgs here from the cache
@@ -3211,12 +3374,12 @@ oo::class create ::pgwire {
 				set param_desc		{}
 				set param_types		{}
 				while 1 {
-					if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+					if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 					incr len -4	;# len includes itself
 
 					switch -exact -- $msgtype {
 						t { # ParameterDescription: compile build_params <<<
-							binary scan [read $socket $len] SI* count parameter_type_oids
+							binary scan [read $socket $len] SuIu* count parameter_type_oids
 							if {[eof $socket]} {my connection_lost}
 
 							#::pgwire::log notice "ParameterDescription, $count params, type oids: $parameter_type_oids, params_assigned: ($params_assigned)"
@@ -3302,7 +3465,7 @@ oo::class create ::pgwire {
 								set field_name	[string range $data $i [- $idx 1]]
 								set i	[+ $idx 1]
 
-								#binary scan $data @${i}ISISIS \
+								#binary scan $data @${i}IuSuIuSuIuSu \
 								#		table_oid \
 								#		attrib_num \
 								#		type_oid \
@@ -3311,7 +3474,7 @@ oo::class create ::pgwire {
 								#		format
 								#incr i 18
 								incr i 6
-								binary scan $data @${i}I type_oid
+								binary scan $data @${i}Iu type_oid
 								incr i 12
 
 								if {[dict exists $type_oids $type_oid]} {
@@ -3473,7 +3636,7 @@ oo::class create ::pgwire {
 		set datarows	{}
 
 		while 1 {
-			if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+			if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 			incr len -4	;# len includes itself
 			#::pgwire::log notice "_read_batch msg \"$msgtype\", len: $len"
 			if {$msgtype eq "D"} { # DataRow <<<
@@ -3515,7 +3678,7 @@ oo::class create ::pgwire {
 						if {[eof $socket]} {my connection_lost}
 						# Send CopyFail response
 						set message	"not supported\u0"
-						puts -nonewline $socket [binary format aIa* f [+ 4 [string length $message]] $msg 0]
+						puts -nonewline $socket [binary format aIua* f [+ 4 [string length $message]] $msg 0]
 						#>>>
 					}
 					H - d - c { # CopyOutResponse / CopyData / CopyDone <<<
@@ -3580,7 +3743,7 @@ oo::class create ::pgwire {
 		try {
 			# Bind responses <<<
 			while 1 {
-				if {[binary scan [read $socket 5] aI msgtype len] != 2} {my connection_lost}
+				if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 				incr len -4	;# len includes itself
 				#if {[info exists rtt_start]} {
 				#	::pgwire::log notice "server RTT: [format %.6f [expr {([clock microseconds] - $rtt_start)/1e6}]]"

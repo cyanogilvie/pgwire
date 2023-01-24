@@ -30,6 +30,7 @@ services:
             - ./src:/src
             - run:/run
             - ./tmp:/tmp
+            - ~/.aws:/root/.aws
         environment:
             POSTGRES_PASSWORD: insecure
             PGHOST: /run/postgresql

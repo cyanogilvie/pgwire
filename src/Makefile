@@ -1,5 +1,5 @@
 # First two numbers are the PostgreSQL protocol version number, rest is ours
-VER=3.0.0b20
+VER=3.0.0b21
 
 all: tm/pgwire-$(VER).tm tm/tdbc/pgwire-$(VER).tm
 
@@ -15,7 +15,7 @@ gdb: all
 	gdb -ex=r --args tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 test: all
-	tclsh tests/all.tcl $(VER) $(TESTFLAGS)
+	AWS_PROFILE="$(AWS_PROFILE)" tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 valgrind: all
 	valgrind tclsh tests/all.tcl $(VER) $(TESTFLAGS)
