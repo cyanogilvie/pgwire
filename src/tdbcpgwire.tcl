@@ -35,6 +35,8 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	constructor args { #<<<
 		if {[llength $args] == 2 && [lindex $args 0] eq "-attach"} {
 			::pgwire create pg {*}$args
+		} elseif {[llength $args] == 2 && [lindex $args 0] eq "-wrap"} {
+			proc pg args "[list tailcall [lindex $args 1]] {*}\$args"
 		} else {
 			if {![catch {package require parse_args}]} {
 				parse_args::parse_args $args {

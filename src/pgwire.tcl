@@ -1,6 +1,7 @@
 # Useful: https://www.pgcon.org/2014/schedule/attachments/330_postgres-for-the-wire.pdf
 
 package require Thread
+package require parse_args
 
 apply {{} {
 	# Preserve tuneables from previous loads when re-sourcing this, or set before we are loaded <<<
@@ -171,6 +172,73 @@ namespace eval ::pgwire { #<<<
 
 		#>>>
 	}
+
+	proc callframes args { #<<<
+		::parse_args::parse_args $args {
+			-expanded	{-boolean}
+			-full		{-boolean}
+		}
+		set level	[expr {[info level]}]
+		set frame	[expr {[info frame]}]
+		set frames	{}
+		set last_level	""
+		while {[incr frame -1] > 0} {
+			set info	[info frame $frame]
+			if {[dict exists $info level] && [dict get $info level] ne $last_level} {
+				set level_num	[dict get $info level]
+				set last_level	$level_num
+				set level_rel	[expr {1 - $level_num}]
+
+				if {$expanded} {
+					dict set info expanded	[info level $level_rel]
+				}
+
+				#set varnames	[uplevel $level_num {info vars}]
+				#dict set info vars	[concat {*}[lmap var $varnames {
+				#	if {![uplevel $level_num [list info exists $var]]} {
+				#		# This can happen for vars imported with global that don't have values yet
+				#		continue
+				#	}
+				#	set is_array	[uplevel $level_num [list array exists $var]]
+				#	if {$is_array} {
+				#		list @$var [uplevel $level_num [list array get $var]]
+				#	} else {
+				#		list _$var [uplevel $level_num [list set $var]]
+				#	}
+				#}]]
+			}
+			if {!$full} {
+				foreach {k v} $info {
+					if {[string length $v] > 256} {
+						dict set info $k [string range $v 0 256]...
+					}
+				}
+			}
+			lappend frames $info
+		}
+		lrange $frames 1 end		;# Trim off the call to [callframes] itself
+	}
+
+	#>>>
+	proc callframes_fingerprint trim { #<<<
+		set last	""
+		lmap frame [lrange [callframes -full] $trim end] {
+			if {![dict exists $frame proc]} continue
+			set proc	[dict get $frame proc]
+			if {$proc eq $last} continue
+			set res	[string range $proc 2 end]
+			if {[dict get $frame type] eq "source"} {
+				append res ([file tail [dict get $frame file]])
+			}
+			if {$last ne ""} {
+				append res	:[dict get $frame line]
+			}
+			set last $proc
+			return -level 0 $res
+		}
+	}
+
+	#>>>
 
 	variable parse_pgarray_regexes	{}
 	proc parse_pgarray {str {delim ,} {idx 0} {nested 0}} { #<<<
@@ -1735,6 +1803,7 @@ oo::class create ::pgwire {
 		pending_rowbuffer
 		preserved
 		batchsize
+		tx_depth
 	}
 
 	constructor args { #<<<
@@ -1869,6 +1938,27 @@ oo::class create ::pgwire {
 		set preserved		{}
 		set batchsize		0
 		set type_elem		{}
+		set tx_depth		0
+
+		if 0 {
+			foreach v {sync_outstanding ready_for_query transaction_status} {
+				trace add variable [self namespace]::$v write [list apply [list {inst args} [string map [list %v% $v] {
+					variable %v%
+					variable _old_%v%
+					if {![info exists _old_%v%]} {set _old_%v% {}}
+					::pgwire::log notice "$inst %v%: $_old_%v% -> $%v% [::pgwire::callframes_fingerprint 0]"
+					set _old_%v%	$%v%
+					if {[set %v%] < 0} {
+						set frames	{}
+						for {set i [info frame]} {$i > 1} {incr i -1} {
+							lappend frames	[info frame $i]
+						}
+						#::pgwire::log error "frames:\n-*- [join $frames "\n-*- "]"
+						error "%v% went negative"
+					}
+				}] [self namespace]] [self]]
+			}
+		}
 
 		switch -exact [llength $args] {
 			0 {
@@ -1983,10 +2073,12 @@ oo::class create ::pgwire {
 		}
 
 		# Ensure that the handle we're detaching is ready for a query and not in an open transaction <<<
-		if {!$ready_for_query} {
-			puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
-			flush $socket
-			while 1 {
+		if {!$ready_for_query || $sync_outstanding} {
+			if {!$sync_outstanding} {
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+				flush $socket
+			}
+			while {$sync_outstanding} {
 				if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 				incr len -4	;# len includes itself
 
@@ -1995,9 +2087,7 @@ oo::class create ::pgwire {
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
 						binary scan $data a transaction_status
-						set ready_for_query		1
-						set sync_outstanding	0
-						break
+						if {[incr sync_outstanding -1] == 0} {set ready_for_query 1}
 						#>>>
 					}
 
@@ -2089,7 +2179,7 @@ oo::class create ::pgwire {
 		append payload \0
 
 		puts -nonewline $socket [binary format Iua* [expr {4+[string length $payload]}] $payload]
-		flush $socket
+		flush $socket; incr sync_outstanding
 
 		my on_response {
 			AuthenticationOk {} {}
@@ -2218,6 +2308,21 @@ oo::class create ::pgwire {
 			ReadyForQuery transaction_status break
 		}
 
+		my read_types $db
+		#::pgwire::log notice "server_params: $server_params"
+	}
+
+	#>>>
+	method read_types db { #<<<
+		set chan_info	[chan configure $socket]
+		if {[dict exists $chan_info -peername]} {
+			set types_cache_key	[list [dict get $chan_info -peername] $db]
+			if {[tsv::get _pgwire_types $types_cache_key types]} {
+				lassign $types type_oids type_oids_rev type_elem
+				return
+			}
+		}
+
 		my simple_query_dict row {
 			select
 				t.oid,
@@ -2243,7 +2348,10 @@ oo::class create ::pgwire {
 				dict set type_elem [dict get $row a_typname] delim [dict get $row typdelim]
 			}
 		}
-		#::pgwire::log notice "server_params: $server_params"
+
+		if {[info exists types_cache_key]} {
+			tsv::set _pgwire_types $types_cache_key [list $type_oids $type_oids_rev $type_elem]
+		}
 	}
 
 	#>>>
@@ -2290,6 +2398,7 @@ oo::class create ::pgwire {
 		} else {
 			set code		unknown
 		}
+		my sync
 		return -level 2 -code error -errorcode [list PGWIRE ErrorResponse $severity $code $fields] "Postgres error: [dict get $fields Message]"
 	}
 
@@ -2500,6 +2609,7 @@ oo::class create ::pgwire {
 						set string		[my _get_string $data i]
 						lappend fields	[dict get $errorfields $field_type] $string
 					}
+					my sync
 					lappend messageparams	$fields
 					#>>>
 				}
@@ -2522,8 +2632,7 @@ oo::class create ::pgwire {
 				}
 				ReadyForQuery { # ReadyForQuery <<<
 					binary scan $data a transaction_status
-					set ready_for_query		1
-					set sync_outstanding	0
+					if {[incr sync_outstanding -1] == 0} {set ready_for_query 1}
 					lappend messageparams $transaction_status
 					#>>>
 				}
@@ -2661,14 +2770,9 @@ oo::class create ::pgwire {
 				foreach {messagetype messageparams} $messages {
 					if {$messagetype eq "ReadyForQuery"} {set saw_Z 1}
 					#::pgwire::log notice "messagetype: ($messagetype), messageparams: ($messageparams)"
+
 					try {
-						lassign [apply [dict get $compiled_actions $messagetype] {*}$messageparams] \
-							res options
-						#::pgwire::log notice "on_response handler for $messagetype, res: ($res), options: ($options)"
-						return -options $options $res
-					} on break {res options} {
-						set chainres	[list $res $options]
-						break
+						set msghandler	[dict get $compiled_actions $messagetype]
 					} trap {TCL LOOKUP DICT} {errmsg options} {
 						::pgwire::log error "Unhandled message: $messagetype:\n$messageparams\n-----------\n[join $compiled_actions \n]\n[dict get $options -errorinfo]"
 						set frames	{}
@@ -2679,6 +2783,16 @@ oo::class create ::pgwire {
 						my Terminate
 						my destroy
 						throw {PGWIRE UNSYNCED} "Unexpected message \"$messagetype\" in current context"
+					}
+
+					try {
+						lassign [apply $msghandler {*}$messageparams] \
+							res options
+						#::pgwire::log notice "on_response handler for $messagetype, res: ($res), options: ($options)"
+						return -options $options $res
+					} on break {res options} {
+						set chainres	[list $res $options]
+						break
 					} on error {errmsg options} {
 						return -options $options "Action $messagetype handler error: $errmsg"
 					}
@@ -2694,10 +2808,13 @@ oo::class create ::pgwire {
 			return -options $options $errmsg
 			#return -level 2 -code error -errorcode [list PGWIRE ErrorResponse $severity $code $fields] "Postgres error: [dict get $fields Message]"
 		} on error {errmsg options} {
-			#puts stderr "onresponse unhandled error: $errmsg\n$options"
+			::pgwire::log error "Uncaught error in on_response (or handlers) [dict get $options -errorcode]: $errmsg\n[dict get $options -errorinfo]"
+			return -options $options $errmsg
 		} finally {
-			if {!$saw_Z && [dict exists $compiled_actions ReadyForQuery]} {
-				::pgwire::log warning "on_response terminating without seeing ReadyForQuery, skipping to sync"
+			if {$sync_outstanding} {
+				if {!$saw_Z && [dict exists $compiled_actions ReadyForQuery]} {
+					::pgwire::log warning "on_response terminating without seeing ReadyForQuery, skipping to sync"
+				}
 				try {
 					my skip_to_sync
 				} trap {PG CONNECTION LOST} {errmsg options} {
@@ -2725,15 +2842,13 @@ oo::class create ::pgwire {
 
 	#>>>
 	method read_to_sync {} { #<<<
-		while 1 {
+		while {$sync_outstanding} {
 			if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 			#::pgwire::log notice "read_to_sync msgtype ($msgtype)"
 			incr len -4
 			if {$msgtype eq "Z"} { # ReadyForQuery
 				if {[binary scan [read $socket $len] a transaction_status] != 1} {my connection_lost}
-				set ready_for_query		1
-				set sync_outstanding	0
-				break
+				if {[incr sync_outstanding -1] == 0} {set ready_for_query 1}
 			} else {
 				my default_message_handler $msgtype $len
 			}
@@ -2744,26 +2859,29 @@ oo::class create ::pgwire {
 
 	#>>>
 	method sync {} { #<<<
-		puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
-		flush $socket
-		my read_to_sync
+		if {!$sync_outstanding} {
+			puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+			flush $socket
+		}
+		if {$sync_outstanding} {
+			my skip_to_sync
+		}
 	}
 
 	#>>>
 	method skip_to_sync {} { #<<<
 		if {[info exists socket] && $socket in [chan names]} {
-			while 1 {
+			while {$sync_outstanding} {
 				if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 				incr len -4	;# len includes itself
+				#::pgwire::log notice "[self] skip_to_sync ($sync_outstanding): got $msgtype"
 
 				switch -exact -- $msgtype {
 					Z { # ReadyForQuery <<<
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
 						binary scan $data a transaction_status
-						set ready_for_query		1
-						set sync_outstanding	0
-						break
+						if {[incr sync_outstanding -1] == 0} {set ready_for_query 1}
 						#>>>
 					}
 
@@ -2781,7 +2899,11 @@ oo::class create ::pgwire {
 
 	#>>>
 	method sync_outstanding args { #<<<
-		set sync_outstanding {*}$args
+		if {[llength $args]} {
+			incr sync_outstanding	[expr {[lindex $args 0] ? 1 : -1}]
+		} else {
+			set sync_outstanding
+		}
 	}
 
 	#>>>
@@ -2794,7 +2916,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method Sync {} { #<<<
-		puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+		puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 		flush $socket
 	}
 
@@ -2830,7 +2952,8 @@ oo::class create ::pgwire {
 	#>>>
 	method Query sql { #<<<
 		set payload	[encoding convertto $tcl_encoding $sql]\u0
-		puts -nonewline $socket [binary format aIua* Q [+ 4 [string length $payload]] $payload]
+		puts -nonewline $socket [binary format aIua* Q [+ 4 [string length $payload]] $payload]; incr sync_outstanding
+		set ready_for_query	0
 	}
 
 	#>>>
@@ -2873,19 +2996,18 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method _basic_query_noresult sql { #<<<
+	method basic_query_noresult sql { #<<<
 		set payload [encoding convertto $tcl_encoding $sql]\u0
-		puts -nonewline $socket [binary format aIua* Q [+ 4 [string length $payload]] $payload]
+		puts -nonewline $socket [binary format aIua* Q [+ 4 [string length $payload]] $payload]; incr sync_outstanding
 		flush $socket
-		while 1 {
+		set ready_for_query	0
+		while {$sync_outstanding} {
 			if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
 			incr len -4
 			switch -exact -- $msgtype {
 				Z { # ReadyForQuery <<<
 					if {![binary scan [read $socket $len] a transaction_status] == 1} {my connection_lost}
-					set ready_for_query		1
-					set sync_outstanding	0
-					break
+					if {[incr sync_outstanding -1] == 0} {set ready_for_query 1}
 					#>>>
 				}
 				C - T - D { # CommandComplete, RowDescription, DataRow <<<
@@ -2900,25 +3022,105 @@ oo::class create ::pgwire {
 
 	#>>>
 	method begintransaction {} { #<<<
-		tailcall my _basic_query_noresult begin
+		if {$tx_depth} {
+			set sql	{savepoint _pgwire_savepoint_manual}
+		} else {
+			set sql	begin
+		}
+
+		#::pgwire::log notice "[self] begintransaction: $sql"
+		my basic_query_noresult $sql
+		incr tx_depth
 	}
 
 	#>>>
 	method rollback {} { #<<<
-		if {$transaction_status ne "I"} {
-			tailcall my _basic_query_noresult rollback
+		if {$transaction_status eq "T"} {
+			incr tx_depth -1
+			if {$tx_depth} {
+				set sql	{rollback to _pgwire_savepoint_manual}
+			} else {
+				set sql	rollback
+			}
+			#::pgwire::log notice "[self] rollback: $sql"
+			my basic_query_noresult $sql
 		}
 	}
 
 	#>>>
 	method commit {} { #<<<
-		if {$transaction_status ne "I"} {
-			tailcall my _basic_query_noresult commit
+		if {$transaction_status eq "T"} {
+			incr tx_depth -1
+			if {$tx_depth} {
+				set sql	{release savepoint _pgwire_savepoint_manual}
+			} else {
+				set sql	commit
+			}
+			#::pgwire::log notice "[self] commit: $sql"
+			my basic_query_noresult $sql
 		}
 	}
 
 	#>>>
+	method transaction script { # Nestable transaction scope <<<
+		# Ensure the sync status is known (and therefore the transaction context) <<<
+		if {!$ready_for_query && !$sync_outstanding} {
+			puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+			flush $socket
+		}
+		if {$sync_outstanding} {
+			my skip_to_sync
+		}
+		#>>>
+
+		if {$transaction_status eq "T"} {
+			set begin_sql			{savepoint _pgwire_savepoint}
+			set commit_sql			{release savepoint _pgwire_savepoint}
+			set rollback_sql		{rollback to _pgwire_savepoint}
+		} else {
+			set begin_sql			begin
+			set commit_sql			commit
+			set rollback_sql		rollback
+		}
+		#::pgwire::log notice "--> [self] transaction: $begin_sql"
+		my basic_query_noresult	$begin_sql
+
+		incr tx_depth
+
+		set code [catch {
+			uplevel 1 $script
+		} r o]
+
+		if {![info object isa object [self]]} {
+			throw {PGWIRE CONNECTION LOST} "Database connection was lost while processing transaction"
+		}
+
+		if {$code == 1} { # error
+			#::pgwire::log notice "<-- [self] transaction: $rollback_sql"
+			my basic_query_noresult $rollback_sql
+		} else {
+			#::pgwire::log notice "<-- [self] transaction: $commit_sql"
+			my basic_query_noresult $commit_sql
+		}
+
+		incr tx_depth -1
+
+		if {$code == 2} { # return
+			if {[dict get $o -code] in {0 ok}} {
+				dict set o -code return
+			} else {
+				dict incr o -level 1
+			}
+		} elseif {$code == 3 || $code == 4}  { # break or continue
+			dict incr o -level 1
+		}
+
+		return -options $o $r
+	}
+
+	#>>>
 	method simple_query_dict {rowdict sql on_row} { #<<<
+		#::pgwire::log notice "simple_query_dict $sql"
 		if {!$ready_for_query} {
 			error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
 		}
@@ -2983,6 +3185,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method simple_query_list {rowlist sql on_row} { #<<<
+		#::pgwire::log notice "simple_query_list $sql"
 		if {!$ready_for_query} {
 			error "Re-entrant query while another is processing: $sql while processing: $busy_sql"
 		}
@@ -3293,53 +3496,61 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method gen_stmt_name compiled { #<<<
+		return "[incr name_seq] [string range [my _md5_hex $compiled] 0 7]"
+	}
+
+	#>>>
+	method age_cache {} { #<<<
+		set expired	0
+		# Pre-scan for one-offs to expire <<<
+		dict for {sql info} $prepared {
+			if {[dict exists $preserved $sql]} continue
+			if {[dict get $info heat] == 0} {
+				set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
+				puts -nonewline $socket [binary format aIua* C [+ 4 [string length $closemsg]] $closemsg]
+				incr expired
+				dict unset prepared $sql
+			}
+		}
+		# Pre-scan for one-offs to expire >>>
+		if {[dict size $prepared] > 50} {
+			#::pgwire::log notice "Prescan expired $expired entries, [dict size $prepared] remain, aging:\n\t[join [lmap {k v} $prepared {format {%s: %3d} $k [dict get $v heat]}] \n\t]"
+			# Age the entries that have hits <<<
+			dict for {sql info} $prepared {
+				if {[dict exists $preserved $sql]} continue
+				set heat	[expr {[dict get $info heat] >> 1}]
+				if {$heat eq 0} {
+					set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
+					puts -nonewline $socket [binary format aIua* C [+ 4 [string length $closemsg]] $closemsg]
+					incr expired
+					dict unset prepared $sql
+				} else {
+					dict set prepared $sql heat $heat
+				}
+			}
+			# Age the entries that have hits >>>
+		}
+	}
+
+	#>>>
 	method prepare_extended_query sql { #<<<
 		set busy_sql	$sql
 
 		if {![dict exists $prepared $sql]} { # Prepare statement <<<
 			package require tdbc
-			set stmt_name	[incr name_seq]
-			#::pgwire::log notice "No prepared statement, creating one called ($stmt_name)"
 
 			lassign [my tokenize $sql] \
 				params_assigned \
 				compiled
 
+			set stmt_name	[incr name_seq]
+			#set stmt_name	[my gen_stmt_name $compiled]
+			#::pgwire::log notice "No prepared statement, creating one called ($stmt_name) for:\n$sql"
+
 			if {[incr age_count] > 10} {
 				if {[dict size $prepared] > 50} {
-					log_duration "Cache check" {
-					# Age cache <<<
-					set expired	0
-					# Pre-scan for one-offs to expire <<<
-					dict for {sql info} $prepared {
-						if {[dict exists $preserved $sql]} continue
-						if {[dict get $info heat] == 0} {
-							set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
-							puts -nonewline $socket [binary format aIua* C [+ 4 [string length $closemsg]] $closemsg]
-							incr expired
-							dict unset prepared $sql
-						}
-					}
-					# Pre-scan for one-offs to expire >>>
-					if {[dict size $prepared] > 50} {
-						#::pgwire::log notice "Prescan expired $expired entries, [dict size $prepared] remain, aging:\n\t[join [lmap {k v} $prepared {format {%s: %3d} $k [dict get $v heat]}] \n\t]"
-						# Age the entries that have hits <<<
-						dict for {sql info} $prepared {
-							if {[dict exists $preserved $sql]} continue
-							set heat	[expr {[dict get $info heat] >> 1}]
-							if {$heat eq 0} {
-								set closemsg	S[encoding convertto $tcl_encoding [dict get $info stmt_name]]\u0
-								puts -nonewline $socket [binary format aIua* C [+ 4 [string length $closemsg]] $closemsg]
-								incr expired
-								dict unset prepared $sql
-							} else {
-								dict set prepared $sql heat $heat
-							}
-						}
-						# Age the entries that have hits >>>
-					}
-					# Age cache >>>
-					}
+					my age_cache
 				}
 				set age_count	0
 			}
@@ -3580,16 +3791,12 @@ oo::class create ::pgwire {
 					ops_cache			{} \
 					param_types			$param_types \
 					delims				[lmap {name type delim} $c_types {set delim}] \
-			]]
+				]]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
 				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
 				if {[info exists socket]} {
-					if {!$sync_outstanding} {
-						puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
-						flush $socket
-					}
-					my skip_to_sync
+					my sync
 				}
 				return -options $options $errmsg
 			}
@@ -3649,7 +3856,7 @@ oo::class create ::pgwire {
 						set data	[read $socket $len]
 						if {[eof $socket]} {my connection_lost}
 						if {!$sync_outstanding} {
-							puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+							puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 							flush $socket
 						}
 						set idx	[string first "\u0" $data]
@@ -3720,7 +3927,7 @@ oo::class create ::pgwire {
 					B [+ 4 [string length $bindmsg]] $bindmsg \
 					E [+ 8 [string length $executemsg]] $executemsg 0 \
 					S\u0\u0\u0\u4 \
-			]; set sync_outstanding	1
+			]; incr sync_outstanding	1
 		} else {
 			# Batched flow: batches into $max_rows_per_batch, defer Sync
 			# Bind statment $stmt_name, portal $portal_name
@@ -3756,7 +3963,7 @@ oo::class create ::pgwire {
 		} on error {errmsg options} {
 			#::pgwire::log notice "error: [dict get $options -errorinfo]"
 			if {[info exists socket] && !$sync_outstanding} {
-				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 				flush $socket
 			}
 			return -options $options $errmsg
@@ -3788,7 +3995,7 @@ oo::class create ::pgwire {
 				} \
 					E [+ 8 [string length $executemsg]] $executemsg 0 \
 					S\u0\u0\u0\u4 \
-			]; set sync_outstanding	1
+			]; incr sync_outstanding
 		} else {
 			# Batched flow: batches into $max_rows_per_batch, defer Sync
 			# Execute $max_rows_per_batch
@@ -3809,7 +4016,7 @@ oo::class create ::pgwire {
 			my _read_batch
 		} on error {errmsg options} {
 			if {[info exists socket] && !$sync_outstanding} {
-				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 				flush $socket
 			}
 			return -options $options $errmsg
@@ -4006,11 +4213,22 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method parse_tdbc_args {arglist optsvar} { #<<<
+		upvar 1 $optsvar opts
+		::parse_args::parse_args $arglist {
+			-as					{-default dicts -name -as -enum {lists dicts dicts_no_nulls}}
+			-columnsvariable	{-name -columnsvariable}
+			args				{-name rest -default {}}
+		} opts
+		dict get $opts rest
+	}
+
+	#>>>
 	method allrows args { #<<<
 		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
 
-		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
+		set args	[my parse_tdbc_args $args opts]
 		switch -exact -- [llength $args] {
 			1 {set sqlcode [lindex $args 0]}
 			2 {lassign $args sqlcode param_values}
@@ -4130,7 +4348,7 @@ oo::class create ::pgwire {
 			}
 			if {!$ready_for_query && !$sync_outstanding} {
 				#::pgwire::log notice "foreach finally send sync"
-				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 				flush $socket
 			}
 			if {$sync_outstanding} {
@@ -4203,7 +4421,7 @@ oo::class create ::pgwire {
 			if {[info exists socket]} {
 				if {!$ready_for_query && !$sync_outstanding} {
 					#::pgwire::log notice "rowbuffer_coro [info coroutine] send sync"
-					puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+					puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 					flush $socket
 				}
 				if {$sync_outstanding} {
@@ -4223,7 +4441,7 @@ oo::class create ::pgwire {
 		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
 
-		set args	[::tdbc::ParseConvenienceArgs $args[set args {}] opts]
+		set args	[my parse_tdbc_args $args opts]
 		switch -exact -- [llength $args] {
 			3 {lassign $args row_varname sqlcode script}
 			4 {lassign $args row_varname sqlcode param_values script}
@@ -4352,7 +4570,7 @@ oo::class create ::pgwire {
 			}
 			if {!$ready_for_query && !$sync_outstanding} {
 				#::pgwire::log notice "foreach finally send sync"
-				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 				flush $socket
 			}
 			if {$sync_outstanding} {
@@ -4363,9 +4581,19 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method onecolumn sql { #<<<
+	method onecolumn {sql args} { #<<<
 		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
+
+		switch -exact -- [llength $args] {
+			0 {}
+			1 {set param_values	[lindex $args 0]}
+			default {
+				return -code error -errorcode [concat $generalError wrongNumArgs] \
+						"wrong # args: should be [lrange [info level 0] 0 1]\
+						 sqlcode ?dictionary? script"
+			}
+		}
 
 		my buffer_nesting
 
@@ -4448,14 +4676,52 @@ oo::class create ::pgwire {
 			}
 		} finally {
 			if {!$ready_for_query && !$sync_outstanding} {
-				puts -nonewline $socket S\u0\u0\u0\u4; set sync_outstanding 1
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
 				flush $socket
 			}
 			if {$sync_outstanding} {
 				my skip_to_sync
 			}
 		}
+	}
 
+	#>>>
+	method vars args { # set each of the returned columns as variables in the caller's frame <<<
+		# TODO: a proper, protocol-integrated implementation
+		my variable _headers
+		::parse_args::parse_args $args {
+			query	{-required}
+			script	{}
+		}
+
+		set rows	[uplevel 1 [list [self] allrows -columnsvariable [namespace which -variable _headers] -- $query]]
+
+		if {[info exists script]} {
+			set setvars	{}
+			foreach h $_headers {
+				upvar 1 $h col_$h
+				append setvars [list if "\[dict exists \$row [list $h]\]" "set [list col_$h] \[dict get \$row [list $h]\]" else "unset -nocomplain [list col_$h]"] \n
+			}
+			set loop_body	"$setvars\nuplevel 1 [list $script]"
+			foreach row $rows $loop_body
+		} else {
+			if {[llength $rows] > 1} {
+				throw [list PGWIRE VARS MULTIPLE] "Expecting 0 or 1 row, got"
+			} elseif {[llength $rows] == 1} {
+				set row	[lindex $rows 0]
+			} elseif {[llength $rows] == 0} {
+				set row	{}
+			}
+
+			foreach h $_headers {
+				upvar 1 $h col_$h
+				if {[dict exists $row $h]} {
+					set col_$h [dict get $row $h]
+				} else {
+					unset -nocomplain col_$h
+				}
+			}
+		}
 	}
 
 	#>>>
@@ -4485,6 +4751,58 @@ oo::class create ::pgwire {
 
 	#>>>
 	method batchsize {} {set batchsize}
+
+	method fsck_prepared_statements args { #<<<
+		::parse_args::parse_args $args {
+			-fix		{-boolean}
+		}
+
+		set ok	1
+		set bad	{}
+		set by_name	{}
+		dict for {sql stmt_info} $prepared {
+			lassign [my tokenize $sql] params_assigned compiled
+			if {[dict exists $by_name [dict get $stmt_info stmt_name]]} {
+				::pgwire::log error "Duplicate records for statement name: [dict get $stmt_info stmt_name], old:\n[dict get $by_name [dict get $stmt_info stmt_name]]\nnew:\n$compiled"
+				set ok	0
+			}
+			dict set by_name [dict get $stmt_info stmt_name] [dict merge [list sql $compiled orig_sql $sql] $stmt_info]
+		}
+
+		my simple_query_dict row {
+			select * from pg_prepared_statements order by name
+		} {
+			#::pgwire::log notice "statement [dict get $row name], created: [dict get $row prepare_time]: [dict get $row statement]"
+			if {![dict exists $by_name [dict get $row name]]} {
+				::pgwire::log error "No prepared statement info for [dict get $row name]"
+				set ok	0
+			} elseif {[dict get $row statement] ne [dict get $by_name [dict get $row name] sql]} {
+				::pgwire::log error "Our sql for [dict get $row name]:\n[dict get $by_name [dict get $row name] sql]\nDoesn't match the backend's:\n[dict get $row statement]\nprepared: [dict get $row prepare_time]"
+				set ok	0
+				lappend bad	[dict get $by_name [dict get $row name] orig_sql]
+			}
+			dict unset by_name [dict get $row name]
+		}
+
+		if {[dict size $by_name]} {
+			::pgwire::log error "Un-accounted for prepared records on our side:"
+			set ok	0
+			dict for {name stmt_info} $by_name {
+				::pgwire::log error "statement $name: [dict get $stmt_info sql]"
+			}
+		}
+
+		if {$fix} {
+			foreach sql $bad {
+				::pgwire::log notice "repreparing bad prepared statement:\n$sql"
+				my reprepare $sql
+			}
+		}
+
+		set ok
+	}
+
+	#>>>
 }
 
 # vim: foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

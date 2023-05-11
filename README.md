@@ -2,7 +2,7 @@ PGWIRE
 ======
 
 This Tcl module implements the PostgreSQL wire protocol (version 3.0) in pure
-Tcl script (with optional acceleration if critcl is available).  It aims to be
+Tcl script (with optional acceleration if jitc is available).  It aims to be
 as reliable as possible (using only the very reliable Tcl core) but still as
 fast as possible, faster than the libpq based tdbc::postgres in almost all
 cases.
