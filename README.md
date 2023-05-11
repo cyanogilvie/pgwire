@@ -135,7 +135,7 @@ Times are the median value reported in microseconds, cv is the coefficient of
 variation, a measure of how tightly the data cluster around the mean.  High
 cv values indicate that some runs produce very different times (typically higher).
 
-These benchmarks had the critcl accelerated support available.  The accelerator
+These benchmarks had the jitc accelerated support available.  The accelerator
 is a fast implementation of building a row list or dictionary given the data
 for row from the server.  It helps most when a very large number of column
 values are returned for a query (either many rows, or many columns in each
