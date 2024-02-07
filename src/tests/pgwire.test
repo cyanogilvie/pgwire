@@ -924,9 +924,10 @@ foreach impl {tcl c} {
 		set dbchan	[try $connect]
 		pgwire create pg $dbchan pagila postgres insecure
 		pg allrows {create temporary table pgwire_test_null (id integer primary key, val text)}
-		pg allrows {insert into pgwire_test_null (id, val) values (1, 'foo'), (2, NULL), (3, 'bar')}
+		pg allrows {insert into pgwire_test_null (id, val) values (1, 'foo'), (2, NULL), (3, 'bar'), (4, 'baz')}
 	} -body {
-		pg vars {select id, val from pgwire_test_null order by id} {
+		set ids	{1 2 3}
+		pg vars {select id, val from pgwire_test_null where id = any(:ids) order by id} {
 			lappend res $id [info exists val]
 		}
 		set res
@@ -939,7 +940,7 @@ foreach impl {tcl c} {
 		if {[info exists dbchan] && $dbchan in [chan names]} {
 			close $dbchan
 		}
-		unset -nocomplain dbchan res id val
+		unset -nocomplain dbchan res id val ids
 	} -result {1 1 2 0 3 1}
 	#>>>
 	test pgwire_$impl-9.2.5 {vars, script, params} -setup { #<<<
