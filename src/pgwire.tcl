@@ -417,6 +417,20 @@ namespace eval ::pgwire { #<<<
 			} {
 				replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
 			}
+
+			vars {
+				replace_tclobj(&val, Tcl_ObjSetVar2(l->interp, c->cols[colnum], NULL, val, TCL_LEAVE_ERR_MSG));
+				if (val == NULL) {
+					// TODO: how best to handle this?
+					Tcl_BackgroundException(l->interp, TCL_ERROR);
+				}
+				c->rs == -1;	// Signal that we don't set a rowvar
+				return;
+			} {
+				Tcl_UnsetVar(l->interp, Tcl_GetString(c->cols[colnum]), 0);
+				c->rs == -1;	// Signal that we don't set a rowvar
+				return;
+			}
 		} { 
 			foreach {type makeval} {
 				bool	{
@@ -940,6 +954,7 @@ done:
 		};
 
 		struct interp_cx {
+			Tcl_Interp*	interp;
 			Tcl_Obj*	lit[PGWIRE_LIT_SIZE];
 		};
 
@@ -1176,6 +1191,7 @@ done:
 			int					i;
 
 			if (l) {
+				l->interp = NULL;
 				for (i=0; i<PGWIRE_LIT_SIZE; i++) {
 					if (l->lit[i]) {
 						Tcl_DecrRefCount(l->lit[i]);
@@ -1195,6 +1211,7 @@ done:
 
 			if (l == NULL) {
 				l = ckalloc(sizeof *l);
+				l->interp = interp;
 				for (i=0; i<PGWIRE_LIT_SIZE; i++)
 					Tcl_IncrRefCount(l->lit[i] = Tcl_NewStringObj(lit_vals[i], -1));
 				Tcl_SetAssocData(interp, "pgwire", free_interp_cx, l);
@@ -1377,15 +1394,18 @@ done:
 				//fprintf(stderr, "<- c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, old_rs, s->rowv[old_rs], old_rs+1, s->rowv[old_rs+1]);
 			}
 
-			if (s->row) Tcl_DecrRefCount(s->row);
-			Tcl_IncrRefCount(s->row = Tcl_NewListObj(s->col.rs, s->rowv));
+			if (s->col.rs >= 0) {
+				// The "vars" op handler sets cols.rs to -1 to signal that we don't have a rowvar to set
+				replace_tclobj(&s->row, Tcl_NewListObj(s->col.rs, s->rowv));
 
-			if (NULL == Tcl_ObjSetVar2(interp, s->rowvar, NULL, s->row, TCL_LEAVE_ERR_MSG)) {
-				retcode = TCL_ERROR;
-				goto done;
+				if (NULL == Tcl_ObjSetVar2(interp, s->rowvar, NULL, s->row, TCL_LEAVE_ERR_MSG)) {
+					retcode = TCL_ERROR;
+					goto done;
+				}
+
+				//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(s->row), Tcl_GetString(s->script));
 			}
 
-			//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(s->row), Tcl_GetString(s->script));
 			Tcl_NRAddCallback(interp, c_foreach_batch_nr_loop_bot, s, NULL, NULL, NULL);
 			return Tcl_NREvalObj(interp, s->script, 0);
 
@@ -1493,15 +1513,17 @@ done:
 						ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
 					}
 
-					if (row) Tcl_DecrRefCount(row);
-					Tcl_IncrRefCount(row = Tcl_NewListObj(col.rs, rowv));
+					if (col.rs >= 0) {
+						replace_tclobj(&row, Tcl_NewListObj(col.rs, rowv));
 
-					if (NULL == Tcl_ObjSetVar2(interp, rowvar, NULL, row, TCL_LEAVE_ERR_MSG)) {
-						retcode = TCL_ERROR;
-						goto done;
+						if (NULL == Tcl_ObjSetVar2(interp, rowvar, NULL, row, TCL_LEAVE_ERR_MSG)) {
+							retcode = TCL_ERROR;
+							goto done;
+						}
+
+						//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(row), Tcl_GetString(script));
 					}
 
-					//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(row), Tcl_GetString(script));
 					retcode = Tcl_EvalObjEx(interp, script, 0);
 					switch (retcode) {
 						case TCL_OK:
@@ -1619,8 +1641,9 @@ done:
 						ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
 					}
 
-					if (TCL_OK != (retcode = Tcl_ListObjAppendElement(interp, rows, Tcl_NewListObj(col.rs, rowv))))
-						goto done;
+					if (col.rs >= 0)
+						if (TCL_OK != (retcode = Tcl_ListObjAppendElement(interp, rows, Tcl_NewListObj(col.rs, rowv))))
+							goto done;
 				}
 			}
 
@@ -1720,7 +1743,10 @@ done:
 					ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
 				}
 
-				Tcl_SetObjResult(interp, Tcl_NewListObj(col.rs, rowv));
+				// The "vars" op handler sets cols.rs to -1 to signal that we don't have a rowvar to set
+				if (col.rs >= 0) {
+					Tcl_SetObjResult(interp, Tcl_NewListObj(col.rs, rowv));
+				}
 			}
 
 done:
@@ -2313,6 +2339,38 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method reload_types db { #<<<
+		set chan_info	[chan configure $socket]
+		if {[dict exists $chan_info -peername]} {
+			set types_cache_key	[list [dict get $chan_info -peername] $db]
+			catch {tsv::unset _pgwire_types $types_cache_key}
+		}
+
+		unset -nocomplain type_elem
+
+		set type_oids_rev	{
+			bytea		17
+			int8		20
+			int2		21
+			int4		23
+			text		25
+			float4		700
+			float8		701
+		}
+		set type_oids	{
+			17		bytea
+			20		int8
+			21		int2
+			23		int4
+			25		text
+			700		float4
+			701		float8
+		}
+
+		my read_types $db
+	}
+
+	#>>>
 	method read_types db { #<<<
 		set chan_info	[chan configure $socket]
 		if {[dict exists $chan_info -peername]} {
@@ -2329,6 +2387,7 @@ oo::class create ::pgwire {
 				t.typname,
 				t.typelem,
 				a.typname	as a_typname,
+				a.oid		as a_oid,
 				t.typdelim
 			from
 				pg_type t
@@ -2337,13 +2396,15 @@ oo::class create ::pgwire {
 			on
 				a.oid = t.typarray
 			where
-				t.oid < 10000 and
+				t.typcategory <> all(ARRAY['C','A']) and
 				t.oid is not null and
 				t.typname is not null
 		} {
-			dict set type_oids		[dict get $row oid] [dict get $row typname]
-			dict set type_oids_rev	[dict get $row typname] [dict get $row oid]
+			dict set type_oids		[dict get $row oid]		[dict get $row typname]
+			dict set type_oids_rev	[dict get $row typname]	[dict get $row oid]
 			if {[dict exists $row a_typname]} {
+				dict set type_oids		[dict get $row a_oid]		[dict get $row a_typname]
+				dict set type_oid_rev	[dict get $row a_typname]	[dict get $row a_oid]
 				dict set type_elem [dict get $row a_typname] oid   [dict get $row oid]
 				dict set type_elem [dict get $row a_typname] delim [dict get $row typdelim]
 			}
@@ -3035,7 +3096,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method rollback {} { #<<<
-		if {$transaction_status eq "T"} {
+		if {$transaction_status in {T E}} {
 			incr tx_depth -1
 			if {$tx_depth} {
 				set sql	{rollback to _pgwire_savepoint_manual}
@@ -3049,7 +3110,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method commit {} { #<<<
-		if {$transaction_status eq "T"} {
+		if {$transaction_status in {T E}} {
 			incr tx_depth -1
 			if {$tx_depth} {
 				set sql	{release savepoint _pgwire_savepoint_manual}
@@ -4036,13 +4097,17 @@ oo::class create ::pgwire {
 			set makerow		[dict get $makerow_cache $key script]
 		} else {
 			# Compile makerow from c_types, as <<<
-			set makerow		{}
+			set makerow_prefix	{}
+			set makerow			{}
 			#append makerow	"binary scan \$datarow S col_count\n"	;# $col_count isn't actually used
 			append makerow	"set o 2\n"
 
 			switch -exact -- $as {
 				dicts - lists - dicts_no_nulls {
 					append makerow	{set row {}} \n
+				}
+				vars {
+					append makerow_prefix	{upvar 1}
 				}
 				default {
 					error "Unhandled result format: \"$as\""
@@ -4052,6 +4117,9 @@ oo::class create ::pgwire {
 			set remain	[expr {[llength $c_types] / 3}]
 			foreach {field_name type_name elem_delim} $c_types {
 				append makerow	"binary scan \$datarow @\${o}I collen; incr o 4\n"
+				if {$as eq "vars"} {
+					lappend makerow_prefix	$field_name upvar_$field_name
+				}
 				append makerow	"if {\$collen != -1} \{\n"
 				append makerow	[if {$elem_delim eq {}} { # scalar <<<
 					switch -glob -- $type_name {
@@ -4188,6 +4256,7 @@ oo::class create ::pgwire {
 				switch -exact -- $as {
 					dicts - dicts_no_nulls { append makerow	"\tlappend row [list $field_name] \$val\n" }
 					lists                  { append makerow	"\tlappend row \$val\n" }
+					vars                   { append makerow	"\tset [list upvar_$field_name] \$val\n" }
 				}
 
 				# Suppress the unnecessary advance of o if this is the last field
@@ -4199,12 +4268,16 @@ oo::class create ::pgwire {
 					dicts          {}
 					dicts_no_nulls { append makerow	"\} else \{\n\tlappend row [list $field_name] {}\n" }
 					lists          { append makerow	"\} else \{\n\tlappend row {}\n" }
+					vars           { append makerow "\} else \{\n\tunset [list upvar_$field_name]\n" }
 				}
 
 				append makerow "\}\n"
 			}
 			# Compile makerow from c_types, as >>>
 
+			if {$makerow_prefix ne {}} {
+				set makerow	$makerow_prefix\n$makerow
+			}
 			#::pgwire::log notice "tcl_makerow $as $c_types:\n$makerow"
 			dict set makerow_cache $key script $makerow
 		}
@@ -4216,7 +4289,7 @@ oo::class create ::pgwire {
 	method parse_tdbc_args {arglist optsvar} { #<<<
 		upvar 1 $optsvar opts
 		::parse_args::parse_args $arglist {
-			-as					{-default dicts -name -as -enum {lists dicts dicts_no_nulls}}
+			-as					{-default dicts -name -as -enum {lists dicts dicts_no_nulls vars}}
 			-columnsvariable	{-name -columnsvariable}
 			args				{-name rest -default {}}
 		} opts
@@ -4687,13 +4760,112 @@ oo::class create ::pgwire {
 
 	#>>>
 	method vars args { # set each of the returned columns as variables in the caller's frame <<<
-		# TODO: a proper, protocol-integrated implementation
 		my variable _headers
 		::parse_args::parse_args $args {
-			query	{-required}
+			-params	{-name param_values}
+			sql		{-required}
 			script	{}
 		}
 
+		if {[info exists script]} {
+			# With a script arg, we're an alias for foreach -as vars
+			if {[info exists param_values]} {
+				tailcall my foreach -as vars {} $sql $param_values $script
+			} else {
+				tailcall my foreach -as vars {} $sql $script
+			}
+		} else {
+			my buffer_nesting
+
+			set retries	1
+			while 1 {
+				try {
+					set stmt_info	[my prepare_extended_query $sql]
+					dict with stmt_info {}
+					# Sets:
+					#	- $stmt_name: the name of the prepared statement (as known to the server)
+					#	- $field_names:	the result column names and the local variables they are unpacked into
+					#	- $build_params: script to run to gather the input params
+					#	- $columns: a list of column names (can contain duplicates)
+					#	- $heat: how frequently this prepared statement has been used recently, relative to others
+					#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+					#	- $delims: for each column, the array string format element delimiter (blank if not array type)
+
+					try $build_params on ok parameters {}
+
+					set max_rows_per_batch	0
+
+					if {$::pgwire::accelerators} {
+						if {[dict exists $ops_cache vars]} {
+							set ops	[dict get $ops_cache vars]
+						} else {
+							set ops	[::pgwire::build_ops vars $c_types]
+							my save_ops $sql vars $ops
+						}
+					} else {
+						set makerow	[my tcl_makerow vars $c_types]
+					}
+
+					lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+						outcome details datarows
+				} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+				  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+					# 0A000 - happens if a schema change alters the result row format
+					# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+					my close_statement $stmt_name
+					dict unset prepared $sql
+					if {[incr retries -1] >= 0} {
+						continue
+					}
+					return -options $options $errmsg
+				}
+				break
+			}
+
+			try {
+				if {$::pgwire::accelerators} {
+					switch -exact -- $outcome {
+						CommandComplete -
+						PortalSuspended {
+							if {[llength $datarows] > 0} {
+								uplevel 1 [list ::pgwire::c_makerow2 $ops $columns $tcl_encoding [lindex $datarows 0] $delims]
+							}
+						}
+						EmptyQueryResponse {}
+					}
+				} else {
+					switch -exact -- $outcome {
+						CommandComplete -
+						PortalSuspended {
+							if {[llength $datarows] > 0} {
+								set datarow	[lindex $datarows 0]
+								try $makerow
+							}
+						}
+						EmptyQueryResponse {}
+					}
+				}
+			} finally {
+				if {!$ready_for_query && !$sync_outstanding} {
+					puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+					flush $socket
+				}
+				if {$sync_outstanding} {
+					my skip_to_sync
+				}
+			}
+		}
+		return
+
+
+
+
+
+
+
+
+
+		if 0 {
 		set rows	[uplevel 1 [list [self] allrows -columnsvariable [namespace which -variable _headers] -- $query]]
 
 		if {[info exists script]} {
@@ -4720,6 +4892,149 @@ oo::class create ::pgwire {
 				} else {
 					unset -nocomplain col_$h
 				}
+			}
+		}
+		return
+		}
+
+		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
+
+		set args	[my parse_tdbc_args $args opts]
+		switch -exact -- [llength $args] {
+			3 {lassign $args row_varname sqlcode script}
+			4 {lassign $args row_varname sqlcode param_values script}
+			default {
+				return -code error -errorcode [concat $generalError wrongNumArgs] \
+						"wrong # args: should be [lrange [info level 0] 0 1]\
+						 ?-option value?... ?--? varName sqlcode ?dictionary? script"
+			}
+		}
+		set as	[dict get $opts -as]
+
+		my buffer_nesting
+
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+
+		#set max_rows_per_batch	17
+		set max_rows_per_batch	$batchsize
+		#set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+
+		set retries	1
+		while 1 {
+			set stmt_info	[my prepare_extended_query $sqlcode]
+			dict with stmt_info {}
+			# Sets:
+			#	- $stmt_name: the name of the prepared statement (as known to the server)
+			#	- $field_names:	the result column names and the local variables they are unpacked into
+			#	- $build_params: script to run to gather the input params
+			#	- $columns: a list of column names (can contain duplicates)
+			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			#	- $delims: for each column, the array string format element delimiter (blank if not array type)
+
+			try $build_params on ok parameters {}
+
+			try {
+				if {$::pgwire::accelerators} {
+					if {[dict exists $ops_cache $as]} {
+						set ops	[dict get $ops_cache $as]
+					} else {
+						set ops	[::pgwire::build_ops $as $c_types]
+						my save_ops $sqlcode $as $ops
+					}
+					set foreach_batch {
+						uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script $delims]
+					}
+				} else {
+					upvar 1 $row_varname row
+					#set makerow	[my tcl_makerow $as $c_types]
+					set foreach_batch [string map [list \
+						%makerow%		[my tcl_makerow $as $c_types] \
+						%script%		[list $script] \
+					] {
+						foreach datarow $datarows {
+							%makerow%
+							try {
+								uplevel 1 %script%
+							} on break {} {
+								set broken	1
+								break
+							} on continue {} {
+							} on return {r o} {
+								#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
+								set broken	1
+								dict incr o -level 1
+								dict set o -code return
+								set rethrow	[list -options $o $r]
+								break
+							} on error {r o} {
+								#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
+								set broken	1
+								dict incr o -level 1
+								set rethrow	[list -options $o $r]
+								break
+							}
+						}
+					}]
+				}
+				coroutine $rowbuffer my rowbuffer_coro \
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				my close_statement $stmt_name
+				dict unset prepared $sqlcode
+				if {[incr retries -1] >= 0} {
+					continue
+				}
+				return -options $options $errmsg
+			}
+			break
+		}
+
+		try {
+			set broken	0
+			while {!$broken} {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
+				try $foreach_batch
+
+				switch -exact -- $outcome {
+					CommandComplete -
+					EmptyQueryResponse {
+						break
+					}
+					PortalSuspended {}
+					default {
+						error "Unexpected outcome from _read_batch: \"$outcome\""
+					}
+				}
+			}
+
+			if {[info exists rethrow]} {
+				#::pgwire::log notice "rethrowing"
+				return {*}$rethrow
+			}
+		} finally {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {!$ready_for_query && !$sync_outstanding} {
+				#::pgwire::log notice "foreach finally send sync"
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+				flush $socket
+			}
+			if {$sync_outstanding} {
+				#::pgwire::log notice "foreach finally skip_to_sync"
+				my skip_to_sync
 			}
 		}
 	}

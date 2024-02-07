@@ -1,1039 +1,1254 @@
 set here	[file dirname [file normalize [info script]]]
 source [file join $here common.tcl]
 
-test pgwire-1.1 {Construct instance} -setup { #<<<
-	set dbchan	[try $connect]
-} -body {
-	pgwire create pg $dbchan pagila postgres insecure
-	info object isa object pg
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan
-} -result 1
-#>>>
-test pgwire-1.2 {simple_query_dict} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg simple_query_dict row {select title from film where film_id=259} {
-		set title	[dict get $row title]
-	}
-	set title
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan row title
-} -result {DUCK RACER}
-#>>>
-test pgwire-1.3 {onecolumn} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg onecolumn {select title from film where film_id=259}
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan
-} -result {DUCK RACER}
-#>>>
-test pgwire-1.4 {onecolumn -as dicts, duplicate column names in result} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg onecolumn {
-		select
-			*
-		from
-			film f
-		join
-			film_category fc
-		on
-			fc.film_id = f.film_id
-		join
-			category c
-		on
-			c.category_id = fc.category_id
-		where
-			f.film_id = 286
-	}
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan obj
-} -result 286
-#>>>
-test pgwire-2.1 {allrows -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg allrows -as lists {select release_year,title from film where film_id=286}
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan
-} -result {{2006 {ENOUGH RAGING}}}
-#>>>
-test pgwire-2.2 {allrows -as lists, no -columnsvariable, 1 row, many columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set rows	[pg allrows -as lists {select * from film where film_id=286}]
+foreach impl {tcl c} {
+	unset -nocomplain saved_accelerators saved_force_generic_array
 
-	llength [lindex $rows 0]
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan rows
-} -result 14
-#>>>
-test pgwire-2.4 {allrows -as lists, no -columnsvariable, 1000 rows, 2 columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg batch_results 17 {
-		set rows	[pg allrows -as lists {select film_id,rating from film}]
-	}
+	if {[info exists ::pgwire::accelerators]} {set saved_accelerators $::pgwire::accelerators}
 
-	list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {lindex $row 0}]]
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan rows row
-} -result {1000 500500}
-#>>>
-test pgwire-3.1 {allrows -as dicts, 1 row, 2 columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg allrows -as dicts {select release_year,title from film where film_id=286}
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan
-} -result {{release_year 2006 title {ENOUGH RAGING}}}
-#>>>
-test pgwire-3.2 {allrows -as dicts, 1 row, many columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set rows	[pg allrows -as dicts {select * from film where film_id=286}]
-	list [dict get [lindex $rows 0] title] [dict keys [lindex $rows 0]]
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan rows
-} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext}}
-#>>>
-test pgwire-3.3 {allrows with params dict} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg allrows -as dicts {select title from film where film_id=:film_id} {film_id 256}
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan
-} -result {{title {DROP WATERFRONT}}}
-#>>>
-test pgwire-3.4 {allrows -as dicts, no -columnsvariable, 1 row, many columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set rows	[pg allrows -as dicts {select film_id from film}]
+	set ::pgwire::accelerators			[expr {$impl eq "c"}]
 
-	list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {dict get $row film_id}]]
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+	test pgwire_$impl-1.1 {Construct instance} -setup { #<<<
+		set dbchan	[try $connect]
+	} -body {
+		pgwire create pg $dbchan pagila postgres insecure
+		info object isa object pg
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan rows row
-} -result {1000 500500}
-#>>>
-test pgwire-3.5 {allrows -as dicts, duplicate column names in result} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set rows	[pg allrows -as dicts {
-		select
-			*
-		from
-			film f
-		join
-			film_category fc
-		on
-			fc.film_id = f.film_id
-		join
-			category c
-		on
-			c.category_id = fc.category_id
-		where
-			f.film_id = 286
-	}]
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan
+	} -result 1
+	#>>>
+	test pgwire_$impl-1.2 {simple_query_dict} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg simple_query_dict row {select title from film where film_id=259} {
+			set title	[dict get $row title]
+		}
+		set title
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan row title
+	} -result {DUCK RACER}
+	#>>>
+	test pgwire_$impl-1.3 {onecolumn} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg onecolumn {select title from film where film_id=259}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan
+	} -result {DUCK RACER}
+	#>>>
+	test pgwire_$impl-1.4 {onecolumn -as dicts, duplicate column names in result} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg onecolumn {
+			select
+				*
+			from
+				film f
+			join
+				film_category fc
+			on
+				fc.film_id = f.film_id
+			join
+				category c
+			on
+				c.category_id = fc.category_id
+			where
+				f.film_id = 286
+		}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan obj
+	} -result 286
+	#>>>
+	test pgwire_$impl-2.1 {allrows -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg allrows -as lists {select release_year,title from film where film_id=286}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan
+	} -result {{2006 {ENOUGH RAGING}}}
+	#>>>
+	test pgwire_$impl-2.2 {allrows -as lists, no -columnsvariable, 1 row, many columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set rows	[pg allrows -as lists {select * from film where film_id=286}]
 
-	list [dict get [lindex $rows 0] title] [lmap {k v} [lindex $rows 0] {set k}] [dict get [lindex $rows 0] name]
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		llength [lindex $rows 0]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan rows row obj k v
-} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
-#>>>
-test pgwire-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg foreach -as lists row {select release_year,title from film where film_id=286} {
-		set res	[lindex $row 1]
-	}
-	set res
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan row
-} -result {ENOUGH RAGING}
-#>>>
-test pgwire-4.2 {foreach -as lists, with -columnsvariable, 1 row, many columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg foreach -as lists -columnsvariable cols row {select * from film where film_id=286} {
-		set res	[lindex $row [lsearch -exact $cols title]]
-	}
-	set res
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		unset -nocomplain dbchan rows
+	} -result 14
+	#>>>
+	test pgwire_$impl-2.4 {allrows -as lists, no -columnsvariable, 1000 rows, 2 columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg batch_results 17 {
+			set rows	[pg allrows -as lists {select film_id,rating from film}]
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan row cols
-} -result {ENOUGH RAGING}
-#>>>
-test pgwire-5.1 {foreach -as dicts, 1 row, 2 columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire_tap create pg /tmp/pgwire-5.1.tap $dbchan pagila postgres insecure
-} -body {
-	pg foreach -as dicts row {select release_year,title from film where film_id=286} {
-		set res	[dict get $row title]
-	}
-	set res
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+
+		list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {lindex $row 0}]]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan row
-} -result {ENOUGH RAGING}
-#>>>
-test pgwire-5.2 {foreach -as dicts, 1 row, many columns} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg foreach -as dicts row {select * from film where film_id=286} {
-		set res	[dict get $row title]
-	}
-	set res
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan row res
-} -result {ENOUGH RAGING}
-#>>>
-test pgwire-5.3 {foreach with params dict} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	pg foreach -as dicts row {select * from film where film_id=:film_id} {film_id 256} {
-		set res	[dict get $row title]
-	}
-	set res
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		unset -nocomplain dbchan rows row
+	} -result {1000 500500}
+	#>>>
+	test pgwire_$impl-3.1 {allrows -as dicts, 1 row, 2 columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg allrows -as dicts {select release_year,title from film where film_id=286}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan row res
-} -result {DROP WATERFRONT}
-#>>>
-test pgwire-5.4 {foreach with yield} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-	coroutine nextrow apply {{} {
-		yield
-		pg foreach row {
-			select film_id from film
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan
+	} -result {{release_year 2006 title {ENOUGH RAGING}}}
+	#>>>
+	test pgwire_$impl-3.2 {allrows -as dicts, 1 row, many columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set rows	[pg allrows -as dicts {select * from film where film_id=286}]
+		list [dict get [lindex $rows 0] title] [dict keys [lindex $rows 0]]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan rows
+	} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext}}
+	#>>>
+	test pgwire_$impl-3.3 {allrows with params dict} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg allrows -as dicts {select title from film where film_id=:film_id} {film_id 256}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan
+	} -result {{title {DROP WATERFRONT}}}
+	#>>>
+	test pgwire_$impl-3.4 {allrows -as dicts, no -columnsvariable, 1 row, many columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set rows	[pg allrows -as dicts {select film_id from film}]
+
+		list [llength $rows] [tcl::mathop::+ {*}[lmap row $rows {dict get $row film_id}]]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan rows row
+	} -result {1000 500500}
+	#>>>
+	test pgwire_$impl-3.5 {allrows -as dicts, duplicate column names in result} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set rows	[pg allrows -as dicts {
+			select
+				*
+			from
+				film f
+			join
+				film_category fc
+			on
+				fc.film_id = f.film_id
+			join
+				category c
+			on
+				c.category_id = fc.category_id
+			where
+				f.film_id = 286
+		}]
+
+		list [dict get [lindex $rows 0] title] [lmap {k v} [lindex $rows 0] {set k}] [dict get [lindex $rows 0] name]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan rows row obj k v
+	} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
+	#>>>
+	test pgwire_$impl-4.1 {foreach -as lists, no -columnsvariable, 1 row, 2 columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg foreach -as lists row {select release_year,title from film where film_id=286} {
+			set res	[lindex $row 1]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan row
+	} -result {ENOUGH RAGING}
+	#>>>
+	test pgwire_$impl-4.2 {foreach -as lists, with -columnsvariable, 1 row, many columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg foreach -as lists -columnsvariable cols row {select * from film where film_id=286} {
+			set res	[lindex $row [lsearch -exact $cols title]]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan row cols
+	} -result {ENOUGH RAGING}
+	#>>>
+	test pgwire_$impl-5.1 {foreach -as dicts, 1 row, 2 columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire_tap create pg /tmp/pgwire-5.1.tap $dbchan pagila postgres insecure
+	} -body {
+		pg foreach -as dicts row {select release_year,title from film where film_id=286} {
+			set res	[dict get $row title]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan row
+	} -result {ENOUGH RAGING}
+	#>>>
+	test pgwire_$impl-5.2 {foreach -as dicts, 1 row, many columns} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg foreach -as dicts row {select * from film where film_id=286} {
+			set res	[dict get $row title]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan row res
+	} -result {ENOUGH RAGING}
+	#>>>
+	test pgwire_$impl-5.3 {foreach with params dict} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		pg foreach -as dicts row {select * from film where film_id=:film_id} {film_id 256} {
+			set res	[dict get $row title]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan row res
+	} -result {DROP WATERFRONT}
+	#>>>
+	test pgwire_$impl-5.4 {foreach with yield} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		coroutine nextrow apply {{} {
+			yield
+			pg foreach row {
+				select film_id from film
+			} {
+				#::pgwire::log notice "coro [info coroutine] yielding row: $row"
+				yield $row
+			}
+			return
+		}}
+	} -body {
+		set acc		0
+		set count	0
+		while 1 {
+			set row	[nextrow]
+			if {[llength [info commands nextrow]] == 0} break
+			incr acc [dict get $row film_id]
+			incr count
+		}
+		list $count $acc
+	} -cleanup {
+		if {[llength [info commands nextrow]] > 0} {
+			rename nextrow {}
+		}
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan acc count row obj
+	} -result {1000 500500}
+	#>>>
+	test pgwire_$impl-5.5 {foreach -as dicts, duplicate column names in result} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set rows	{}
+		pg foreach -as dicts row {
+			select
+				*
+			from
+				film f
+			join
+				film_category fc
+			on
+				fc.film_id = f.film_id
+			join
+				category c
+			on
+				c.category_id = fc.category_id
+			where
+				f.film_id = 286
 		} {
-			#::pgwire::log notice "coro [info coroutine] yielding row: $row"
-			yield $row
+			lappend rows $row
 		}
-		return
-	}}
-} -body {
-	set acc		0
-	set count	0
-	while 1 {
-		set row	[nextrow]
-		if {[llength [info commands nextrow]] == 0} break
-		incr acc [dict get $row film_id]
-		incr count
-	}
-	list $count $acc
-} -cleanup {
-	if {[llength [info commands nextrow]] > 0} {
-		rename nextrow {}
-	}
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+
+		list [dict get [lindex $rows 0] title] [lmap {k v} [lindex $rows 0] {set k}] [dict get [lindex $rows 0] name]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan acc count row obj
-} -result {1000 500500}
-#>>>
-test pgwire-5.5 {foreach -as dicts, duplicate column names in result} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set rows	{}
-	pg foreach -as dicts row {
-		select
-			*
-		from
-			film f
-		join
-			film_category fc
-		on
-			fc.film_id = f.film_id
-		join
-			category c
-		on
-			c.category_id = fc.category_id
-		where
-			f.film_id = 286
-	} {
-		lappend rows $row
-	}
-
-	list [dict get [lindex $rows 0] title] [lmap {k v} [lindex $rows 0] {set k}] [dict get [lindex $rows 0] name]
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan rows row obj k v
-} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
-#>>>
-test pgwire-6.1 {Transactions, rollback} -setup $std_setup -body { #<<<
-	set res	{}
-	lappend res	[pg transaction_status]
-	pg begintransaction
-	lappend res	[pg transaction_status]
-	pg rollback
-	lappend res	[pg transaction_status]
-	lappend res [pg ready_for_query]
-	set res
-} -cleanup {
-	rename pg {}
-	unset -nocomplain res
-} -result {I T I 1}
+		unset -nocomplain dbchan rows row obj k v
+	} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
+	#>>>
+	test pgwire_$impl-6.1 {Transactions, rollback} -setup $std_setup -body { #<<<
+		set res	{}
+		lappend res	[pg transaction_status]
+		pg begintransaction
+		lappend res	[pg transaction_status]
+		pg rollback
+		lappend res	[pg transaction_status]
+		lappend res [pg ready_for_query]
+		set res
+	} -cleanup {
+		rename pg {}
+		unset -nocomplain res
+	} -result {I T I 1}
 
-#>>>
-test pgwire-6.2 {Transactions, commit} -setup $std_setup -body { #<<<
-	set res	{}
-	lappend res	[pg transaction_status]
-	pg begintransaction
-	lappend res	[pg transaction_status]
-	pg commit
-	lappend res	[pg transaction_status]
-	lappend res [pg ready_for_query]
-	set res
-} -cleanup {
-	rename pg {}
-	unset -nocomplain res
-} -result {I T I 1}
+	#>>>
+	test pgwire_$impl-6.2 {Transactions, commit} -setup $std_setup -body { #<<<
+		set res	{}
+		lappend res	[pg transaction_status]
+		pg begintransaction
+		lappend res	[pg transaction_status]
+		pg commit
+		lappend res	[pg transaction_status]
+		lappend res [pg ready_for_query]
+		set res
+	} -cleanup {
+		rename pg {}
+		unset -nocomplain res
+	} -result {I T I 1}
 
-#>>>
-test pgwire-6.3 {Transactions, error} -setup $std_setup -body { #<<<
-	set res	{}
-	lappend res	[pg transaction_status]
-	pg begintransaction
-	lappend res	[pg transaction_status]
-	try {
-		pg allrows {select nonesuch()}
-	} trap {PGWIRE ErrorResponse ERROR 42883} {} {
-	}
-	lappend res	[pg transaction_status]
-	pg rollback
-	lappend res	[pg transaction_status]
-	lappend res [pg ready_for_query]
-	set res
-} -cleanup {
-	rename pg {}
-	unset -nocomplain res
-} -result {I T E I 1}
+	#>>>
+	test pgwire_$impl-6.3 {Transactions, error} -setup $std_setup -body { #<<<
+		set res	{}
+		lappend res	[pg transaction_status]
+		pg begintransaction
+		lappend res	[pg transaction_status]
+		try {
+			pg allrows {select nonesuch()}
+		} trap {PGWIRE ErrorResponse ERROR 42883} {} {
+		}
+		lappend res	[pg transaction_status]
+		pg rollback
+		lappend res	[pg transaction_status]
+		lappend res [pg ready_for_query]
+		set res
+	} -cleanup {
+		rename pg {}
+		unset -nocomplain res
+	} -result {I T E I 1}
 
-#>>>
-test pgwire-6.4 {Transactions, error} -setup $std_setup -body { #<<<
-	set res	{}
-	lappend res	[pg transaction_status]
-	pg begintransaction
-	lappend res	[pg transaction_status]
-	try {
-		pg allrows {select nonesuch()}
-	} trap {PGWIRE ErrorResponse ERROR 42883} {} {
-	}
-	lappend res	[pg transaction_status]
-	pg commit
-	lappend res	[pg transaction_status]
-	lappend res [pg ready_for_query]
-	set res
-} -cleanup {
-	rename pg {}
-	unset -nocomplain res
-} -result {I T E I 1}
+	#>>>
+	test pgwire_$impl-6.4 {Transactions, error} -setup $std_setup -body { #<<<
+		set res	{}
+		lappend res	[pg transaction_status]
+		pg begintransaction
+		lappend res	[pg transaction_status]
+		try {
+			pg allrows {select nonesuch()}
+		} trap {PGWIRE ErrorResponse ERROR 42883} {} {
+		}
+		lappend res	[pg transaction_status]
+		pg commit
+		lappend res	[pg transaction_status]
+		lappend res [pg ready_for_query]
+		set res
+	} -cleanup {
+		rename pg {}
+		unset -nocomplain res
+	} -result {I T E I 1}
 
-#>>>
-test pgwire-6.5 {Transactions, nested begin} -setup $std_setup -body { #<<<
-	set res	{}
-	lappend res	[pg transaction_status]
-	pg begintransaction
-	lappend res	[pg transaction_status]
-	pg begintransaction
-	lappend res	[pg transaction_status]
-	pg rollback
-	lappend res	[pg transaction_status]
-	lappend res [pg ready_for_query]
-	set res
-} -cleanup {
-	rename pg {}
-	unset -nocomplain res
-} -result {I T T I 1}
+	#>>>
+	test pgwire_$impl-6.5 {Transactions, nested begin} -setup $std_setup -body { #<<<
+		set res	{}
+		lappend res	[pg transaction_status]
+		pg begintransaction
+		lappend res	[pg transaction_status]
+		pg begintransaction
+		lappend res	[pg transaction_status]
+		pg rollback
+		lappend res	[pg transaction_status]
+		pg rollback
+		lappend res	[pg transaction_status]
+		lappend res [pg ready_for_query]
+		set res
+	} -cleanup {
+		rename pg {}
+		unset -nocomplain res
+	} -result {I T T T I 1}
 
-#>>>
-test pgwire-7.1 {ready_for_query} -setup $std_setup -body { #<<<
-	pg onecolumn {set search_path to public}
-	pg ready_for_query
-} -cleanup {
-	rename pg {}
-} -result 1
+	#>>>
+	test pgwire_$impl-7.1 {ready_for_query} -setup $std_setup -body { #<<<
+		pg onecolumn {set search_path to public}
+		pg ready_for_query
+	} -cleanup {
+		rename pg {}
+	} -result 1
 
-#>>>
-test pgwire-7.2 {ready_for_query} -setup $std_setup -body { #<<<
-	pg allrows {set search_path to public}
-	pg ready_for_query
-} -cleanup {
-	rename pg {}
-} -result 1
+	#>>>
+	test pgwire_$impl-7.2 {ready_for_query} -setup $std_setup -body { #<<<
+		pg allrows {set search_path to public}
+		pg ready_for_query
+	} -cleanup {
+		rename pg {}
+	} -result 1
 
-#>>>
-test pgwire-7.3 {ready_for_query} -setup $std_setup -body { #<<<
-	set stmt_info [pg prepare_extended_query {select title from film where film_id=:film_id}]
-	pg ready_for_query
-} -cleanup {
-	pg close_statement [dict get $stmt_info stmt_name]
-	pg sync
-	rename pg {}
-	unset -nocomplain stmt_info
-} -result 1
+	#>>>
+	test pgwire_$impl-7.3 {ready_for_query} -setup $std_setup -body { #<<<
+		set stmt_info [pg prepare_extended_query {select title from film where film_id=:film_id}]
+		pg ready_for_query
+	} -cleanup {
+		pg close_statement [dict get $stmt_info stmt_name]
+		pg sync
+		rename pg {}
+		unset -nocomplain stmt_info
+	} -result 1
 
-#>>>
-test pgwire-8.1 {nested foreach, no transaction} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set res	{}
-	set sum_film_id	0
-	pg batch_results 17 {
-		pg foreach film {select * from film order by film_id} {
-			if {[dict get $film film_id] == 286} {
-				pg foreach actor {
-					select
-						a.first_name,
-						a.last_name
-					from
-						actor a
-					join
-						film_actor fa
-					using
-						(actor_id)
-					where
-						fa.film_id = :film_id
-				} $film {
-					lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+	#>>>
+	test pgwire_$impl-8.1 {nested foreach, no transaction} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set res	{}
+		set sum_film_id	0
+		pg batch_results 17 {
+			pg foreach film {select * from film order by film_id} {
+				if {[dict get $film film_id] == 286} {
+					pg foreach actor {
+						select
+							a.first_name,
+							a.last_name
+						from
+							actor a
+						join
+							film_actor fa
+						using
+							(actor_id)
+						where
+							fa.film_id = :film_id
+					} $film {
+						lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+					}
 				}
+				incr sum_film_id	[dict get $film film_id]
 			}
-			incr sum_film_id	[dict get $film film_id]
 		}
-	}
-	list $res $sum_film_id
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		list $res $sum_film_id
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film actor res
-} -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
-#>>>
-test pgwire-8.2 {nested foreach, within transaction} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set res	{}
-	set sum_film_id	0
-	pg batch_results 17 {
-		pg begintransaction
-		pg foreach film {select * from film order by film_id} {
-			if {[dict get $film film_id] == 286} {
-				pg foreach actor {
-					select
-						a.first_name,
-						a.last_name
-					from
-						actor a
-					join
-						film_actor fa
-					using
-						(actor_id)
-					where
-						fa.film_id = :film_id
-				} $film {
-					lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan film actor res
+	} -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
+	#>>>
+	test pgwire_$impl-8.2 {nested foreach, within transaction} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set res	{}
+		set sum_film_id	0
+		pg batch_results 17 {
+			pg begintransaction
+			pg foreach film {select * from film order by film_id} {
+				if {[dict get $film film_id] == 286} {
+					pg foreach actor {
+						select
+							a.first_name,
+							a.last_name
+						from
+							actor a
+						join
+							film_actor fa
+						using
+							(actor_id)
+						where
+							fa.film_id = :film_id
+					} $film {
+						lappend res	"[dict get $actor first_name] [dict get $actor last_name]"
+					}
 				}
-			}
 
-			incr sum_film_id	[dict get $film film_id]
-		}
-		pg commit
-	}
-	list $res $sum_film_id
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film actor res
-} -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
-#>>>
-test pgwire-8.3 {nested onecolumn, no transaction} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set res	{}
-	set sum_film_id	0
-	pg batch_results 17 {
-		pg foreach film {select * from film order by film_id} {
-			if {[dict get $film film_id] == 286} {
-				set film_id	[dict get $film film_id]
-				lappend res	[pg onecolumn {
-					select
-						a.first_name || ' ' || a.last_name
-					from
-						actor a
-					join
-						film_actor fa
-					using
-						(actor_id)
-					where
-						fa.film_id = :film_id
-					limit 1
-				}]
+				incr sum_film_id	[dict get $film film_id]
 			}
-			incr sum_film_id	[dict get $film film_id]
+			pg commit
 		}
-	}
-	list $res $sum_film_id
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film actor res film_id
-} -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
-#>>>
-test pgwire-8.4 {nested onecolumn, within transaction} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set res	{}
-	set sum_film_id	0
-	pg batch_results 17 {
-		pg begintransaction
-		pg foreach film {select * from film order by film_id} {
-			if {[dict get $film film_id] == 286} {
-				set film_id	[dict get $film film_id]
-				lappend res	[pg onecolumn {
-					select
-						a.first_name || ' ' || a.last_name
-					from
-						actor a
-					join
-						film_actor fa
-					using
-						(actor_id)
-					where
-						fa.film_id = :film_id
-					limit 1
-				}]
+		list $res $sum_film_id
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
 			}
-			incr sum_film_id	[dict get $film film_id]
 		}
-		pg commit
-	}
-	list $res $sum_film_id
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film actor res film_id
-} -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
-#>>>
-test pgwire-8.5 {nested allrows, no transaction} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set res	{}
-	set sum_film_id	0
-	pg batch_results 17 {
-		pg foreach film {select * from film order by film_id} {
-			if {[dict get $film film_id] == 286} {
-				lappend res	{*}[pg allrows -as lists {
-					select
-						a.first_name || ' ' || a.last_name
-					from
-						actor a
-					join
-						film_actor fa
-					using
-						(actor_id)
-					where
-						fa.film_id = :film_id
-					limit 2
-				} $film]
+		unset -nocomplain dbchan film actor res
+	} -result {{{JOHNNY LOLLOBRIGIDA} {SANDRA PECK} {SEAN WILLIAMS} {JULIANNE DENCH} {KEVIN GARLAND} {RICHARD PENN} {AL GARLAND} {MATTHEW CARREY} {MICHAEL BOLGER}} 500500}
+	#>>>
+	test pgwire_$impl-8.3 {nested onecolumn, no transaction} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set res	{}
+		set sum_film_id	0
+		pg batch_results 17 {
+			pg foreach film {select * from film order by film_id} {
+				if {[dict get $film film_id] == 286} {
+					set film_id	[dict get $film film_id]
+					lappend res	[pg onecolumn {
+						select
+							a.first_name || ' ' || a.last_name
+						from
+							actor a
+						join
+							film_actor fa
+						using
+							(actor_id)
+						where
+							fa.film_id = :film_id
+						limit 1
+					}]
+				}
+				incr sum_film_id	[dict get $film film_id]
 			}
-			incr sum_film_id	[dict get $film film_id]
 		}
-	}
-	list $res $sum_film_id
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film actor res
-} -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
-#>>>
-test pgwire-8.6 {nested allrows, no transaction} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set res	{}
-	set sum_film_id	0
-	pg batch_results 17 {
-		pg begintransaction
-		pg foreach film {select * from film order by film_id} {
-			if {[dict get $film film_id] == 286} {
-				lappend res	{*}[pg allrows -as lists {
-					select
-						a.first_name || ' ' || a.last_name
-					from
-						actor a
-					join
-						film_actor fa
-					using
-						(actor_id)
-					where
-						fa.film_id = :film_id
-					limit 2
-				} $film]
+		list $res $sum_film_id
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
 			}
-			incr sum_film_id	[dict get $film film_id]
 		}
-		pg commit
-	}
-	list $res $sum_film_id
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film actor res
-} -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
-#>>>
-test pgwire-10.1 {casts vs params} -setup { #<<<
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
-} -body {
-	set film_id	286
-	pg allrows {
-		select title from film where film_id = :film_id::integer
-	}
-} -cleanup {
-	foreach obj {pg} {
-		if {[info object isa object $obj]} {
-			$obj destroy
+		unset -nocomplain dbchan film actor res film_id
+	} -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
+	#>>>
+	test pgwire_$impl-8.4 {nested onecolumn, within transaction} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set res	{}
+		set sum_film_id	0
+		pg batch_results 17 {
+			pg begintransaction
+			pg foreach film {select * from film order by film_id} {
+				if {[dict get $film film_id] == 286} {
+					set film_id	[dict get $film film_id]
+					lappend res	[pg onecolumn {
+						select
+							a.first_name || ' ' || a.last_name
+						from
+							actor a
+						join
+							film_actor fa
+						using
+							(actor_id)
+						where
+							fa.film_id = :film_id
+						limit 1
+					}]
+				}
+				incr sum_film_id	[dict get $film film_id]
+			}
+			pg commit
 		}
-	}
-	if {[info exists dbchan] && $dbchan in [chan names]} {
-		close $dbchan
-	}
-	unset -nocomplain dbchan film_id
-} -result {{title {ENOUGH RAGING}}}
-#>>>
-test pgwire-11.1 {re-entrant checks} -setup $std_setup -body { #<<<
-	pg allrows {set search_path to public}
-	pg ready_for_query
-} -cleanup {
-	rename pg {}
-} -result 1
-#>>>
-test pgwire-20.1 {update} -setup $std_setup -body { #<<<
-	pg onecolumn {create table foo (id serial, bar text)}
-	set id	[pg onecolumn {insert into foo (bar) values ('initial') returning id}]
-	set bar updated
-	pg onecolumn {update foo set bar=:bar where id=:id}
-	pg onecolumn {select bar from foo where id=:id}
-} -cleanup {
-	pg allrows {drop table foo}
-	rename pg {}
-	unset -nocomplain id bar
-} -result updated
-#>>>
-test pgwire-21.1 {application_name} -setup {} -body { #<<<
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-21.1}
-	pg onecolumn {select application_name from pg_stat_activity where pid=pg_backend_pid()}
-} -cleanup {
-	rename pg {}
-	unset -nocomplain id bar
-} -result pgwire-21.1
-#>>>
-test pgwire-22.1 {select exists} -setup {} -body { #<<<
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-21.1}
-	list [pg onecolumn {
-		select exists (select 1 from information_schema.tables where table_schema='information_schema' and table_name='tables')
-	}] [pg onecolumn {
-		select exists (select 1 from information_schema.tables where table_schema='information_schema' and table_name='tablesx')
-	}]
-} -cleanup {
-	rename pg {}
-} -result {1 0}
-#>>>
-test pgwire-23.1 {schema change: new column and stale prepared statement, allrows} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.1}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.1}
-	pgsetup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	pgsetup allrows {insert into stale (foo) values ('pgwire-23.1')}
-	pg allrows {select * from stale}
-	pgsetup allrows {alter table stale add column bar text}
-	pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.1'}
-} -body {
-	pg allrows {select * from stale}
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-} -result {{foo pgwire-23.1 bar updated}}
-#>>>
-test pgwire-23.2 {schema change: new column and stale prepared statement, foreach} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.2}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.2}
-	pgsetup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	pgsetup allrows {insert into stale (foo) values ('pgwire-23.2')}
-	pg foreach row {select * from stale} {}
-	pgsetup allrows {alter table stale add column bar text}
-	pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.2'}
-} -body {
-	set rows	{}
-	pg foreach row {select * from stale} {lappend rows $row}
-	set rows
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-	unset -nocomplain rows row
-} -result {{foo pgwire-23.2 bar updated}}
-#>>>
-test pgwire-23.3 {schema change: new column and stale prepared statement, onecolumn} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.3}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.3}
-	pgsetup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	pgsetup allrows {insert into stale (foo) values ('pgwire-23.3')}
-	pg onecolumn {select * from stale}
-	pgsetup allrows {alter table stale add column bar text}
-	pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.3'}
-} -body {
-	pg onecolumn {select * from stale}
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-} -result {pgwire-23.3}
-#>>>
-test pgwire-24.1 {schema change: column type change and stale prepared statement, allrows} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.1}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.1}
-	pgsetup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key
-		)
-	}
-	pgsetup allrows {insert into stale (foo) values ('24.1')}
-	pg allrows {select foo from stale}
-	pgsetup allrows {alter table stale alter column foo type text}
-} -body {
-	pg allrows {select foo from stale}
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-} -result {{foo 24.1}}
-#>>>
-test pgwire-24.2 {schema change: column type change and stale prepared statement, foreach} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.2}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.2}
-	pgsetup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key
-		)
-	}
-	pgsetup allrows {insert into stale (foo) values ('24.2')}
-	pg foreach row {select foo from stale} {}
-	pgsetup allrows {alter table stale alter column foo type text}
-} -body {
-	set rows	{}
-	pg foreach row {select * from stale} {lappend rows $row}
-	set rows
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-	unset -nocomplain rows row
-} -result {{foo 24.2}}
-#>>>
-test pgwire-24.3 {schema change: column type change and stale prepared statement, onecolumn} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.3}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.3}
-	pgsetup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key
-		)
-	}
-	pgsetup allrows {insert into stale (foo) values ('24.3')}
-	pg onecolumn {select foo from stale}
-	pgsetup allrows {alter table stale alter column foo type text}
-} -body {
-	pg onecolumn {select * from stale}
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-} -result {24.3}
-#>>>
-test pgwire-25.1 {schema change: parameter type change and stale prepared statement, allrows} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.1}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.1}
-	pgsetup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key,
-			bar		text
-		)
-	}
-	pgsetup allrows {insert into stale (foo,bar) values ('25.1','pgwire-25.1')}
-	set id	25.1
-	pg allrows {select bar from stale where foo=:id}
-	pgsetup allrows {alter table stale alter column foo type text}
-} -body {
-	pg allrows {select bar from stale where foo=:id}
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-	unset -nocomplain id
-} -result {{bar pgwire-25.1}}
-#>>>
-test pgwire-25.2 {schema change: parameter type change and stale prepared statement, foreach} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.2}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.2}
-	pgsetup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key,
-			bar		text
-		)
-	}
-	pgsetup allrows {insert into stale (foo,bar) values ('25.2','pgwire-25.2')}
-	set id	25.2
-	pg foreach row {select bar from stale where foo=:id} {}
-	pgsetup allrows {alter table stale alter column foo type text}
-} -body {
-	set rows	{}
-	pg foreach row {select bar from stale where foo=:id} {lappend rows $row}
-	set rows
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-	unset -nocomplain id rows row
-} -result {{bar pgwire-25.2}}
-#>>>
-test pgwire-25.3 {schema change: parameter type change and stale prepared statement, onecolumn} -setup { #<<<
-	pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.3}
-	pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.3}
-	pgsetup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key,
-			bar		text
-		)
-	}
-	pgsetup allrows {insert into stale (foo,bar) values ('25.3','pgwire-25.3')}
-	set id	25.3
-	pg onecolumn {select bar from stale where foo=:id}
-	pgsetup allrows {alter table stale alter column foo type text}
-} -body {
-	pg onecolumn {select bar from stale where foo=:id}
-} -cleanup {
-	pgsetup allrows {drop table stale}
-	if {[info object isa object pg]} {rename pg {}}
-	if {[info object isa object pgsetup]} {rename pgsetup {}}
-	unset -nocomplain id
-} -result {pgwire-25.3}
-#>>>
+		list $res $sum_film_id
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan film actor res film_id
+	} -result {{{JOHNNY LOLLOBRIGIDA}} 500500}
+	#>>>
+	test pgwire_$impl-8.5 {nested allrows, no transaction} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set res	{}
+		set sum_film_id	0
+		pg batch_results 17 {
+			pg foreach film {select * from film order by film_id} {
+				if {[dict get $film film_id] == 286} {
+					lappend res	{*}[pg allrows -as lists {
+						select
+							a.first_name || ' ' || a.last_name
+						from
+							actor a
+						join
+							film_actor fa
+						using
+							(actor_id)
+						where
+							fa.film_id = :film_id
+						limit 2
+					} $film]
+				}
+				incr sum_film_id	[dict get $film film_id]
+			}
+		}
+		list $res $sum_film_id
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan film actor res
+	} -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
+	#>>>
+	test pgwire_$impl-8.6 {nested allrows, no transaction} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set res	{}
+		set sum_film_id	0
+		pg batch_results 17 {
+			pg begintransaction
+			pg foreach film {select * from film order by film_id} {
+				if {[dict get $film film_id] == 286} {
+					lappend res	{*}[pg allrows -as lists {
+						select
+							a.first_name || ' ' || a.last_name
+						from
+							actor a
+						join
+							film_actor fa
+						using
+							(actor_id)
+						where
+							fa.film_id = :film_id
+						limit 2
+					} $film]
+				}
+				incr sum_film_id	[dict get $film film_id]
+			}
+			pg commit
+		}
+		list $res $sum_film_id
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan film actor res
+	} -result {{{{JOHNNY LOLLOBRIGIDA}} {{SANDRA PECK}}} 500500}
+	#>>>
+	test pgwire_$impl-9.1.1 {vars, no script, no params} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		set film_id	259
+		unset -nocomplain title
+	} -body {
+		pg vars {select title, release_year from film where film_id=:film_id}
+		list $title $release_year
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id release_year
+	} -result {{DUCK RACER} 2006}
+	#>>>
+	test pgwire_$impl-9.1.2 {vars, no script, no params, null column} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		pg allrows {create temporary table pgwire_test_null (id integer primary key, val text)}
+		pg allrows {insert into pgwire_test_null (id, val) values (1, 'foo'), (2, NULL), (3, 'bar')}
+	} -body {
+		set val oldval
+		pg vars {select id, val from pgwire_test_null where id=2}
+		info exists val
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan val id
+	} -result 0
+	#>>>
+	test pgwire_$impl-9.1.3 {vars, no script, no params, no rows} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		pg allrows {create temporary table pgwire_test_null (id integer primary key, val text)}
+		pg allrows {insert into pgwire_test_null (id, val) values (1, 'foo'), (2, NULL), (3, 'bar')}
+	} -body {
+		set val oldval
+		pg vars {select id, val from pgwire_test_null where id=10}
+		list [info exists val] [if {[info exists val]} {set val}]
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan val id
+	} -result {1 oldval}
+	#>>>
+	test pgwire_$impl-9.1.4 {vars, no script, no params, multiple rows} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		pg allrows {create temporary table pgwire_test_null (id integer primary key, val text)}
+		pg allrows {insert into pgwire_test_null (id, val) values (1, 'foo'), (2, NULL), (3, 'bar')}
+	} -body {
+		pg vars {select id, val from pgwire_test_null order by id asc}
+		lappend res $val
+		pg vars {select id, val from pgwire_test_null order by id desc}
+		lappend res $val
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan id val res
+	} -result {foo bar}
+	#>>>
+	test pgwire_$impl-9.1.5 {vars, no script, params} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		unset -nocomplain film_id title
+	} -body {
+		pg vars -params {film_id 259} {select title, release_year from film where film_id=:film_id}
+		list $title $release_year
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id release_year
+	} -result {{DUCK RACER} 2006}
+	#>>>
+	test pgwire_$impl-9.2.1 {vars, script, no params} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		set film_ids	{256 1 259}
+		unset -nocomplain title
+	} -body {
+		pg vars {select title, length from film where film_id=any(:film_ids) order by film_id} {
+			lappend res [list $title $length]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id length res
+	} -result {{{ACADEMY DINOSAUR} 86} {{DROP WATERFRONT} 178} {{DUCK RACER} 116}}
+	#>>>
+	test pgwire_$impl-9.2.2 {vars, script, no params, null column} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		pg allrows {create temporary table pgwire_test_null (id integer primary key, val text)}
+		pg allrows {insert into pgwire_test_null (id, val) values (1, 'foo'), (2, NULL), (3, 'bar')}
+	} -body {
+		pg vars {select id, val from pgwire_test_null order by id} {
+			lappend res $id [info exists val]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan res id val
+	} -result {1 1 2 0 3 1}
+	#>>>
+	test pgwire_$impl-9.2.5 {vars, script, params} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		unset -nocomplain title film_ids
+	} -body {
+		pg vars -params {film_ids {256 1 259}} {select title, length from film where film_id=any(:film_ids) order by film_id} {
+			lappend res [list $title $length]
+		}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id length res
+	} -result {{{ACADEMY DINOSAUR} 86} {{DROP WATERFRONT} 178} {{DUCK RACER} 116}}
+	#>>>
+	test pgwire_$impl-10.1 {casts vs params} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		set film_id	286
+		pg allrows {
+			select title from film where film_id = :film_id::integer
+		}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan film_id
+	} -result {{title {ENOUGH RAGING}}}
+	#>>>
+	test pgwire_$impl-11.1 {re-entrant checks} -setup $std_setup -body { #<<<
+		pg allrows {set search_path to public}
+		pg ready_for_query
+	} -cleanup {
+		rename pg {}
+	} -result 1
+	#>>>
+	test pgwire_$impl-12.1 {binary transport of enum parameter values} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		#pg allrows {drop type if exists pgwire_test_enum}
+		pg destroy
+		if {$dbchan in [chan names]} {
+			close $dbchan
+			unset dbchan
+		}
+
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		pg allrows {create type pgwire_test_enum as enum ('a', 'b', 'c', 'other')}
+		pg reload_types pagila
+		pg allrows {
+			create temporary table pgwire_test_enum_table (
+				id	serial primary key,
+				val	pgwire_test_enum
+			)
+		}
+	} -body {
+		pg allrows {insert into pgwire_test_enum_table (val) values (:val)} {val b}
+		pg allrows {select val from pgwire_test_enum_table where val = any(:vals)} {vals {a b c}}
+	} -cleanup {
+		pg allrows {drop table if exists pgwire_test_enum_table}
+		pg allrows {drop type if exists pgwire_test_enum}
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+	} -result {{val b}}
+	#>>>
+	test pgwire_$impl-20.1 {update} -setup $std_setup -body { #<<<
+		pg onecolumn {create table foo (id serial, bar text)}
+		set id	[pg onecolumn {insert into foo (bar) values ('initial') returning id}]
+		set bar updated
+		pg onecolumn {update foo set bar=:bar where id=:id}
+		pg onecolumn {select bar from foo where id=:id}
+	} -cleanup {
+		pg allrows {drop table foo}
+		rename pg {}
+		unset -nocomplain id bar
+	} -result updated
+	#>>>
+	test pgwire_$impl-21.1 {application_name} -setup {} -body { #<<<
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-21.1}
+		pg onecolumn {select application_name from pg_stat_activity where pid=pg_backend_pid()}
+	} -cleanup {
+		rename pg {}
+		unset -nocomplain id bar
+	} -result pgwire-21.1
+	#>>>
+	test pgwire_$impl-22.1 {select exists} -setup {} -body { #<<<
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-21.1}
+		list [pg onecolumn {
+			select exists (select 1 from information_schema.tables where table_schema='information_schema' and table_name='tables')
+		}] [pg onecolumn {
+			select exists (select 1 from information_schema.tables where table_schema='information_schema' and table_name='tablesx')
+		}]
+	} -cleanup {
+		rename pg {}
+	} -result {1 0}
+	#>>>
+	test pgwire_$impl-23.1 {schema change: new column and stale prepared statement, allrows} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.1}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.1}
+		pgsetup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		pgsetup allrows {insert into stale (foo) values ('pgwire-23.1')}
+		pg allrows {select * from stale}
+		pgsetup allrows {alter table stale add column bar text}
+		pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.1'}
+	} -body {
+		pg allrows {select * from stale}
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+	} -result {{foo pgwire-23.1 bar updated}}
+	#>>>
+	test pgwire_$impl-23.2 {schema change: new column and stale prepared statement, foreach} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.2}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.2}
+		pgsetup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		pgsetup allrows {insert into stale (foo) values ('pgwire-23.2')}
+		pg foreach row {select * from stale} {}
+		pgsetup allrows {alter table stale add column bar text}
+		pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.2'}
+	} -body {
+		set rows	{}
+		pg foreach row {select * from stale} {lappend rows $row}
+		set rows
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+		unset -nocomplain rows row
+	} -result {{foo pgwire-23.2 bar updated}}
+	#>>>
+	test pgwire_$impl-23.3 {schema change: new column and stale prepared statement, onecolumn} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-23.3}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-23.3}
+		pgsetup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		pgsetup allrows {insert into stale (foo) values ('pgwire-23.3')}
+		pg onecolumn {select * from stale}
+		pgsetup allrows {alter table stale add column bar text}
+		pgsetup allrows {update stale set bar='updated' where foo='pgwire-23.3'}
+	} -body {
+		pg onecolumn {select * from stale}
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+	} -result {pgwire-23.3}
+	#>>>
+	test pgwire_$impl-24.1 {schema change: column type change and stale prepared statement, allrows} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.1}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.1}
+		pgsetup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key
+			)
+		}
+		pgsetup allrows {insert into stale (foo) values ('24.1')}
+		pg allrows {select foo from stale}
+		pgsetup allrows {alter table stale alter column foo type text}
+	} -body {
+		pg allrows {select foo from stale}
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+	} -result {{foo 24.1}}
+	#>>>
+	test pgwire_$impl-24.2 {schema change: column type change and stale prepared statement, foreach} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.2}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.2}
+		pgsetup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key
+			)
+		}
+		pgsetup allrows {insert into stale (foo) values ('24.2')}
+		pg foreach row {select foo from stale} {}
+		pgsetup allrows {alter table stale alter column foo type text}
+	} -body {
+		set rows	{}
+		pg foreach row {select * from stale} {lappend rows $row}
+		set rows
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+		unset -nocomplain rows row
+	} -result {{foo 24.2}}
+	#>>>
+	test pgwire_$impl-24.3 {schema change: column type change and stale prepared statement, onecolumn} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-24.3}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-24.3}
+		pgsetup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key
+			)
+		}
+		pgsetup allrows {insert into stale (foo) values ('24.3')}
+		pg onecolumn {select foo from stale}
+		pgsetup allrows {alter table stale alter column foo type text}
+	} -body {
+		pg onecolumn {select * from stale}
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+	} -result {24.3}
+	#>>>
+	test pgwire_$impl-25.1 {schema change: parameter type change and stale prepared statement, allrows} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.1}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.1}
+		pgsetup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key,
+				bar		text
+			)
+		}
+		pgsetup allrows {insert into stale (foo,bar) values ('25.1','pgwire-25.1')}
+		set id	25.1
+		pg allrows {select bar from stale where foo=:id}
+		pgsetup allrows {alter table stale alter column foo type text}
+	} -body {
+		pg allrows {select bar from stale where foo=:id}
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+		unset -nocomplain id
+	} -result {{bar pgwire-25.1}}
+	#>>>
+	test pgwire_$impl-25.2 {schema change: parameter type change and stale prepared statement, foreach} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.2}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.2}
+		pgsetup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key,
+				bar		text
+			)
+		}
+		pgsetup allrows {insert into stale (foo,bar) values ('25.2','pgwire-25.2')}
+		set id	25.2
+		pg foreach row {select bar from stale where foo=:id} {}
+		pgsetup allrows {alter table stale alter column foo type text}
+	} -body {
+		set rows	{}
+		pg foreach row {select bar from stale where foo=:id} {lappend rows $row}
+		set rows
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+		unset -nocomplain id rows row
+	} -result {{bar pgwire-25.2}}
+	#>>>
+	test pgwire_$impl-25.3 {schema change: parameter type change and stale prepared statement, onecolumn} -setup { #<<<
+		pgwire create pgsetup [try $connect] pagila postgres insecure {application_name pgwire-25.3}
+		pgwire create pg [try $connect] pagila postgres insecure {application_name pgwire-25.3}
+		pgsetup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key,
+				bar		text
+			)
+		}
+		pgsetup allrows {insert into stale (foo,bar) values ('25.3','pgwire-25.3')}
+		set id	25.3
+		pg onecolumn {select bar from stale where foo=:id}
+		pgsetup allrows {alter table stale alter column foo type text}
+	} -body {
+		pg onecolumn {select bar from stale where foo=:id}
+	} -cleanup {
+		pgsetup allrows {drop table stale}
+		if {[info object isa object pg]} {rename pg {}}
+		if {[info object isa object pgsetup]} {rename pgsetup {}}
+		unset -nocomplain id
+	} -result {pgwire-25.3}
+	#>>>
+}
 
 ::tcltest::cleanupTests
 return

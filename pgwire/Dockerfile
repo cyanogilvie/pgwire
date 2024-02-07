@@ -1,5 +1,5 @@
-FROM cyanogilvie/alpine-tcl:v0.9.57-stripped
-RUN apk --update --no-cache add make postgresql-client gdb iproute2 valgrind tcpdump build-base autoconf automake bsd-compat-headers bash ca-certificates libssl1.1 libcrypto1.1 docker-cli git
+FROM cyanogilvie/alpine-tcl:v0.9.91-stripped
+RUN apk --update --no-cache add make postgresql-client gdb iproute2 valgrind tcpdump build-base autoconf automake bsd-compat-headers bash ca-certificates docker-cli git
 WORKDIR /tmp
 RUN git clone --recurse-submodules --shallow-submodules --branch connection-pool-git --single-branch --depth 1 https://github.com/cyanogilvie/tdbc && \
 	cd tdbc && \

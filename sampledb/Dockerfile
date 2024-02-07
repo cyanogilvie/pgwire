@@ -1,4 +1,4 @@
-FROM postgres:13-alpine
+FROM postgres:15-alpine
 #RUN wget http://ftp.musicbrainz.org/pub/musicbrainz/data/fullexport/$(curl http://ftp.musicbrainz.org/pub/musicbrainz/data/fullexport/LATEST)/mbdump.tar.bz2
 ENV PGDATA=/data
 RUN mkdir /data && \

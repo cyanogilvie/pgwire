@@ -7,500 +7,508 @@ package require tdbc::postgres
 
 set connargs	{-db pagila -user postgres -password insecure -host db -port 5432}
 
-test tdbcpgwire-1.1 {Construct instance} -body { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	info object isa object tdbcpgwire
-} -cleanup {
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-} -result 1
-#>>>
-test tdbcpgwire-2.1 {serial allrows} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
-	set film_id	286
-	$stmt allrows
-	$stmt allrows
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt film_id
-} -result {{title {ENOUGH RAGING}}}
-#>>>
-test tdbcpgwire-10.1 {Construct statement} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
-	set film_id	286
-	$stmt allrows
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt film_id
-} -result {{title {ENOUGH RAGING}}}
-#>>>
-test tdbcpgwire-10.2 {ErrorResponse statement allrows} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select foo from film where film_id=:film_id}]
-	set film_id	286
-	set code	[catch {$stmt allrows} r o]
-	list $code $r [dict get $o -errorcode]
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt film_id code r o
-} -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR 42703 *} -result {Postgres error: column "foo" does not exist}
-#>>>
-test tdbcpgwire-10.3 {ErrorResponse statement allrows during execute phase} -setup { #<<<
-	set test	tdbcpgwire-10.3
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	tdbcpgwire allrows {
-		create or replace function testerror(tag text) returns text as $$
-		begin
-			raise EXCEPTION 'Test exception: %', tag;
-		end;
-		$$ language plpgsql strict
-	}
-} -body {
-	set stmt	[tdbcpgwire prepare {select testerror(:test)}]
-	[$stmt execute] close
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire allrows {drop function if exists testerror(tag text)}
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt test
-} -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR P0001 *} -result {Postgres error: Test exception: tdbcpgwire-10.3}
-#>>>
-test tdbcpgwire-10.4 {statement params} -setup { #<<<
-	set test	tdbcpgwire-10.4
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
-	$stmt params
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt test
-} -result {film_id {direction in type int4 precision 0 scale 0 nullable 1} rating {direction in type __unknown(16386) precision 0 scale 0 nullable 1}}
-#>>>
-test tdbcpgwire-10.5 {statement paramtype} -setup { #<<<
-	set test	tdbcpgwire-10.5
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
-	$stmt paramtype rating varbinary
-	$stmt params
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt test
-} -result {film_id {direction in type int4 precision 0 scale 0 nullable 1} rating {direction in type varbinary precision 0 scale 0 nullable 1}}
-#>>>
-test tdbcpgwire-10.6 {statement paramtype, invalid param} -setup { #<<<
-	set test	tdbcpgwire-10.6
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
-	$stmt paramtype ratingx varbinary
-	$stmt params
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt test
-} -returnCodes error -result {Invalid param name "ratingx", must be one of: "film_id", "rating"}
-#>>>
-test tdbcpgwire-11.1 {ready_for_query} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
-	tdbcpgwire ready_for_query
-} -cleanup {
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		rename $stmt {}
-	}
-	rename tdbcpgwire {}
-	unset -nocomplain stmt
-} -result 1
+foreach impl {tcl c} {
+	unset -nocomplain saved_accelerators saved_force_generic_array
 
-#>>>
-test tdbcpgwire-20.1 {Resultset} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	rename ::pgwire::log _tmplog
-	proc ::pgwire::log {lvl msg} {
-		puts stderr "tdbcpgwire-20.1 $lvl: $msg"
-	}
-} -body {
-	set res			{}
-	set count		0
-	tdbcpgwire batch_results 17 {
-		set stmt		[tdbcpgwire prepare {select * from film}]
-		set resultset	[$stmt execute]
+	if {[info exists ::pgwire::accelerators]} {set saved_accelerators $::pgwire::accelerators}
+
+	set ::pgwire::accelerators			[expr {$impl eq "c"}]
+
+	test tdbcpgwire_$impl-1.1 {Construct instance} -body { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		info object isa object tdbcpgwire
+	} -cleanup {
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+	} -result 1
+	#>>>
+	test tdbcpgwire_$impl-2.1 {serial allrows} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+		set film_id	286
+		$stmt allrows
+		$stmt allrows
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt film_id
+	} -result {{title {ENOUGH RAGING}}}
+	#>>>
+	test tdbcpgwire_$impl-10.1 {Construct statement} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+		set film_id	286
+		$stmt allrows
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt film_id
+	} -result {{title {ENOUGH RAGING}}}
+	#>>>
+	test tdbcpgwire_$impl-10.2 {ErrorResponse statement allrows} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select foo from film where film_id=:film_id}]
+		set film_id	286
+		set code	[catch {$stmt allrows} r o]
+		list $code $r [dict get $o -errorcode]
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt film_id code r o
+	} -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR 42703 *} -result {Postgres error: column "foo" does not exist}
+	#>>>
+	test tdbcpgwire_$impl-10.3 {ErrorResponse statement allrows during execute phase} -setup { #<<<
+		set test	tdbcpgwire-10.3
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		tdbcpgwire allrows {
+			create or replace function testerror(tag text) returns text as $$
+			begin
+				raise EXCEPTION 'Test exception: %', tag;
+			end;
+			$$ language plpgsql strict
+		}
+	} -body {
+		set stmt	[tdbcpgwire prepare {select testerror(:test)}]
+		[$stmt execute] close
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire allrows {drop function if exists testerror(tag text)}
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt test
+	} -returnCodes error -errorCode {PGWIRE ErrorResponse ERROR P0001 *} -result {Postgres error: Test exception: tdbcpgwire-10.3}
+	#>>>
+	test tdbcpgwire_$impl-10.4 {statement params} -setup { #<<<
+		set test	tdbcpgwire-10.4
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
+		$stmt params
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt test
+	} -result {film_id {direction in type int4 precision 0 scale 0 nullable 1} rating {direction in type mpaa_rating precision 0 scale 0 nullable 1}}
+	#>>>
+	test tdbcpgwire_$impl-10.5 {statement paramtype} -setup { #<<<
+		set test	tdbcpgwire-10.5
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
+		$stmt paramtype rating varbinary
+		$stmt params
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt test
+	} -result {film_id {direction in type int4 precision 0 scale 0 nullable 1} rating {direction in type varbinary precision 0 scale 0 nullable 1}}
+	#>>>
+	test tdbcpgwire_$impl-10.6 {statement paramtype, invalid param} -setup { #<<<
+		set test	tdbcpgwire-10.6
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id and rating>:rating}]
+		$stmt paramtype ratingx varbinary
+		$stmt params
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt test
+	} -returnCodes error -result {Invalid param name "ratingx", must be one of: "film_id", "rating"}
+	#>>>
+	test tdbcpgwire_$impl-11.1 {ready_for_query} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		set stmt	[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+		tdbcpgwire ready_for_query
+	} -cleanup {
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			rename $stmt {}
+		}
+		rename tdbcpgwire {}
+		unset -nocomplain stmt
+	} -result 1
+
+	#>>>
+	test tdbcpgwire_$impl-20.1 {Resultset} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		rename ::pgwire::log _tmplog
+		proc ::pgwire::log {lvl msg} {
+			puts stderr "tdbcpgwire-20.1 $lvl: $msg"
+		}
+	} -body {
+		set res			{}
+		set count		0
+		tdbcpgwire batch_results 17 {
+			set stmt		[tdbcpgwire prepare {select * from film}]
+			set resultset	[$stmt execute]
+			while {[$resultset nextdict row]} {
+				incr count
+				if {![dict exists $row film_id]} {
+					::pgwire::log error "No film_id in row: ($row)"
+					continue
+				}
+				if {[dict get $row film_id] == 286} {
+					lappend res	[dict get $row title]
+				}
+			}
+			list $count [$resultset rowcount] $res
+		}
+	} -cleanup {
+		foreach v {resultset stmt} {
+			if {[info exists $v] && [info object isa object [set $v]]} {
+				[set $v] destroy
+			}
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt res count resultset row v
+		catch {rename ::pgwire::log {}}
+		rename _tmplog ::pgwire::log
+	} -result {1000 1000 {{ENOUGH RAGING}}}
+	#>>>
+	test tdbcpgwire_$impl-20.2 {Resultset, param_values dict} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		rename ::pgwire::log _tmplog
+		proc ::pgwire::log {lvl msg} {
+			puts stderr "tdbcpgwire-20.2 $lvl: $msg"
+		}
+	} -body {
+		set res			{}
+		set count		0
+		set stmt		[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+		set resultset	[$stmt execute {film_id 256}]
 		while {[$resultset nextdict row]} {
 			incr count
-			if {![dict exists $row film_id]} {
-				::pgwire::log error "No film_id in row: ($row)"
-				continue
-			}
-			if {[dict get $row film_id] == 286} {
-				lappend res	[dict get $row title]
-			}
+			lappend res $row
 		}
 		list $count [$resultset rowcount] $res
-	}
-} -cleanup {
-	foreach v {resultset stmt} {
-		if {[info exists $v] && [info object isa object [set $v]]} {
-			[set $v] destroy
+	} -cleanup {
+		foreach v {resultset stmt} {
+			if {[info exists $v] && [info object isa object [set $v]]} {
+				[set $v] destroy
+			}
 		}
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt res count resultset row v
-	catch {rename ::pgwire::log {}}
-	rename _tmplog ::pgwire::log
-} -result {1000 1000 {{ENOUGH RAGING}}}
-#>>>
-test tdbcpgwire-20.2 {Resultset, param_values dict} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	rename ::pgwire::log _tmplog
-	proc ::pgwire::log {lvl msg} {
-		puts stderr "tdbcpgwire-20.2 $lvl: $msg"
-	}
-} -body {
-	set res			{}
-	set count		0
-	set stmt		[tdbcpgwire prepare {select title from film where film_id=:film_id}]
-	set resultset	[$stmt execute {film_id 256}]
-	while {[$resultset nextdict row]} {
-		incr count
-		lappend res $row
-	}
-	list $count [$resultset rowcount] $res
-} -cleanup {
-	foreach v {resultset stmt} {
-		if {[info exists $v] && [info object isa object [set $v]]} {
-			[set $v] destroy
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
 		}
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt res count resultset row
-	catch {rename ::pgwire::log {}}
-	rename _tmplog ::pgwire::log
-} -result {1 1 {{title {DROP WATERFRONT}}}}
-#>>>
-test tdbcpgwire-20.3 {Resultset, tcl_makerow forced, param_values dict} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	rename ::pgwire::log _tmplog
-	proc ::pgwire::log {lvl msg} {
-		puts stderr "tdbcpgwire-20.2 $lvl: $msg"
-	}
-	set hold	$::pgwire::accelerators
-	set ::pgwire::accelerators	0
-} -body {
-	set res			{}
-	set count		0
-	set stmt		[tdbcpgwire prepare {select title from film where film_id=:film_id}]
-	set resultset	[$stmt execute {film_id 256}]
-	while {[$resultset nextdict row]} {
-		incr count
-		lappend res $row
-	}
-	list $count [$resultset rowcount] $res
-} -cleanup {
-	foreach v {resultset stmt} {
-		if {[info exists $v] && [info object isa object [set $v]]} {
-			[set $v] destroy
+		unset -nocomplain stmt res count resultset row
+		catch {rename ::pgwire::log {}}
+		rename _tmplog ::pgwire::log
+	} -result {1 1 {{title {DROP WATERFRONT}}}}
+	#>>>
+	test tdbcpgwire_$impl-20.3 {Resultset, tcl_makerow forced, param_values dict} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		rename ::pgwire::log _tmplog
+		proc ::pgwire::log {lvl msg} {
+			puts stderr "tdbcpgwire-20.2 $lvl: $msg"
 		}
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	set ::pgwire::accelerators $hold
-	unset -nocomplain stmt res count resultset row hold
-	catch {rename ::pgwire::log {}}
-	rename _tmplog ::pgwire::log
-} -result {1 1 {{title {DROP WATERFRONT}}}}
-#>>>
-test tdbcpgwire-21.1 {Resultset, close} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	rename ::pgwire::log _tmplog
-	proc ::pgwire::log {lvl msg} {
-		puts stderr "tdbcpgwire-21.1 $lvl: $msg"
-	}
-} -body {
-	set res			{}
-	set count		0
-	set stmt		[tdbcpgwire prepare {select title from film}]
-	set resultset	[$stmt execute]
-	$resultset close
-	info object isa object $resultset
-} -cleanup {
-	foreach v {resultset stmt} {
-		if {[info exists $v] && [info object isa object [set $v]]} {
-			[set $v] destroy
+		set hold	$::pgwire::accelerators
+		set ::pgwire::accelerators	0
+	} -body {
+		set res			{}
+		set count		0
+		set stmt		[tdbcpgwire prepare {select title from film where film_id=:film_id}]
+		set resultset	[$stmt execute {film_id 256}]
+		while {[$resultset nextdict row]} {
+			incr count
+			lappend res $row
 		}
-	}
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	unset -nocomplain stmt res count resultset row
-	catch {rename ::pgwire::log {}}
-	rename _tmplog ::pgwire::log
-} -result 0
-#>>>
-test tdbcpgwire-22.1.1 {tables method} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	tdbcpgwire tables
-} -cleanup {
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-} -result {actor actor_info address category city country customer customer_list film film_actor film_category film_list inventory language nicer_but_slower_film_list payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06 rental sales_by_film_category sales_by_store staff staff_list store}
-#>>>
-test tdbcpgwire-22.1.2 {tables method with pattern} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	tdbc::postgres::connection create tdbcpostgres {*}$connargs
-} -body {
-	tdbcpgwire tables payment_%
-} -cleanup {
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-	if {[info object isa object tdbcpostgres]} {
-		tdbcpostgres destroy
-	}
-} -result {payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06}
-#>>>
-test tdbcpgwire-22.2 {columns method} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-} -body {
-	tdbcpgwire columns film
-} -cleanup {
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-} -result {film_id {name film_id type integer nullable 0 precision 32} title {name title type text nullable 0} description {name description type text nullable 1} release_year {name release_year type integer nullable 1 precision 32} language_id {name language_id type smallint nullable 0 precision 16} original_language_id {name original_language_id type smallint nullable 1 precision 16} rental_duration {name rental_duration type smallint nullable 0 precision 16} rental_rate {name rental_rate type numeric nullable 0 precision 4} length {name length type smallint nullable 1 precision 16} replacement_cost {name replacement_cost type numeric nullable 0 precision 5} rating {name rating type USER-DEFINED nullable 1} last_update {name last_update type {timestamp with time zone} nullable 0} special_features {name special_features type ARRAY nullable 1} fulltext {name fulltext type tsvector nullable 0}}
-#>>>
-test tdbcpgwire-23.1 {application_name} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs -params {application_name tdbcpgwire-21.1}
-} -body {
-	tdbcpgwire onecolumn {select application_name from pg_stat_activity where pid=pg_backend_pid()}
-} -cleanup {
-	if {[info object isa object tdbcpgwire]} {
-		tdbcpgwire destroy
-	}
-} -result tdbcpgwire-21.1
-#>>>
-test tdbcpgwire-24.1 {schema change: new column and stale prepared statement, allrows} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.1')}
-	tdbcpgwire allrows {select * from stale}
-	tdbcpgwire_setup allrows {alter table stale add column bar text}
-	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.1'}
-} -body {
-	tdbcpgwire allrows {select * from stale}
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-} -result {{foo tdbcpgwire-24.1 bar updated}}
-#>>>
-test tdbcpgwire-24.2 {schema change: new column and stale prepared statement, foreach} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.2')}
-	tdbcpgwire foreach row {select * from stale} {}
-	tdbcpgwire_setup allrows {alter table stale add column bar text}
-	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.2'}
-} -body {
-	set rows	{}
-	tdbcpgwire foreach row {select * from stale} {lappend rows $row}
-	set rows
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-	unset -nocomplain rows row
-} -result {{foo tdbcpgwire-24.2 bar updated}}
-#>>>
-test tdbcpgwire-24.3 {schema change: new column and stale prepared statement, onecolumn} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.3')}
-	tdbcpgwire onecolumn {select * from stale}
-	tdbcpgwire_setup allrows {alter table stale add column bar text}
-	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.3'}
-} -body {
-	tdbcpgwire onecolumn {select * from stale}
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-} -result {tdbcpgwire-24.3}
-#>>>
-test tdbcpgwire-26.1 {schema change: new column and stale explicitly prepared statement, allrows} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	#tdbcpgwire_setup allrows {drop table if exists stale}
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-26.1')}
-	set stmt	[tdbcpgwire prepare {select * from stale}]
-	$stmt allrows
-	tdbcpgwire_setup allrows {alter table stale add column bar text}
-	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-26.1'}
-} -body {
-	$stmt allrows
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-	unset -nocomplain stmt
-} -result {{foo tdbcpgwire-26.1 bar updated}}
-#>>>
-test tdbcpgwire-26.2 {schema change: new column and stale explicitly prepared statement, foreach} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	#tdbcpgwire_setup allrows {drop table if exists stale}
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		text primary key
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-26.2')}
-	set stmt	[tdbcpgwire prepare {select * from stale}]
-	$stmt foreach row {}
-	tdbcpgwire_setup allrows {alter table stale add column bar text}
-	tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-26.2'}
-} -body {
-	set rows	{}
-	$stmt foreach row {lappend rows $row}
-	set rows
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-	unset -nocomplain stmt rows row
-} -result {{foo tdbcpgwire-26.2 bar updated}}
-#>>>
-test tdbcpgwire-27.1 {schema change: parameter type change and explicitly stale prepared statement, allrows} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	#tdbcpgwire_setup allrows {drop table if exists stale}
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key,
-			bar		text
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo, bar) values ('27.1', 'tdbcpgwire-27.1')}
-	set id		27.1
-	set stmt	[tdbcpgwire prepare {select bar from stale where foo=:id}]
-	$stmt allrows
-} -body {
-	$stmt allrows
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-	unset -nocomplain stmt id
-} -result {{bar tdbcpgwire-27.1}}
-#>>>
-test tdbcpgwire-27.2 {schema change: parameter type change and explicitly stale prepared statement, foreach} -setup { #<<<
-	tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
-	tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-	#tdbcpgwire_setup allrows {drop table if exists stale}
-	tdbcpgwire_setup allrows {
-		create table stale (
-			foo		numeric(10,1) primary key,
-			bar		text
-		)
-	}
-	tdbcpgwire_setup allrows {insert into stale (foo, bar) values ('27.2', 'tdbcpgwire-27.2')}
-	set id		27.2
-	set stmt	[tdbcpgwire prepare {select bar from stale where foo=:id}]
-	try {
-	$stmt foreach row {}
-	} on error {errmsg options} {
-		puts stderr "Unhandled error: $options"
-	}
-} -body {
-	set rows	{}
-	$stmt foreach row {lappend rows $row}
-	set rows
-} -cleanup {
-	tdbcpgwire_setup allrows {drop table stale}
-	if {[info exists stmt] && [info object isa object $stmt]} {
-		$stmt destroy
-	}
-	if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
-	if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
-	unset -nocomplain stmt id row rows
-} -result {{bar tdbcpgwire-27.2}}
-#>>>
+		list $count [$resultset rowcount] $res
+	} -cleanup {
+		foreach v {resultset stmt} {
+			if {[info exists $v] && [info object isa object [set $v]]} {
+				[set $v] destroy
+			}
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		set ::pgwire::accelerators $hold
+		unset -nocomplain stmt res count resultset row hold
+		catch {rename ::pgwire::log {}}
+		rename _tmplog ::pgwire::log
+	} -result {1 1 {{title {DROP WATERFRONT}}}}
+	#>>>
+	test tdbcpgwire_$impl-21.1 {Resultset, close} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		rename ::pgwire::log _tmplog
+		proc ::pgwire::log {lvl msg} {
+			puts stderr "tdbcpgwire-21.1 $lvl: $msg"
+		}
+	} -body {
+		set res			{}
+		set count		0
+		set stmt		[tdbcpgwire prepare {select title from film}]
+		set resultset	[$stmt execute]
+		$resultset close
+		info object isa object $resultset
+	} -cleanup {
+		foreach v {resultset stmt} {
+			if {[info exists $v] && [info object isa object [set $v]]} {
+				[set $v] destroy
+			}
+		}
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		unset -nocomplain stmt res count resultset row
+		catch {rename ::pgwire::log {}}
+		rename _tmplog ::pgwire::log
+	} -result 0
+	#>>>
+	test tdbcpgwire_$impl-22.1.1 {tables method} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		tdbcpgwire tables
+	} -cleanup {
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+	} -result {actor actor_info address category city country customer customer_list film film_actor film_category film_list inventory language nicer_but_slower_film_list payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06 rental sales_by_film_category sales_by_store staff staff_list store}
+	#>>>
+	test tdbcpgwire_$impl-22.1.2 {tables method with pattern} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		tdbc::postgres::connection create tdbcpostgres {*}$connargs
+	} -body {
+		tdbcpgwire tables payment_%
+	} -cleanup {
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+		if {[info object isa object tdbcpostgres]} {
+			tdbcpostgres destroy
+		}
+	} -result {payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06}
+	#>>>
+	test tdbcpgwire_$impl-22.2 {columns method} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+	} -body {
+		tdbcpgwire columns film
+	} -cleanup {
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+	} -result {film_id {name film_id type integer nullable 0 precision 32} title {name title type text nullable 0} description {name description type text nullable 1} release_year {name release_year type integer nullable 1 precision 32} language_id {name language_id type smallint nullable 0 precision 16} original_language_id {name original_language_id type smallint nullable 1 precision 16} rental_duration {name rental_duration type smallint nullable 0 precision 16} rental_rate {name rental_rate type numeric nullable 0 precision 4} length {name length type smallint nullable 1 precision 16} replacement_cost {name replacement_cost type numeric nullable 0 precision 5} rating {name rating type USER-DEFINED nullable 1} last_update {name last_update type {timestamp with time zone} nullable 0} special_features {name special_features type ARRAY nullable 1} fulltext {name fulltext type tsvector nullable 0}}
+	#>>>
+	test tdbcpgwire_$impl-23.1 {application_name} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs -params {application_name tdbcpgwire-21.1}
+	} -body {
+		tdbcpgwire onecolumn {select application_name from pg_stat_activity where pid=pg_backend_pid()}
+	} -cleanup {
+		if {[info object isa object tdbcpgwire]} {
+			tdbcpgwire destroy
+		}
+	} -result tdbcpgwire-21.1
+	#>>>
+	test tdbcpgwire_$impl-24.1 {schema change: new column and stale prepared statement, allrows} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.1')}
+		tdbcpgwire allrows {select * from stale}
+		tdbcpgwire_setup allrows {alter table stale add column bar text}
+		tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.1'}
+	} -body {
+		tdbcpgwire allrows {select * from stale}
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	} -result {{foo tdbcpgwire-24.1 bar updated}}
+	#>>>
+	test tdbcpgwire_$impl-24.2 {schema change: new column and stale prepared statement, foreach} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.2')}
+		tdbcpgwire foreach row {select * from stale} {}
+		tdbcpgwire_setup allrows {alter table stale add column bar text}
+		tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.2'}
+	} -body {
+		set rows	{}
+		tdbcpgwire foreach row {select * from stale} {lappend rows $row}
+		set rows
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+		unset -nocomplain rows row
+	} -result {{foo tdbcpgwire-24.2 bar updated}}
+	#>>>
+	test tdbcpgwire_$impl-24.3 {schema change: new column and stale prepared statement, onecolumn} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-24.3')}
+		tdbcpgwire onecolumn {select * from stale}
+		tdbcpgwire_setup allrows {alter table stale add column bar text}
+		tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-24.3'}
+	} -body {
+		tdbcpgwire onecolumn {select * from stale}
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+	} -result {tdbcpgwire-24.3}
+	#>>>
+	test tdbcpgwire_$impl-26.1 {schema change: new column and stale explicitly prepared statement, allrows} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		#tdbcpgwire_setup allrows {drop table if exists stale}
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-26.1')}
+		set stmt	[tdbcpgwire prepare {select * from stale}]
+		$stmt allrows
+		tdbcpgwire_setup allrows {alter table stale add column bar text}
+		tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-26.1'}
+	} -body {
+		$stmt allrows
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+		unset -nocomplain stmt
+	} -result {{foo tdbcpgwire-26.1 bar updated}}
+	#>>>
+	test tdbcpgwire_$impl-26.2 {schema change: new column and stale explicitly prepared statement, foreach} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		#tdbcpgwire_setup allrows {drop table if exists stale}
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		text primary key
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo) values ('tdbcpgwire-26.2')}
+		set stmt	[tdbcpgwire prepare {select * from stale}]
+		$stmt foreach row {}
+		tdbcpgwire_setup allrows {alter table stale add column bar text}
+		tdbcpgwire_setup allrows {update stale set bar='updated' where foo='tdbcpgwire-26.2'}
+	} -body {
+		set rows	{}
+		$stmt foreach row {lappend rows $row}
+		set rows
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+		unset -nocomplain stmt rows row
+	} -result {{foo tdbcpgwire-26.2 bar updated}}
+	#>>>
+	test tdbcpgwire_$impl-27.1 {schema change: parameter type change and explicitly stale prepared statement, allrows} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		#tdbcpgwire_setup allrows {drop table if exists stale}
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key,
+				bar		text
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo, bar) values ('27.1', 'tdbcpgwire-27.1')}
+		set id		27.1
+		set stmt	[tdbcpgwire prepare {select bar from stale where foo=:id}]
+		$stmt allrows
+	} -body {
+		$stmt allrows
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+		unset -nocomplain stmt id
+	} -result {{bar tdbcpgwire-27.1}}
+	#>>>
+	test tdbcpgwire_$impl-27.2 {schema change: parameter type change and explicitly stale prepared statement, foreach} -setup { #<<<
+		tdbc::pgwire::connection create tdbcpgwire_setup {*}$connargs
+		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
+		#tdbcpgwire_setup allrows {drop table if exists stale}
+		tdbcpgwire_setup allrows {
+			create table stale (
+				foo		numeric(10,1) primary key,
+				bar		text
+			)
+		}
+		tdbcpgwire_setup allrows {insert into stale (foo, bar) values ('27.2', 'tdbcpgwire-27.2')}
+		set id		27.2
+		set stmt	[tdbcpgwire prepare {select bar from stale where foo=:id}]
+		try {
+		$stmt foreach row {}
+		} on error {errmsg options} {
+			puts stderr "Unhandled error: $options"
+		}
+	} -body {
+		set rows	{}
+		$stmt foreach row {lappend rows $row}
+		set rows
+	} -cleanup {
+		tdbcpgwire_setup allrows {drop table stale}
+		if {[info exists stmt] && [info object isa object $stmt]} {
+			$stmt destroy
+		}
+		if {[info object isa object tdbcpgwire]} {rename tdbcpgwire {}}
+		if {[info object isa object tdbcpgwire_setup]} {rename tdbcpgwire_setup {}}
+		unset -nocomplain stmt id row rows
+	} -result {{bar tdbcpgwire-27.2}}
+	#>>>
+}
 
 ::tcltest::cleanupTests
 return

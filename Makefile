@@ -1,28 +1,30 @@
+DC=docker compose
+
 all:
 	make -C src all
 
 test: all
-	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
+	$(DC) run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 tcpdump: all
-	docker-compose run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" TCPDUMP="/tmp/testdump-"
+	$(DC) run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" TCPDUMP="/tmp/testdump-" AWS_PROFILE="$(AWS_PROFILE)"
 
 valgrind: all
-	docker-compose run --rm pgwire valgrind TESTFLAGS="$(TESTFLAGS)"
+	$(DC) run --rm pgwire valgrind TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 gdb: all
-	docker-compose run --rm pgwire gdb TESTFLAGS="$(TESTFLAGS)"
+	$(DC) run --rm pgwire gdb TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 benchmark: all
-	docker-compose up -d db
-	-docker-compose exec db tc qdisc del dev eth0 root netem
-	docker-compose exec db tc qdisc add dev eth0 root netem delay .5ms
-	docker-compose run --rm pgwire benchmark TESTFLAGS="$(TESTFLAGS)"
-	docker-compose exec db tc qdisc del dev eth0 root netem
+	$(DC) up -d db
+	#-$(DC) exec db tc qdisc del dev eth0 root netem
+	#$(DC) exec db tc qdisc add dev eth0 root netem delay .5ms
+	$(DC) run --rm pgwire benchmark TESTFLAGS="$(TESTFLAGS)"
+	#$(DC) exec db tc qdisc del dev eth0 root netem
 
 gdb_benchmark: all
-	docker-compose run --rm pgwire gdb_benchmark TESTFLAGS="$(TESTFLAGS)"
+	$(DC) run --rm pgwire gdb_benchmark TESTFLAGS="$(TESTFLAGS)"
 
 clean:
 	make -C src clean
-	docker-compose down --rmi local -v --remove-orphans
+	$(DC) down --rmi local -v --remove-orphans

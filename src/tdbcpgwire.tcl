@@ -373,6 +373,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			}
 			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow $delims]}
 		} else {
+			set ops		{}
 			set makerow	[$con tcl_makerow $as $c_types]
 		}
 
@@ -722,6 +723,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		method next$format rowvar [string map [list \
 			%format%	$format \
 		] {
+			variable ::pgwire::arr_fmt_cache
 			upvar 1 $rowvar row
 
 			if {[llength $datarows] == 0} {

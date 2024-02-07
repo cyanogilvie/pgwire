@@ -1,5 +1,5 @@
 # First two numbers are the PostgreSQL protocol version number, rest is ours
-VER=3.0.0b22
+VER=3.0.0b23
 
 all: tm/pgwire-$(VER).tm tm/tdbc/pgwire-$(VER).tm
 
@@ -18,12 +18,12 @@ test: all
 	AWS_PROFILE="$(AWS_PROFILE)" tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 valgrind: all
-	valgrind tclsh tests/all.tcl $(VER) $(TESTFLAGS)
+	AWS_PROFILE="$(AWS_PROFILE)" valgrind tclsh tests/all.tcl $(VER) $(TESTFLAGS)
 
 benchmark: all
-	tc qdisc add dev eth0 root netem delay .5ms
+	#tc qdisc add dev eth0 root netem delay .5ms
 	tclsh bench/run.tcl $(VER) $(TESTFLAGS)
-	tc qdisc del dev eth0 root netem
+	#tc qdisc del dev eth0 root netem
 
 gdb_benchmark: all
 	gdb -ex=r --args tclsh bench/run.tcl $(VER) $(TESTFLAGS)

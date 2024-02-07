@@ -1037,6 +1037,33 @@ bench pgwire-7.3 {foreach_batch} -setup { #<<<
 if 0 {
 }
 #>>>
+bench pgwire-8.1 {vars, no script} -setup { #<<<
+	pgwire create pgwire_lo [socket db 5432] pagila postgres insecure
+	pgwire create pgwire_uds [unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]] pagila postgres insecure
+	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+} -compare {
+	pgwire_lo {
+		pgwire_lo vars {select title from film where film_id=286}
+		set title
+	}
+
+	pgwire_uds {
+		pgwire_uds vars {select title from film where film_id=286}
+		set title
+	}
+
+	tdbc_postgres {
+		lindex [tdbc_postgres allrows -as lists {select title from film where film_id=286}] 0 0
+	}
+} -cleanup {
+	foreach obj {pgwire_lo pgwire_uds tdbc_postgres} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	unset -nocomplain title
+} -result {ENOUGH RAGING}
+#>>>
 }
 
 main
