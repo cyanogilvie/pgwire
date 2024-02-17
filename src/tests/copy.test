@@ -1,0 +1,130 @@
+set here	[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
+
+proc ::pgwire::log {lvl msg} {
+	puts stderr "$lvl: $msg"
+}
+
+set test_cleanup	{}
+foreach impl {tcl c} {
+	unset -nocomplain saved_accelerators
+
+	if {[info exists ::pgwire::accelerators]} {set saved_accelerators $::pgwire::accelerators}
+
+	set ::pgwire::accelerators			[expr {$impl eq "c"}]
+
+	# common -setup and -cleanup <<<
+	set commonargs	[list -setup {
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure "application_name $::testname"
+		pg allrows {create temporary table if not exists copy_from_test (id serial, name text)}
+		pg allrows {truncate copy_from_test}
+	} -cleanup {
+		pg allrows {drop table if exists copy_from_test}
+		eval $test_cleanup
+		if {[info object isa object pg]} {rename pg {}}
+		unset -nocomplain dbchan
+	}]
+	#>>>
+
+	set desc	{$impl implementation}
+
+	test copy_from_${impl}-1.1 "Copy from, format text, [subst $desc]" {*}$commonargs -body { #<<<
+		set test_cleanup {unset -nocomplain h i count sum}
+		#chan push $dbchan ::pgwire::tapchan
+
+		pg copy_from h {
+			copy copy_from_test (id, name) from stdin
+		} {
+			for {set i 0} {$i < 1000} {incr i} {
+				puts $h "$i\tname $i"
+			}
+		}
+		pg vars {
+			select
+				count(*) as count,
+				sum(id) as sum
+			from
+				copy_from_test
+		}
+		list $count $sum
+	} -result [list 1000 [expr {(1000*(1000-1))/2}]]
+	#>>>
+	test copy_from_${impl}-1.2 "Copy from, format text, too many columns, [subst $desc]" {*}$commonargs -body { #<<<
+		set test_cleanup {unset -nocomplain h i}
+		#chan push $dbchan ::pgwire::tapchan
+
+		pg copy_from h {
+			copy copy_from_test (name) from stdin
+		} {
+			for {set i 0} {$i < 1000} {incr i} {
+				puts $h "$i\tname $i"
+			}
+		}
+	} -match glob -returnCodes error -result {Postgres error: extra data after last expected column} -errorCode {PGWIRE ErrorResponse ERROR 22P04 *}
+	#>>>
+	test copy_from_${impl}-1.3 "Copy from, format text, too few columns, [subst $desc]" {*}$commonargs -body { #<<<
+		set test_cleanup {unset -nocomplain h i}
+		#chan push $dbchan ::pgwire::tapchan
+
+		pg copy_from h {
+			copy copy_from_test (id, name) from stdin
+		} {
+			for {set i 0} {$i < 1000} {incr i} {
+				puts $h "$i"
+			}
+		}
+	} -match glob -returnCodes error -result {Postgres error: missing data for column "name"} -errorCode {PGWIRE ErrorResponse ERROR 22P04 *}
+	#>>>
+	test copy_from_${impl}-1.4 "Copy from, format text, bad, [subst $desc]" {*}$commonargs -body { #<<<
+		set test_cleanup {unset -nocomplain h i}
+		#chan push $dbchan ::pgwire::tapchan
+
+		pg copy_from h {
+			copy copy_from_test (id, name) from stdin
+		} {
+			for {set i 0} {$i < 1000} {incr i} {
+				puts $h "bad $i"
+			}
+		}
+	} -match glob -returnCodes error -result {Postgres error: invalid input syntax for type integer: "bad 0"} -errorCode {PGWIRE ErrorResponse ERROR 22P02 *}
+	#>>>
+	test copy_from_${impl}-2.1 "Copy from, format text, script throws error, [subst $desc]" {*}$commonargs -body { #<<<
+		set test_cleanup {unset -nocomplain h i r o}
+		#chan push $dbchan ::pgwire::tapchan
+
+		list [catch {
+				pg copy_from h {
+					copy copy_from_test (id, name) from stdin
+				} {
+					for {set i 0} {$i < 1000} {incr i} {
+						puts $h "$i\tname $i"
+						if {$i == 500} {throw [list pgwire $::testname] bang}
+					}
+				}
+			} r o] \
+			$r \
+			[dict get $o -errorcode] \
+			[pg allrows {
+				select
+					count(*) as count,
+					sum(id) as sum
+				from
+					copy_from_test
+			}]
+	} -result [list 1 bang [list pgwire copy_from_${impl}-2.1] {{count 0}}]
+	#>>>
+
+	if {[info exists saved_accelerators]} {
+		set ::pgwire::accelerators $saved_accelerators
+	} else {
+		unset -nocomplain ::pgwire::accelerators
+	}
+}
+
+unset -nocomplain saved_accelerators impl commonargs desc test_cleanup
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

@@ -30,13 +30,15 @@ apply {{} {
 	}
 }}
 namespace eval ::pgwire { #<<<
-	if {[info commands ::ns_log] ne ""} {
-		proc log {lvl msg} {
-			ns_log $lvl $msg
-		}
-	} else {
-		proc log {lvl msg} {
-			puts $msg
+	if {[info commands ::pgwire::log] eq ""} {
+		if {[info commands ::ns_log] ne ""} {
+			proc log {lvl msg} {
+				ns_log $lvl $msg
+			}
+		} else {
+			proc log {lvl msg} {
+				puts $msg
+			}
 		}
 	}
 
@@ -106,7 +108,7 @@ namespace eval ::pgwire { #<<<
 
 		proc initialize {chan mode} { #<<<
 			::pgwire::log notice "pgwire tapchan $chan initialize $mode"
-			return {initialize finalize read write flush drain clean}
+			return {initialize finalize read write flush drain clear}
 		}
 
 		#>>>
@@ -172,6 +174,38 @@ namespace eval ::pgwire { #<<<
 
 		#>>>
 	}
+
+	namespace eval copy_from { # Stacked channel implementation for streaming COPY FROM data to the backend <<<
+		namespace export *
+		namespace ensemble create -prefixes no -map {
+			initialize		initialize
+			read			_read
+			write			write
+		}
+
+		proc initialize {chan mode} { #<<<
+			#::pgwire::log notice "pgwire copy_from $chan initialize $mode"
+			return {initialize finalize read write}
+		}
+
+		#>>>
+		proc _read {chan bytes} { #<<<
+			# Read is transparent
+			set bytes
+		}
+
+		#>>>
+		proc write {chan bytes} { #<<<
+			#::pgwire::log debug "pgwire copy_from $chan send [string length $bytes] bytes with CopyData"
+			# Wrap chunk in a CopyData message
+			binary format aIa* d [expr {[string length $bytes]+4}] $bytes
+		}
+
+		#>>>
+		proc finalize chan {}
+	}
+
+	#>>>
 
 	proc callframes args { #<<<
 		::parse_args::parse_args $args {
@@ -2449,6 +2483,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method ErrorResponse fields { #<<<
+		#::pgwire::log debug "ErrorResponse: $fields"
 		if {[dict exists $fields SeverityNL]} {
 			set severity	[dict get $fields SeverityNL]
 		} else {
@@ -2947,6 +2982,8 @@ oo::class create ::pgwire {
 					}
 
 					R - E - S - K - C - D - T - t - 1 - 2 - n - s {
+						#::pgwire::log notice "Eating $msgtype message while waiting for Sync"
+						#if {$msgtype eq "E"} {my default_message_handler $msgtype $len}
 						# Eat these while waiting for the Sync response
 						if {$len > 0} {read $socket $len}
 						if {[eof $socket]} {my connection_lost}
@@ -4854,6 +4891,175 @@ oo::class create ::pgwire {
 					my skip_to_sync
 				}
 			}
+		}
+	}
+
+	#>>>
+	method copy_from {chanvar sql script} { #<<<
+		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
+		upvar 1 $chanvar chan
+
+
+		my buffer_nesting
+
+		set retries	1
+		while 1 {
+			try {
+				set retry_armed	1
+				set stmt_info	[my prepare_extended_query $sql]
+				dict with stmt_info {}
+				# Sets:
+				#	- $stmt_name: the name of the prepared statement (as known to the server)
+				#	- $field_names:	the result column names and the local variables they are unpacked into
+				#	- $build_params: script to run to gather the input params
+				#	- $columns: a list of column names (can contain duplicates)
+				#	- $heat: how frequently this prepared statement has been used recently, relative to others
+				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+				#	- $delims: for each column, the array string format element delimiter (blank if not array type)
+
+				try $build_params on ok parameters {}
+
+				set enc_stmt	[encoding convertto $tcl_encoding $stmt_name]
+				set enc_portal	""
+				set bindmsg		$enc_portal\u0$enc_stmt\u0$parameters$rformats
+				set executemsg	$enc_portal\u0
+
+				# Bind statment $stmt_name, portal $portal_name
+				# Execute $max_rows_per_batch
+				puts -nonewline $socket [binary format \
+					{ \
+						aIa* \
+						aIa*I \
+					} \
+						B [+ 4 [string length $bindmsg]] $bindmsg \
+						E [+ 8 [string length $executemsg]] $executemsg 0 \
+				]
+				flush $socket
+				set ready_for_query	0
+
+				# Bind responses <<<
+				while 1 {
+					if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
+					incr len -4	;# len includes itself
+					#if {[info exists rtt_start]} {
+					#	::pgwire::log notice "server RTT: [format %.6f [expr {([clock microseconds] - $rtt_start)/1e6}]]"
+					#}
+					# msgtype 2: BindComplete
+					if {$msgtype eq 2} break else {my default_message_handler $msgtype $len}
+				}
+				#>>>
+
+				# Wait for CopyInResponse <<<
+				while 1 {
+					if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
+					incr len -4	;# len includes itself
+					# msgtype G: CopyInResponse
+					if {$msgtype eq "G"} break else {my default_message_handler $msgtype $len}
+				}
+				binary scan [read $socket $len] cuSS* is_binary columns col_fmt
+				if {[eof $socket]} {my connection_lost}
+				# TODO: do something with this info - expose to the caller with an alias arg?
+				#::pgwire::log debug "CopyInResponse: is_binary: $is_binary, columns: $columns, col_fmt: $col_fmt"
+				#>>>
+
+				set retry_armed		0	;# Once we start sending data, don't handle the stale prepared statement case
+
+				set chan	[chan push $socket ::pgwire::copy_from]
+				try {
+					uplevel 1 $script
+				} finally {
+					if {$socket in [chan names]} {
+						chan pop $socket
+					}
+				}
+
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				my close_statement $stmt_name
+				dict unset prepared $sql
+				if {$retry_armed && [incr retries -1] >= 0} {
+					continue
+				}
+				return -options $options $errmsg
+
+			} on error {errmsg options} {
+				#::pgwire::log notice "error: [dict get $options -errorinfo], socket exists: [info exists socket], chan exists: [expr {$socket in [chan names]}]"
+				if {[info exists socket]} {
+					# Send CopyFail
+					set msg		[encoding convertto utf-8 "Tcl exception"]\u0		;# prevent sensitive data in $errmsg from leaking to server logs
+					puts -nonewline $socket [binary format aIa* f [expr {[string length $msg]+4}] $msg]
+					if {!$sync_outstanding} {
+						puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+					}
+					flush $socket
+
+					# Read until ErrorResponse
+					while 1 {
+						if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
+						#::pgwire::log notice "waiting for ErrorResponse, got msgtype: $msgtype, len: $len"
+						incr len -4	;# len includes itself
+						# msgtype E: ErrorResponse
+						if {$msgtype eq "E"} break else {my default_message_handler $msgtype $len}
+					}
+					set data	[read $socket $len]
+					if {[eof $socket]} {my connection_lost}
+
+					set i	0
+					set fields	{}
+					while {$i < [string length $data]} {
+						set field_type	[string index $data $i]
+						if {$field_type eq "\u0"} break
+						incr i
+
+						set idx	[string first "\u0" $data $i]
+						if {$idx == -1} {
+							#::pgwire::log notice "No c-string found in [regexp -all -inline .. [binary encode hex $data]]"
+							throw unterminated_string "No null terminator found"
+						}
+						set string	[string range $data $i [- $idx 1]]
+						set i	[+ $idx 1]
+
+						# SeverityNL:	Same as Severity, but not localized
+						lappend fields	[dict get $errorfields $field_type] $string
+					}
+
+					#::pgwire::log warning "ErrorResponse: $fields"
+					# Ignore the error response fields as we're already handling an error that is likely the root cause
+				}
+				return -options $options $errmsg
+			} on ok {} {
+				# Send CopyDone
+				puts -nonewline $socket c\u0\u0\u0\u4
+				if {!$sync_outstanding} {
+					puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+				}
+				flush $socket
+
+				# Read until CommandComplete or ErrorResponse
+				while 1 {
+					if {[binary scan [read $socket 5] aIu msgtype len] != 2} {my connection_lost}
+					incr len -4	;# len includes itself
+					# msgtype C: CommandComplete
+					if {$msgtype eq "C"} {
+						set data	[read $socket $len]
+						set i		0
+						return [my _get_string $data i]
+					} else {
+						# ErrorResponse will throw an exception terminating this loop
+						my default_message_handler $msgtype $len
+					}
+				}
+			} finally {
+				#::pgwire::log notice "copy_from finally, socket exists: [info exists socket], chan exists: [expr {$socket in [chan names]}], sync_outstanding: $sync_outstanding"
+				if {[info exists socket] && $sync_outstanding} {
+					my skip_to_sync
+				}
+			}
+
+			break
 		}
 	}
 
