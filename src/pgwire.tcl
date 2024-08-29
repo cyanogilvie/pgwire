@@ -430,14 +430,14 @@ namespace eval ::pgwire { #<<<
 	set accel_ops	[apply {{} {
 		set res	{}
 
-		set opargs	{const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], struct interp_cx* l, Tcl_Obj* delim}
+		set opargs	{const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], Tcl_Obj* delim}
 		append res "typedef void (col_op)($opargs);\n"
 
 		set opnames	{}
 		foreach {format add_column_key handle_null} {
 			lists {
 			} {
-				replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+				replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
 			}
 
 			dicts {
@@ -449,19 +449,19 @@ namespace eval ::pgwire { #<<<
 			dicts_no_nulls {
 				replace_tclobj(rowv + c->rs++, c->cols[colnum]);
 			} {
-				replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+				replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
 			}
 
 			vars {
-				replace_tclobj(&val, Tcl_ObjSetVar2(l->interp, c->cols[colnum], NULL, val, TCL_LEAVE_ERR_MSG));
+				replace_tclobj(&val, Tcl_ObjSetVar2(g_interp, c->cols[colnum], NULL, val, TCL_LEAVE_ERR_MSG));
 				if (val == NULL) {
 					// TODO: how best to handle this?
-					Tcl_BackgroundException(l->interp, TCL_ERROR);
+					Tcl_BackgroundException(g_interp, TCL_ERROR);
 				}
 				c->rs == -1;	// Signal that we don't set a rowvar
 				return;
 			} {
-				Tcl_UnsetVar(l->interp, Tcl_GetString(c->cols[colnum]), 0);
+				Tcl_UnsetVar(g_interp, Tcl_GetString(c->cols[colnum]), 0);
 				c->rs == -1;	// Signal that we don't set a rowvar
 				return;
 			}
@@ -469,7 +469,7 @@ namespace eval ::pgwire { #<<<
 			foreach {type makeval} {
 				bool	{
 					// TODO: check that this is in fact 1 byte
-					replace_tclobj(&val, l->lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE]);
+					replace_tclobj(&val, lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE]);
 				}
 				int1	{replace_tclobj(&val, Tcl_NewIntObj(*(char*)(*data)));}
 				int2	{replace_tclobj(&val, Tcl_NewIntObj(bswap_16(*(int16_t*)(*data))));}
@@ -497,7 +497,7 @@ namespace eval ::pgwire { #<<<
 						Tcl_DString		utf8;
 
 						if (collen == 0) {
-							replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
 						} else {
 							Tcl_DStringInit(&utf8);
 							Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
@@ -590,7 +590,7 @@ namespace eval ::pgwire { #<<<
 										Tcl_Obj*		val = NULL;	// Intentionally shadows val in the outer scope
 
 										if (collen == -1) {
-											replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+											replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
 											*data += 4;
 										} else {
 											*data += 4;
@@ -653,7 +653,7 @@ namespace eval ::pgwire { #<<<
 
 					if (collen != -1) {
 						if (collen == 0) {
-							replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
 						} else {
 							Tcl_DString		utf8;
 							Tcl_DString		res;
@@ -837,7 +837,7 @@ namespace eval ::pgwire { #<<<
 failed:
 							// Couldn't parse array format, treat it as a NULL (no way to signal errors from this context)
 							fprintf(stderr, "Failed to parse postgres array format: (%*s)\n", str_len, str);
-							replace_tclobj(&val, l->lit[PGWIRE_LIT_BLANK]);
+							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
 done:
 							Tcl_DStringFree(&utf8);
 							Tcl_DStringFree(&res);
@@ -942,25 +942,40 @@ done:
 		#include <string.h>
 		#include <stdlib.h>
 
-		/*
-		Tcl_Interp*	g_interp = NULL;
+		#define PGWIRE_LITS \
+			X( BLANK,	"" ) \
+			X( ONE,		"1" ) \
+			X( ZERO,	"0" ) \
+			X( TRUE,	"1" ) \
+			X( FALSE,	"0" )
+		enum {
+			#define X(sym, str) PGWIRE_LIT_##sym,
+			PGWIRE_LITS
+			#undef X
+			PGWIRE_LIT_SIZE
+		};
+		const char* lit_str[PGWIRE_LIT_SIZE] = {
+			#define X(sym, str) str,
+			PGWIRE_LITS
+			#undef X
+		};
+		static Tcl_Obj*	lit[PGWIRE_LIT_SIZE] = {0};
+
+		Tcl_Interp*		g_interp = NULL;
 
 		INIT {
-			Tcl_Eval(interp,
-				"puts \"Init pgwire cdef, tid: [file tail [file readlink /proc/thread-self]], [thread::id], name: [if {[info exists ::ns_shim::interp_name]} {set ::ns_shim::interp_name}][if {[info exists ::ns_shim::interp_name_suffix]} {string cat / $::ns_shim::interp_name_suffix}]\"");
-			Tcl_Preserve(g_interp = interp);
+			g_interp = interp;
+			for (size_t i=0; i<PGWIRE_LIT_SIZE; i++) replace_tclobj(&lit[i], Tcl_NewStringObj(lit_str[i], -1));
+			//Tcl_Eval(interp,
+			//	"puts \"Init pgwire cdef, tid: [file tail [file readlink /proc/thread-self]], [thread::id], name: [if {[info exists ::ns_shim::interp_name]} {set ::ns_shim::interp_name}][if {[info exists ::ns_shim::interp_name_suffix]} {string cat / $::ns_shim::interp_name_suffix}]\"");
 			return TCL_OK;
 		}
 
 		RELEASE {
-			fprintf(stderr, "pgwire cdef release\n");
-			if (TCL_OK != Tcl_Eval(g_interp, "puts \"pgwire cdef release, callframes: [callframes_fingerprint 0]\"")) {
-				fprintf(stderr, "Eval error: %s\n", Tcl_GetString(Tcl_GetObjResult(g_interp)));
-			}
-			Tcl_Release(g_interp); g_interp = NULL;
-			//Tcl_GetString((Tcl_Obj*)NULL);
+			//fprintf(stderr, "pgwire cdef release\n");
+			g_interp = NULL;
+			for (size_t i=0; i<PGWIRE_LIT_SIZE; i++) replace_tclobj(&lit[i], NULL);
 		}
-		*/
 
 		struct column_cx {
 			Tcl_Encoding	encoding;
@@ -969,28 +984,6 @@ done:
 		};
 
 		//@end=c@@begin=c@
-
-		enum {
-			PGWIRE_LIT_BLANK,
-			PGWIRE_LIT_ONE,
-			PGWIRE_LIT_ZERO,
-			PGWIRE_LIT_TRUE,
-			PGWIRE_LIT_FALSE,
-
-			PGWIRE_LIT_SIZE
-		};
-		const char* lit_vals[] = {
-			"",
-			"1",
-			"0",
-			"1",
-			"0"
-		};
-
-		struct interp_cx {
-			Tcl_Interp*	interp;
-			Tcl_Obj*	lit[PGWIRE_LIT_SIZE];
-		};
 
 		%accel_ops%
 		//#line %line%
@@ -1002,7 +995,6 @@ done:
 			Tcl_Obj**			datarowv;
 			int					colcount;
 			Tcl_Obj**			rowv;
-			struct interp_cx*	l;
 			Tcl_Obj*			row;
 			Tcl_Obj*			rowvar;
 			Tcl_Obj*			script;
@@ -1219,42 +1211,6 @@ done:
 			}
 		}
 		//>>>
-		void free_interp_cx(ClientData cdata, Tcl_Interp* interp) //<<<
-		{
-			struct interp_cx*	l = (struct interp_cx*)cdata;
-			int					i;
-
-			if (l) {
-				l->interp = NULL;
-				for (i=0; i<PGWIRE_LIT_SIZE; i++) {
-					if (l->lit[i]) {
-						Tcl_DecrRefCount(l->lit[i]);
-						l->lit[i] = NULL;
-					}
-				}
-
-				ckfree(l); l = NULL;
-			}
-		}
-
-		//>>>
-		struct interp_cx* get_interp_cx(Tcl_Interp* interp) //<<<
-		{
-			struct interp_cx*	l = Tcl_GetAssocData(interp, "pgwire", NULL);
-			int					i;
-
-			if (l == NULL) {
-				l = ckalloc(sizeof *l);
-				l->interp = interp;
-				for (i=0; i<PGWIRE_LIT_SIZE; i++)
-					Tcl_IncrRefCount(l->lit[i] = Tcl_NewStringObj(lit_vals[i], -1));
-				Tcl_SetAssocData(interp, "pgwire", free_interp_cx, l);
-			}
-
-			return l;
-		}
-
-		//>>>
 		static void free_foreach_state(struct foreach_state* s) //<<<
 		{
 			int		i;
@@ -1283,8 +1239,6 @@ done:
 						replace_tclobj(&s->rowv[i], NULL);
 					ckfree(s->rowv); s->rowv = NULL;
 				}
-
-				s->l = NULL;
 
 				if (s->row) {
 					Tcl_DecrRefCount(s->row); s->row = NULL;
@@ -1326,7 +1280,6 @@ done:
 			Tcl_Obj*			script = NULL;
 			Tcl_Obj**			colv = NULL;
 			int					colc;
-			struct interp_cx*	l = get_interp_cx(interp);
 			Tcl_Obj*			rowvar = NULL;
 			Tcl_Encoding		encoding;
 			int					i;
@@ -1370,7 +1323,6 @@ done:
 			s->colcount = colc;
 			s->rowv = ckalloc(colc*2 * sizeof(Tcl_Obj*));
 			memset(s->rowv, 0, colc*2 * sizeof(Tcl_Obj*));
-			s->l = l;
 			//s->row = NULL;
 			Tcl_IncrRefCount(s->rowvar = rowvar);
 			Tcl_IncrRefCount(s->script = script);
@@ -1424,7 +1376,7 @@ done:
 
 				//fprintf(stderr, "-> c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, s->col.rs, s->rowv[s->col.rs], s->col.rs+1, s->rowv[s->col.rs+1]);
 				p += 4;
-				s->ops[c](c, collen, &p, &s->col, s->rowv, s->l, s->delimv[c]);
+				s->ops[c](c, collen, &p, &s->col, s->rowv, s->delimv[c]);
 				//fprintf(stderr, "<- c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, old_rs, s->rowv[old_rs], old_rs+1, s->rowv[old_rs+1]);
 			}
 
@@ -1492,7 +1444,6 @@ done:
 			Tcl_Obj**			colv = NULL;
 			int					colc;
 			Tcl_Obj*			row = NULL;
-			struct interp_cx*	l = get_interp_cx(interp);
 			Tcl_Obj*			rowvar = NULL;
 			Tcl_Encoding		encoding;
 			col_op**			ops = NULL;
@@ -1544,7 +1495,7 @@ done:
 
 						//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
 						p += 4;
-						ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
+						ops[c](c, collen, &p, &col, rowv, delimv[c]);
 					}
 
 					if (col.rs >= 0) {
@@ -1615,7 +1566,6 @@ done:
 			int					datarowc;
 			Tcl_Obj**			colv = NULL;
 			int					colc;
-			struct interp_cx*	l = get_interp_cx(interp);
 			Tcl_Encoding		encoding;
 			Tcl_Obj*			rows = NULL;
 			col_op**			ops = NULL;
@@ -1672,7 +1622,7 @@ done:
 						const int	collen = bswap_32(*(int32_t*)p);
 
 						p += 4;
-						ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
+						ops[c](c, collen, &p, &col, rowv, delimv[c]);
 					}
 
 					if (col.rs >= 0)
@@ -1729,7 +1679,6 @@ done:
 			int					retcode = TCL_OK;
 			Tcl_Obj**			colv = NULL;
 			int					colc;
-			struct interp_cx*	l = get_interp_cx(interp);
 			Tcl_Encoding		encoding;
 			unsigned char*		data = NULL;
 			int					data_len;
@@ -1774,7 +1723,7 @@ done:
 
 					//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
 					p += 4;
-					ops[c](c, collen, &p, &col, rowv, l, delimv[c]);
+					ops[c](c, collen, &p, &col, rowv, delimv[c]);
 				}
 
 				// The "vars" op handler sets cols.rs to -1 to signal that we don't have a rowvar to set
@@ -1833,10 +1782,285 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 		} {
 			proc $cmd args "variable accel; tailcall ::jitc::capply \$accel [list $c_cmd] {*}\$args"
 		}
+
+		# Accelerated SQL tokenizer <<<
+		variable tokenize_cdef [list {*}{
+			options		{-Wall -Werror -g -std=gnu17}
+			filter		{jitc::re2c -W --case-ranges --no-debug-info}
+			code {
+				Tcl_Obj*	g_lit_id = NULL;
+
+				INIT {
+					replace_tclobj(&g_lit_id, Tcl_NewStringObj("id", 2));
+					return TCL_OK;
+				}
+
+				RELEASE {
+					replace_tclobj(&g_lit_id, NULL);
+				}
+
+				OBJCMD(tokenize) {
+					int			code = TCL_OK;
+					Tcl_Obj*	res = NULL;
+					Tcl_Obj*	bindvar = NULL;
+					Tcl_Obj*	val = NULL;
+					Tcl_Obj*	bindvars = NULL;
+					Tcl_Obj*	bindslots = NULL;
+					Tcl_Obj*	tmp = NULL;
+					Tcl_Obj*	tmp2 = NULL;
+					int			slotseq = 0;
+					int			standard_conforming_strings = 0;
+					static const char*	modes[] = {
+						"interpolate",
+						"bindparse",
+						NULL
+					};
+					int	bindparse;
+
+					enum {A_cmd, A_MODE, A_SQL, A_STDSTR, A_args, A_objc};
+					const int	A_DICT = A_args;
+					CHECK_RANGE_ARGS_LABEL(finally, code, "mode sql standard_conforming_strings ?dict?");
+					TEST_OK_LABEL(finally, code, Tcl_GetBooleanFromObj(interp, objv[A_STDSTR], &standard_conforming_strings));
+					TEST_OK_LABEL(finally, code, Tcl_GetIndexFromObj(interp, objv[A_MODE], modes, "mode", TCL_EXACT, &bindparse));
+
+					if (bindparse) {
+						replace_tclobj(&bindvars, Tcl_NewListObj(0, NULL));
+						replace_tclobj(&bindslots, Tcl_NewDictObj());
+					}
+					replace_tclobj(&res, Tcl_NewObj());
+					const char*	sql = Tcl_GetString(objv[A_SQL]);
+					const char* cur = sql;
+					const char*	tok = cur;
+					const char* mar;
+					for (;;) {
+						const char	*b1, *b2;
+						/*!stags:re2c:sql format = "const char* @@;"; */
+						/*!local:re2c:sql
+							re2c:define:YYCTYPE		= char;
+							re2c:define:YYCURSOR	= cur;
+							re2c:define:YYMARKER	= mar;
+							re2c:yyfill:enable		= 0;
+							re2c:tags				= 1;
+
+							end		= [\x00];
+							any		= [^] \ end;
+							esc		= [\\];
+							dquote	= ["];
+							squote	= ['];
+							dqpair	= esc any;
+							sqpair	= esc any | squote squote;
+							schar	= any \ squote | sqpair;
+							dchar	= any \ dquote | dqpair;
+							sqlit	= squote schar* squote;
+							dqlit	= dquote dchar* dquote;
+							comment	= "--" [^\n\x00]*;
+							pgcast	= "::";
+							bindvar	= [_a-zA-Z0-9]+;
+							ign		= comment
+									| sqlit
+									| dqlit
+									| pgcast;
+
+							end		{ Tcl_AppendToObj(res, tok, (int)(cur-tok-1)); break; }
+							ign		{ continue; }
+							*		{ continue; }
+
+							":" @b1 bindvar @b2 {
+								Tcl_AppendToObj(res, tok, (int)(b1-1-tok));
+								tok = b2;
+								replace_tclobj(&bindvar, Tcl_NewStringObj(b1, (int)(b2-b1)));
+								goto interpolate_bindvar;
+							}
+						*/
+
+					interpolate_bindvar:
+						if (bindparse) {
+							Tcl_Obj*	loan = NULL;
+							TEST_OK_LABEL(finally, code, Tcl_DictObjGet(interp, bindslots, bindvar, &loan));
+							if (loan) {
+								TEST_OK_LABEL(finally, code, Tcl_DictObjGet(interp, loan, g_lit_id, &loan));
+								replace_tclobj(&tmp, loan);
+							} else {
+								replace_tclobj(&tmp, Tcl_NewIntObj(++slotseq));
+								replace_tclobj(&tmp2, Tcl_NewDictObj());
+								TEST_OK_LABEL(finally, code, Tcl_DictObjPut(interp, tmp2, g_lit_id, tmp));
+								TEST_OK_LABEL(finally, code, Tcl_DictObjPut(interp, bindslots, bindvar, tmp2));
+								TEST_OK_LABEL(finally, code, Tcl_ListObjAppendElement(interp, bindvars, bindvar));
+							}
+							Tcl_AppendToObj(res, "$", 1);
+							Tcl_AppendObjToObj(res, tmp);
+							continue;
+						}
+
+						if (A_DICT < objc) {
+							Tcl_Obj*	loan = NULL;
+							TEST_OK_LABEL(finally, code, Tcl_DictObjGet(interp, objv[A_DICT], bindvar, &loan));
+							replace_tclobj(&val, loan);
+						} else {
+							replace_tclobj(&val, Tcl_ObjGetVar2(interp, bindvar, NULL, 0));
+						}
+
+						if (!val) {
+							Tcl_AppendToObj(res, "NULL", 4);
+							continue;
+						}
+
+						Tcl_AppendToObj(res, "'", 1);
+						const char*	valstr = Tcl_GetString(val);
+						const char* valcur = valstr;
+						const char*	valmar;
+						for (;;) {
+							const char*	valtok = valcur;
+							/*!local:re2c:val
+								re2c:define:YYCTYPE		= char;
+								re2c:define:YYCURSOR	= valcur;
+								re2c:define:YYMARKER	= valmar;
+								re2c:yyfill:enable		= 0;
+
+								end		= [\x00];
+								ok		= [^'\\] \ end;
+
+								end		{ break; }
+								ok+		{ Tcl_AppendToObj(res, valtok, (int)(valcur-valtok)); continue; }
+								"'"		{ Tcl_AppendToObj(res, "''", 2); continue; }
+								"\\"	{ Tcl_AppendToObj(res, "\\\\", standard_conforming_strings ? 1 : 2); continue; }
+								*		{ Tcl_AppendToObj(res, tok, 1); continue; }
+							*/
+						}
+						Tcl_AppendToObj(res, "'", 1);
+					}
+
+					if (bindparse)
+						replace_tclobj(&res, Tcl_NewListObj(2, (struct Tcl_Obj*[]){bindslots, res}));
+
+					Tcl_SetObjResult(interp, res);
+
+				finally:
+					replace_tclobj(&res, NULL);
+					replace_tclobj(&bindvar, NULL);
+					replace_tclobj(&bindvars, NULL);
+					replace_tclobj(&bindslots, NULL);
+					replace_tclobj(&val, NULL);
+					replace_tclobj(&tmp, NULL);
+					replace_tclobj(&tmp2, NULL);
+					return code;
+				}
+			}
+		}]
+		#>>>
+		proc interpolate args "variable tokenize_cdef; uplevel 1 \[list ::jitc::capply \$tokenize_cdef tokenize interpolate {*}\$args\]"
+		proc bindparse args "variable tokenize_cdef; uplevel 1 \[list ::jitc::capply \$tokenize_cdef tokenize bindparse {*}\$args\]"
 		set accelerators	1
 	} ::pgwire}
 } else {
 	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], env block: [info exists ::env(PGWIRE_BLOCK_ACCELERATORS)], jitc versions: ([package versions jitc])"
+	namespace eval ::pgwire {
+		proc interpolate {sql standard_conforming_strings args} { #<<<
+			parse_args::parse_args $args {
+				dict	{}
+			}
+			package require tdbc
+			set quoted	{}
+			foreach tok [tdbc::tokenize $sql] {
+				switch -glob -- $tok {
+					::* {
+						# Prevent PG casts from looking like params
+						append quoted	$tok
+					}
+
+					:* - $* - @* {
+						set name	[string range $tok 1 end]
+						if {[regexp {^[0-9]+$} $name]} {
+							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+							# to be parameters from us, but refer to the argument of functions).  Not
+							# watertight, but would require a SQL-dialect aware parser to do properly.
+							append quoted $tok
+							continue
+						}
+
+						if {[info exists dict]} {
+							set exists	[dict exists $dict $name]
+						} else {
+							set exists	[uplevel 1 [list info exists $name]]
+						}
+						if {$exists} {
+							if {[info exists dict]} {
+								set value	[dict get $dict $name]
+							} else {
+								set value	[uplevel 1 [list set $name]]
+							}
+							if {$standard_conforming_strings} {
+								append quoted	' [string map {' ''} $value] '
+							} else {
+								append quoted	' [string map {' '' \\ \\\\} $value] '
+							}
+						} else {
+							append quoted	NULL
+						}
+					}
+
+					; {
+						append quoted $tok
+					}
+
+					default {
+						append quoted $tok
+					}
+				}
+			}
+			set quoted
+		}
+
+		#>>>
+		proc bindparse {sql -} { #<<<
+			set seq				0
+			set params_assigned {}
+			set compiled		{}
+
+			package require tdbc
+			foreach tok [tdbc::tokenize $sql] {
+				switch -glob -- $tok {
+					::* {
+						# Prevent PG casts from looking like params
+						append compiled $tok
+					}
+
+					:* - $* - @* {
+						set name	[string range $tok 1 end]
+						if {[regexp {^[0-9]+$} $name]} {
+							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
+							# to be parameters from us, but refer to the argument of functions).  Not
+							# watertight, but would require a SQL-dialect aware parser to do properly.
+							append compiled $tok
+							continue
+						}
+
+						if {![dict exists $params_assigned $name]} {
+							set id	[incr seq]
+							dict set params_assigned $name id		$id
+						} else {
+							set id	[dict get $params_assigned $name id]
+						}
+
+						append compiled \$$id
+					}
+					; {
+						#error "Multiple statements are not supported"
+						# These may be within a function definition or similar.  Build it here and let
+						# the backend sort out whether it will accept it
+						append compiled $tok
+					}
+					default {
+						append compiled $tok
+					}
+				}
+			}
+
+			list $params_assigned $compiled
+		}
+
+		#>>>
+	}
 }
 
 oo::class create ::pgwire {
@@ -3224,42 +3448,10 @@ oo::class create ::pgwire {
 		}
 		set busy_sql	$sql
 		upvar 1 $rowdict row
-		package require tdbc
-		set quoted	{}
-		foreach tok [tdbc::tokenize $sql] {
-			switch -glob -- $tok {
-				::* {
-					# Prevent PG casts from looking like params
-					append quoted	$tok
-				}
-
-				:* - $* - @* {
-					set name	[string range $tok 1 end]
-					if {[regexp {^[0-9]+$} $name]} {
-						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-						# to be parameters from us, but refer to the argument of functions).  Not
-						# watertight, but would require a SQL-dialect aware parser to do properly.
-						append quoted $tok
-						continue
-					}
-					set exists	[uplevel 1 [list info exists $name]]
-					if {$exists} {
-						set value	[uplevel 1 [list set $name]]
-						append quoted	[my val $value]
-					} else {
-						append quoted	NULL
-					}
-				}
-
-				; {
-					append quoted $tok
-				}
-
-				default {
-					append quoted $tok
-				}
-			}
-		}
+		set quoted	[uplevel 1 [list ::pgwire::interpolate $sql [expr {
+			[dict exists $server_params standard_conforming_strings] &&
+			[dict get $server_params standard_conforming_strings] eq "on"
+		}]]]
 
 		my Query $quoted
 		flush $socket
@@ -3289,42 +3481,10 @@ oo::class create ::pgwire {
 		}
 		set busy_sql	$sql
 		upvar 1 $rowlist row
-		package require tdbc
-		set quoted	{}
-		foreach tok [tdbc::tokenize $sql] {
-			switch -glob -- $tok {
-				::* {
-					# Prevent PG casts from looking like params
-					append quoted	$tok
-				}
-
-				:* - $* - @* {
-					set name	[string range $tok 1 end]
-					if {[regexp {^[0-9]+$} $name]} {
-						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-						# to be parameters from us, but refer to the argument of functions).  Not
-						# watertight, but would require a SQL-dialect aware parser to do properly.
-						append quoted $tok
-						continue
-					}
-					set exists	[uplevel 1 [list info exists $name]]
-					if {$exists} {
-						set value	[uplevel 1 [list set $name]]
-						append quoted	[my val $value]
-					} else {
-						append quoted	NULL
-					}
-				}
-
-				; {
-					append quoted $tok
-				}
-
-				default {
-					append quoted $tok
-				}
-			}
-		}
+		set quoted	[uplevel 1 [list ::pgwire::interpolate $sql [expr {
+			[dict exists $server_params standard_conforming_strings] &&
+			[dict get $server_params standard_conforming_strings] eq "on"
+		}]]]
 
 		my Query $quoted
 		flush $socket
@@ -3448,49 +3608,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method tokenize sql { # Parse the bind variables from the SQL <<<
-		set seq				0
-		set params_assigned {}
-		set compiled		{}
-
-		foreach tok [tdbc::tokenize $sql] {
-			switch -glob -- $tok {
-				::* {
-					# Prevent PG casts from looking like params
-					append compiled $tok
-				}
-
-				:* - $* - @* {
-					set name	[string range $tok 1 end]
-					if {[regexp {^[0-9]+$} $name]} {
-						# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-						# to be parameters from us, but refer to the argument of functions).  Not
-						# watertight, but would require a SQL-dialect aware parser to do properly.
-						append compiled $tok
-						continue
-					}
-
-					if {![dict exists $params_assigned $name]} {
-						set id	[incr seq]
-						dict set params_assigned $name id		$id
-					} else {
-						set id	[dict get $params_assigned $name id]
-					}
-
-					append compiled \$$id
-				}
-				; {
-					#error "Multiple statements are not supported"
-					# These may be within a function definition or similar.  Build it here and let
-					# the backend sort out whether it will accept it
-					append compiled $tok
-				}
-				default {
-					append compiled $tok
-				}
-			}
-		}
-
-		list $params_assigned $compiled
+		::pgwire::bindparse $sql 1
 	}
 
 	#>>>
@@ -3636,9 +3754,7 @@ oo::class create ::pgwire {
 		set busy_sql	$sql
 
 		if {![dict exists $prepared $sql]} { # Prepare statement <<<
-			package require tdbc
-
-			lassign [my tokenize $sql] \
+			lassign [::pgwire::bindparse $sql 1] \
 				params_assigned \
 				compiled
 
@@ -4335,7 +4451,6 @@ oo::class create ::pgwire {
 
 	#>>>
 	method allrows args { #<<<
-		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
 
 		set args	[my parse_tdbc_args $args opts]
@@ -4343,7 +4458,7 @@ oo::class create ::pgwire {
 			1 {set sqlcode [lindex $args 0]}
 			2 {lassign $args sqlcode param_values}
 			default {
-				return -code error -errorcode [concat $generalError wrongNumArgs] \
+				return -code error -errorcode [concat TDBC GENERAL_ERROR HY000 {} wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
 						 ?-option value?... ?--? sqlcode ?dictionary?"
 			}
@@ -4548,7 +4663,6 @@ oo::class create ::pgwire {
 
 	#>>>
 	method foreach args { #<<<
-		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
 
 		set args	[my parse_tdbc_args $args opts]
@@ -4556,7 +4670,7 @@ oo::class create ::pgwire {
 			3 {lassign $args row_varname sqlcode script}
 			4 {lassign $args row_varname sqlcode param_values script}
 			default {
-				return -code error -errorcode [concat $generalError wrongNumArgs] \
+				return -code error -errorcode [list TDBC GENERAL_ERROR HY000 {} wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
 						 ?-option value?... ?--? varName sqlcode ?dictionary? script"
 			}
@@ -4692,14 +4806,13 @@ oo::class create ::pgwire {
 
 	#>>>
 	method onecolumn {sql args} { #<<<
-		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
 
 		switch -exact -- [llength $args] {
 			0 {}
 			1 {set param_values	[lindex $args 0]}
 			default {
-				return -code error -errorcode [concat $generalError wrongNumArgs] \
+				return -code error -errorcode [list TDBC GENERAL_ERROR HY000 {} wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
 						 sqlcode ?dictionary? script"
 			}
@@ -5100,7 +5213,7 @@ oo::class create ::pgwire {
 		set bad	{}
 		set by_name	{}
 		dict for {sql stmt_info} $prepared {
-			lassign [my tokenize $sql] params_assigned compiled
+			lassign [::pgwire::bindparse $sql 1] params_assigned compiled
 			if {[dict exists $by_name [dict get $stmt_info stmt_name]]} {
 				::pgwire::log error "Duplicate records for statement name: [dict get $stmt_info stmt_name], old:\n[dict get $by_name [dict get $stmt_info stmt_name]]\nnew:\n$compiled"
 				set ok	0
