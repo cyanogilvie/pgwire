@@ -5188,6 +5188,7 @@ oo::class create ::pgwire {
 	method batch_results {max_rows_per_batch script} { # Enable result datarow batching for the context of this script <<<
 		set savedval	$batchsize
 		try {
+			set batchsize	$max_rows_per_batch
 			uplevel 1 $script
 		} on error {r o} - on break {r o} - on continue {r o} {
 			dict incr options -level 1

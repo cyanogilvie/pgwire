@@ -35,6 +35,7 @@ services:
         environment:
             POSTGRES_PASSWORD: insecure
             PGHOST: /run/postgresql
+            TCPDUMP: /tmp/tcpdump_
         cap_add:
             - NET_ADMIN
         working_dir: /src
