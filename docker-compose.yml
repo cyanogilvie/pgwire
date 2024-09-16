@@ -1,4 +1,3 @@
-version: "3.9"
 services:
     db:
         platform: linux/amd64
@@ -18,8 +17,11 @@ services:
             timeout: 1s
             retries: 1
             start_period: 1s
+        security_opt:
+          - seccomp:unconfined
         cap_add:
             - NET_ADMIN
+            - CAP_SYS_NICE
     pgwire:
         #platform: linux/arm64
         platform: linux/amd64
@@ -35,9 +37,11 @@ services:
         environment:
             POSTGRES_PASSWORD: insecure
             PGHOST: /run/postgresql
-            TCPDUMP: /tmp/tcpdump_
+        security_opt:
+          - seccomp:unconfined
         cap_add:
             - NET_ADMIN
+            - CAP_SYS_NICE
         working_dir: /src
         entrypoint: ["make"]
 volumes:

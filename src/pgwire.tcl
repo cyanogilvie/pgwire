@@ -30,7 +30,7 @@ apply {{} {
 	}
 }}
 namespace eval ::pgwire { #<<<
-	if {[info commands ::pgwire::log] eq ""} {
+	if {[llength [info commands ::pgwire::log]] == 0} {
 		if {[info commands ::ns_log] ne ""} {
 			proc log {lvl msg} {
 				ns_log $lvl $msg
@@ -40,6 +40,15 @@ namespace eval ::pgwire { #<<<
 				puts $msg
 			}
 		}
+	}
+
+	if {[llength [info commands ::pgwire::bindtap]] == 0} {
+		proc bindtap args {}
+		# receive a callback with each bind by redefining ::pgwire::bindtap {obj stmt_info parameters} {...}
+	}
+	if {[llength [info commands ::pgwire::restap]] == 0} {
+		proc restap args {}
+		# receive a callback with each bind by redefining ::pgwire::restap {obj } {...}
 	}
 
 	variable arr_fmt_cache	{}
@@ -1775,7 +1784,7 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 
 		foreach {cmd c_cmd} {
 			c_makerow2			c_makerow2
-			c_foreach_batch		c_foreach_back
+			c_foreach_batch		c_foreach_batch
 			c_foreach_batch_nr	c_foreach_batch_nr_setup
 			c_allrows_batch		c_allrows_batch
 			compile_ops			compile_ops_cmd
@@ -1951,6 +1960,295 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 		proc interpolate args "variable tokenize_cdef; uplevel 1 \[list ::jitc::capply \$tokenize_cdef tokenize interpolate {*}\$args\]"
 		proc bindparse args "variable tokenize_cdef; uplevel 1 \[list ::jitc::capply \$tokenize_cdef tokenize bindparse {*}\$args\]"
 		set accelerators	1
+
+		try {
+			package require tomcrypt 0.5.5
+			lindex [glob -nocomplain -type f -directory [file dirname [file normalize [package files tomcrypt]]] *[info sharedlibextension]] 0
+		} on ok libtomcrypt {
+			if {[file readable $libtomcrypt]} {
+				# We have tomcrypt available (and loaded), pilfer the tomcrypt primitves from its dll <<<
+				variable tc_cdef	[list define [list LIBTC "\"[string map [list \" \\\"] $libtomcrypt]\""] {*}{
+					options	{-Wall -Werror -gdwarf-5 -std=gnu17}
+					code {
+						#include <stdint.h>
+						#include <string.h>
+						#include <stdlib.h>
+
+						struct sha256_state {
+							uint64_t		length;
+							uint32_t		state[8];
+							uint32_t		curlen;
+							unsigned char	buf[64];
+						};
+
+						static Tcl_LoadHandle	libtc;
+
+						static const char* tc_syms[] = {
+							"sha256_init",
+							"sha256_process",
+							"sha256_done",
+							NULL
+						};
+						static void* procs[sizeof(tc_syms) / sizeof(tc_syms[0]) - 1] = {0};
+
+						static void (*tc_sha256_init)(struct sha256_state* md);
+						static void (*tc_sha256_process)(struct sha256_state* md, const unsigned char* in, unsigned long inlen);
+						static void (*tc_sha256_done)(struct sha256_state* md, unsigned char* hash);
+
+						INIT { //<<<
+							int			code = TCL_OK;
+							Tcl_Obj*	libpath = NULL;
+
+							replace_tclobj(&libpath, Tcl_NewStringObj(LIBTC, -1));
+							TEST_OK_LABEL(finally, code, Tcl_LoadFile(interp, libpath, tc_syms, TCL_LOAD_LAZY, procs, &libtc));
+							*(void**)(&tc_sha256_init)		= procs[0];
+							*(void**)(&tc_sha256_process)	= procs[1];
+							*(void**)(&tc_sha256_done)		= procs[2];
+
+						finally:
+							replace_tclobj(&libpath, NULL);
+							return code;
+						}
+
+						//>>>
+						RELEASE { //<<<
+							Tcl_FSUnloadFile(interp, libtc);
+						}
+
+						//>>>
+
+						static void do_hmac_sha256(const uint8_t* k_bytes, size_t k_len, const uint8_t* m, size_t m_len, uint8_t* hash) //<<<
+						{
+							struct sha256_state	md;
+							#define BLEN	64
+							#define HLEN	32
+							uint8_t	k_prime[BLEN];
+							if (k_len > BLEN) {
+								tc_sha256_init(&md);
+								tc_sha256_process(&md, k_bytes, k_len);
+								tc_sha256_done(&md, hash);
+								memcpy(k_prime, hash, HLEN);
+								memset(k_prime+HLEN, 0, BLEN-HLEN);
+							} else {
+								memcpy(k_prime, k_bytes, k_len);
+								memset(k_prime+k_len, 0, BLEN-k_len);
+							}
+
+							#define STATICSIZE	1024
+							uint8_t			sbuf[STATICSIZE];
+							const size_t	buflen = BLEN + HLEN + BLEN + m_len;
+							uint8_t*		dbuf = (buflen <= STATICSIZE) ? sbuf : malloc(buflen);
+							uint8_t*		h_i = NULL;
+							uint8_t*		tail = NULL;
+							{
+								const uint64_t*restrict	k = (const uint64_t*)k_prime;
+								uint64_t*restrict		p = (uint64_t*)dbuf;
+
+								p[0] = k[0] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[1] = k[1] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[2] = k[2] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[3] = k[3] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[4] = k[4] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[5] = k[5] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[6] = k[6] ^ 0x5c5c5c5c5c5c5c5cULL;
+								p[7] = k[7] ^ 0x5c5c5c5c5c5c5c5cULL;
+								h_i = (uint8_t*)(p+8);
+
+								p = (uint64_t*)(dbuf + BLEN + HLEN);
+								p[0] = k[0] ^ 0x3636363636363636ULL;
+								p[1] = k[1] ^ 0x3636363636363636ULL;
+								p[2] = k[2] ^ 0x3636363636363636ULL;
+								p[3] = k[3] ^ 0x3636363636363636ULL;
+								p[4] = k[4] ^ 0x3636363636363636ULL;
+								p[5] = k[5] ^ 0x3636363636363636ULL;
+								p[6] = k[6] ^ 0x3636363636363636ULL;
+								p[7] = k[7] ^ 0x3636363636363636ULL;
+								tail = (uint8_t*)(dbuf + BLEN + HLEN + BLEN);
+							}
+							memcpy(tail, m, m_len);
+
+							tc_sha256_init(&md);
+							tc_sha256_process(&md, h_i+HLEN, BLEN+m_len);
+							tc_sha256_done(&md, h_i);
+
+							tc_sha256_init(&md);
+							tc_sha256_process(&md, dbuf, BLEN+HLEN);
+							tc_sha256_done(&md, hash);
+
+							if (dbuf && dbuf != sbuf) {
+								free(dbuf);
+								dbuf = NULL;
+							}
+							#undef BLEN
+							#undef HLEN
+							#undef STATICSIZE
+						}
+
+						//>>>
+
+						OBJCMD(sha256) { //<<<
+							int					code = TCL_OK;
+
+							enum {A_cmd, A_BYTES, A_objc};
+							CHECK_ARGS_LABEL(finally, code, "bytes");
+
+							int					len;
+							#ifdef Tcl_GetBytesFromObj
+							const uint8_t*const	bytes = Tcl_GetBytesFromObj(interp, objv[A_BYTES], &len);
+							if (!bytes) {code = TCL_ERROR; goto finally;}
+							#else
+							const uint8_t*const	bytes = Tcl_GetByteArrayFromObj(objv[A_BYTES], &len);
+							#endif
+							struct sha256_state	md;
+							uint8_t				hash[256/8];
+
+							tc_sha256_init(&md);
+							tc_sha256_process(&md, bytes, len);
+							tc_sha256_done(&md, hash);
+
+							Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(hash, sizeof(hash)));
+
+						finally:
+							return code;
+						}
+
+						//>>>
+						OBJCMD(hmac_sha256) { //<<<
+							int					code = TCL_OK;
+							struct sha256_state	md;
+							uint8_t				hash[256/8];
+
+							enum {A_cmd, A_K, A_M, A_objc};
+							CHECK_ARGS_LABEL(finally, code, "K m");
+
+							int					k_len, m_len;
+							#ifdef Tcl_GetBytesFromObj
+							const uint8_t*const	k_bytes = Tcl_GetBytesFromObj(interp, objv[A_K], &k_len);
+							if (!k_bytes) {code = TCL_ERROR; goto finally;}
+							const uint8_t*const	m_bytes = Tcl_GetBytesFromObj(interp, objv[A_M], &m_len);
+							if (!m_bytes) {code = TCL_ERROR; goto finally;}
+							#else
+							const uint8_t*const	k_bytes = Tcl_GetByteArrayFromObj(objv[A_K], &k_len);
+							const uint8_t*const	m_bytes = Tcl_GetByteArrayFromObj(objv[A_M], &m_len);
+							#endif
+
+							do_hmac_sha256(k_bytes, k_len, m_bytes, m_len, hash);
+
+							Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(hash, sizeof(hash)));
+
+						finally:
+							return code;
+						}
+
+						//>>>
+						OBJCMD(sasl_hi) { //<<<
+							int			code = TCL_OK;
+
+							enum {A_cmd, A_STR, A_SALT, A_IT, A_objc};
+							CHECK_ARGS_LABEL(finally, code, "str salt it");
+
+							int		str_len;
+							int		salt_len;
+							#ifdef Tcl_GetBytesFromObj
+							const uint8_t*const	str_bytes  = Tcl_GetBytesFromObj(interp, objv[A_STR],  &str_len);
+							if (!str_bytes) {code = TCL_ERROR; goto finally;}
+							const uint8_t*const	salt_bytes = Tcl_GetBytesFromObj(interp, objv[A_SALT], &salt_len);
+							if (!salt_bytes) {code = TCL_ERROR; goto finally;}
+							#else
+							const uint8_t*const	str_bytes  = Tcl_GetByteArrayFromObj(objv[A_STR],  &str_len);
+							const uint8_t*const	salt_bytes = Tcl_GetByteArrayFromObj(objv[A_SALT], &salt_len);
+							#endif
+							int		it;
+							TEST_OK_LABEL(finally, code, Tcl_GetIntFromObj(interp, objv[A_IT], &it));
+
+							#define HLEN	32
+							uint8_t		res[HLEN];
+							uint8_t		next[HLEN];
+
+							{
+								uint8_t		salti[salt_len+4];
+								memcpy(salti, salt_bytes, salt_len);
+								salti[salt_len+0] = 0;
+								salti[salt_len+1] = 0;
+								salti[salt_len+2] = 0;
+								salti[salt_len+3] = 1;
+
+								do_hmac_sha256(str_bytes, str_len, salti, salt_len+4, res);
+							}
+							memcpy(next, res, sizeof(next));
+
+							size_t	c = it-1;
+							while (c--) {
+								uint8_t		tmp1[HLEN];
+								do_hmac_sha256(str_bytes, str_len, next, sizeof(next), tmp1);
+								memcpy(next, tmp1, sizeof(next));
+								{
+									uint64_t*restrict	r = (uint64_t*)res;
+									uint64_t*restrict	n = (uint64_t*)next;
+									r[0] ^= n[0];
+									r[1] ^= n[1];
+									r[2] ^= n[2];
+									r[3] ^= n[3];
+								}
+							}
+
+							Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(res, sizeof(res)));
+
+						finally:
+							return code;
+							#undef HLEN
+						}
+
+						//>>>
+						OBJCMD(xor) { //<<<
+							int			code = TCL_OK;
+							Tcl_Obj*	res = NULL;
+
+							enum {A_cmd, A_A, A_B, A_objc};
+							CHECK_ARGS_LABEL(finally, code, "a b");
+
+							int		a_len, b_len;
+							#ifdef Tcl_GetBytesFromObj
+							const uint8_t*	a = (const uint8_t*)Tcl_GetBytesFromObj(interp, objv[A_A], &a_len);
+							if (!a) {code = TCL_ERROR; goto finally;}
+							const uint8_t*	b = (const uint8_t*)Tcl_GetBytesFromObj(interp, objv[A_B], &b_len);
+							if (!b) {code = TCL_ERROR; goto finally;}
+							#else
+							const uint8_t*	a = Tcl_GetByteArrayFromObj(objv[A_A], &a_len);
+							const uint8_t*	b = Tcl_GetByteArrayFromObj(objv[A_B], &b_len);
+							#endif
+
+							if (a_len != b_len) THROW_ERROR_LABEL(finally, code, "a and b must be the same length");
+
+							replace_tclobj(&res, Tcl_NewByteArrayObj(NULL, a_len));
+							#ifdef Tcl_GetBytesFromObj
+							uint8_t*restrict	r = (uint8_t*)Tcl_GetBytesFromObj(interp, res, NULL);
+							#else
+							uint8_t*restrict	r = (uint8_t*)Tcl_GetByteArrayFromObj(res, NULL);
+							#endif
+
+							size_t	c = a_len;
+							while (c--) *r++ = *a++ ^ *b++;
+
+							Tcl_InvalidateStringRep(res);
+							Tcl_SetObjResult(interp, res);
+
+						finally:
+							replace_tclobj(&res, NULL);
+							return code;
+						}
+
+						//>>>
+					}
+				}]
+				#>>>
+				proc _sasl_hi {str salt it} {variable tc_cdef; ::jitc::capply $tc_cdef sasl_hi $str $salt $it}
+				proc _hmac_sha256 {K m}     {variable tc_cdef; ::jitc::capply $tc_cdef hmac_sha256 $K $m}
+				proc _xor {a b}             {variable tc_cdef; ::jitc::capply $tc_cdef xor $a $b}
+				proc _sha256 bytes          {variable tc_cdef; ::jitc::capply $tc_cdef sha256 $bytes}
+			}
+		}
+
 	} ::pgwire}
 } else {
 	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], env block: [info exists ::env(PGWIRE_BLOCK_ACCELERATORS)], jitc versions: ([package versions jitc])"
@@ -2061,6 +2359,43 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 
 		#>>>
 	}
+}
+
+if {[llength [info commands ::pgwire::_sasl_hi]] == 0} {
+	# Fall back to a Tcl implementation <<<
+	namespace eval ::pgwire {
+		proc _hmac_sha256 {K m} { #<<<
+			package require hmac	;# from aws 2 (but should be factored out?)
+			hmac::HMAC_SHA256 $K $m
+		}
+
+		#>>>
+		proc _sasl_hi {str salt it} { #<<<
+			package require hmac	;# from aws 2 (but should be factored out?)
+			set res		[_hmac_sha256 $str $salt[binary format Iu 1]]
+			set next	$res
+			for {set i 1} {$i < $it} {incr i} {
+				set next	[_hmac_sha256 $str $next]
+				set res		[_xor $res $next]
+			}
+			set res
+		}
+
+		#>>>
+		proc _xor {a b} { #<<<
+			package require hmac
+			hmac::xor $a $b
+		}
+
+		#>>>
+		proc _sha256 bytes { #<<<
+			package require hash
+			binary decode hex [hash::sha256 $bytes]
+		}
+
+		#>>>
+	}
+	#>>>
 }
 
 oo::class create ::pgwire {
@@ -2513,7 +2848,6 @@ oo::class create ::pgwire {
 				flush $socket
 			}
 			AuthenticationSASLContinue bytes {
-				package require hmac	;# from aws 2 (but should be factored out?)
 				upvar 1 _sasl_cx _sasl_cx
 				foreach part [split [encoding convertfrom utf-8 $bytes] ,] {
 					if {![regexp {^([a-z])=(.*)$} $part - attrib val]} {
@@ -2532,17 +2866,6 @@ oo::class create ::pgwire {
 					my _error "SASL server response nonce doesn't start with our supplied client nonce"
 				}
 
-				set Hi {{str salt it} { #<<<
-					set res		[hmac::HMAC_SHA256 $str $salt[binary format Iu 1]]
-					set next	$res
-					for {set i 1} {$i < $it} {incr i} {
-						set next	[hmac::HMAC_SHA256 $str $next]
-						set res	[hmac::xor $res $next]
-					}
-					set res
-				}}
-				#>>>
-
 				package require stringprep	;# from tclilib
 				stringprep::register SASLprep \
 					-mapping		{B.1} \
@@ -2550,20 +2873,20 @@ oo::class create ::pgwire {
 					-prohibited		{C.1.2 C.2.1 C.2.2 C.3 C.4 C.5 C.6 C.7 C.8 C.9} \
 					-prohibitedBidi	true
 
-				set salted_password		[apply $Hi [stringprep::stringprep SASLprep $password] $salt $it]
-				set client_key			[hmac::HMAC_SHA256 $salted_password {Client Key}]
-				set stored_key			[binary decode hex [hash::sha256 $client_key]]
+				set salted_password		[::pgwire::_sasl_hi [stringprep::stringprep SASLprep $password] $salt $it]
+				set client_key			[::pgwire::_hmac_sha256 $salted_password {Client Key}]
+				set stored_key			[::pgwire::_sha256 $client_key]
 				set client_final_message_without_proof	"c=[binary encode base64 $_sasl_cx(gs2header)],r=$nonce_full"
 				set auth_message		$_sasl_cx(client_first_message_bare),[encoding convertfrom utf-8 $bytes],$client_final_message_without_proof
-				set client_signature	[hmac::HMAC_SHA256 $stored_key $auth_message]
-				set client_proof		[hmac::xor $client_key $client_signature]
+				set client_signature	[::pgwire::_hmac_sha256 $stored_key $auth_message]
+				set client_proof		[::pgwire::_xor $client_key $client_signature]
 
 				set client_final_message	"c=[binary encode base64 $_sasl_cx(gs2header)],r=$nonce_full,p=[binary encode base64 $client_proof]"
 				my SASLResponse [encoding convertto utf-8 $client_final_message]
 				flush $socket
 
-				set server_key			[hmac::HMAC_SHA256 $salted_password {Server Key}]
-				set server_signature	[hmac::HMAC_SHA256 $server_key $auth_message]
+				set server_key			[::pgwire::_hmac_sha256 $salted_password {Server Key}]
+				set server_signature	[::pgwire::_hmac_sha256 $server_key $auth_message]
 				set _sasl_cx(server_signature)	$server_signature
 				return -level 0
 			}
@@ -3612,7 +3935,12 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method _compile_encode_field type_name { #<<<
+	method _compile_encode_field {type_name {varname value}} { #<<<
+		set subst_varname	{str {
+			upvar 1 varname varname
+			string map [list %varname% [list $varname]] $str
+		}}
+
 		if {[dict exists $type_elem $type_name oid]} { # Array type
 			set elem_oid		[dict get $type_elem $type_name oid]
 			if {[dict exists $type_oids $elem_oid]} {
@@ -3634,9 +3962,10 @@ oo::class create ::pgwire {
 				if {$elem_fmt eq {}} {
 					# Unsupported element oid, fall back to array literal string format
 					return -level 0 [string map [list \
-						%delim%	[list [dict get $type_elem $type_name delim]] \
+						%delim%		[list [dict get $type_elem $type_name delim]] \
+						%varname%	[list $varname] \
 					] {
-						set bytes	[encoding convertto $tcl_encoding "{[join [lmap e $value {
+						set bytes	[encoding convertto $tcl_encoding "{[join [lmap e $%varname% {
 							switch -regexp -nocase -- $e {
 								"\[\x22\\\\\]" {
 									return -level 0 \"[string map [list "\"" "\\\"" "\\" "\\\\"] $e]\"
@@ -3669,13 +3998,14 @@ oo::class create ::pgwire {
 						%encode_e%		$encode_e \
 						%elem_bytelen%	$elem_bytelen \
 						%elem_fmt%		$elem_fmt \
+						%varname%		[list $varname] \
 					] {
 					set elembytes		{}
-						foreach e $value {
+						foreach e $%varname% {
 							%encode_e%
 							append elembytes	[binary format Iu%elem_fmt% %elem_bytelen% $e]
 						}
-						set payload		[binary format IIIIIa* %ndim% %hasnull% %elem_oid% [llength $value] %lb% $elembytes]
+						set payload		[binary format IIIIIa* %ndim% %hasnull% %elem_oid% [llength $%varname%] %lb% $elembytes]
 						append pformats \u0\u1; append pdesc [binary format Iua* [string length $payload] $payload]
 					}
 				}
@@ -3683,26 +4013,26 @@ oo::class create ::pgwire {
 			}
 		} else {
 			switch -glob -- $type_name {
-				bool	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Iuc 1 [expr {!!($value)}]]}}
-				int1	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Iuc 1 $value]}}
-				int2	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuS 2 $value]}}
-				int4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuI 4 $value]}}
-				int8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuW 8 $value]}}
-				bytea	{return -level 0 {append pformats \u0\u1; append pdesc [binary format Iua* [string length $value] $value]}}
-				float4	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuR 4 $value]}}
-				float8	{return -level 0 {append pformats \u0\u1; append pdesc [binary format IuQ 8 $value]}}
+				bool	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format Iuc 1 [expr {!!($%varname%)}]]}}
+				int1	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format Iuc 1 $%varname%]}}
+				int2	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format IuS 2 $%varname%]}}
+				int4	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format IuI 4 $%varname%]}}
+				int8	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format IuW 8 $%varname%]}}
+				bytea	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format Iua* [string length $%varname%] $%varname%]}}
+				float4	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format IuR 4 $%varname%]}}
+				float8	{apply $subst_varname {append pformats \u0\u1; append pdesc [binary format IuQ 8 $%varname%]}}
 				text -
 				varchar {
-					return -level 0 {
-						set bytes	[encoding convertto $tcl_encoding $value]
+					apply $subst_varname {
+						set bytes	[encoding convertto $tcl_encoding $%varname%]
 						set bytelen	[string length $bytes]
 						append pformats \u0\u1; append pdesc [binary format Iua* $bytelen $bytes]
 					}
 				}
 
 				default {
-					return -level 0 {
-						set bytes	[encoding convertto $tcl_encoding $value]
+					apply $subst_varname {
+						set bytes	[encoding convertto $tcl_encoding $%varname%]
 						set bytelen	[string length $bytes]
 						append pformats \u0\u0; append pdesc [binary format Iua* $bytelen $bytes]
 					}
@@ -3809,12 +4139,22 @@ oo::class create ::pgwire {
 
 							#::pgwire::log notice "ParameterDescription, $count params, type oids: $parameter_type_oids, params_assigned: ($params_assigned)"
 							set build_params	{
+								upvar 1 param_values param_values  tcl_encoding tcl_encoding
+
 								set pdesc		{}
 								set pformats	{}
 							}
 							append build_params [list set pcount [llength $parameter_type_oids]] \n
 							set build_params_vars	{}
 							set build_params_dict	{}
+
+							if {[dict size $params_assigned]} {
+								set upvars	{}
+								foreach name [dict keys $params_assigned] {
+									lappend upvars $name uv_$name
+								}
+								append build_params_vars	[list upvar 2 {*}$upvars] \n
+							}
 
 							set param_seq	0
 							foreach oid $parameter_type_oids name [dict keys $params_assigned] {
@@ -3825,16 +4165,14 @@ oo::class create ::pgwire {
 								}
 								lappend param_types $name $type_name
 
-								set encode_field	[my _compile_encode_field $type_name]
-
+								set encode_field	[my _compile_encode_field $type_name uv_$name]
 								append build_params_vars	[string map [list \
 									%v%				[list $name] \
 									%null%			[list [binary format I -1]] \
 									%encode_field%	$encode_field \
 								] {
 									try {
-										if {[uplevel 1 {info exists %v%}]} {
-											set value	[uplevel 1 {set %v%}]
+										if {[info exists uv_%v%]} {
 											%encode_field%
 										} else {
 											append pdesc	%null%
@@ -3844,6 +4182,8 @@ oo::class create ::pgwire {
 										throw {PGWIRE INPUT_PARAM %v%} "Error fetching value for \"%v%\": $errmsg"
 									}
 								}]
+
+								set encode_field	[my _compile_encode_field $type_name value]
 								append build_params_dict	[string map [list \
 									%v%				[list $name] \
 									%null%			[list [binary format I -1]] \
@@ -3870,6 +4210,7 @@ oo::class create ::pgwire {
 							append build_params	{
 								binary format Sa*Sa* $pcount $pformats $pcount $pdesc
 							} \n
+							set build_params [list {} $build_params]	;# Bytecode for proc and lambda is better for local vars
 							#>>>
 						}
 						T { # RowDescription: compile rformats, c_types and columns <<<
@@ -3988,7 +4329,7 @@ oo::class create ::pgwire {
 				#::pgwire::log notice "execute script:\n$execute\nmakerow_vars: $makerow_vars\nmakerow_dict: $makerow_dict\nmakerow_list: $makerow_list"
 				# Results:
 				#	- $stmt_name: the name of the prepared statement (as known to the server)
-				#	- $build_params: script to run to gather the input params
+				#	- $build_params: lambda to run to gather the input params
 				#	- $rformats: the marshalled count and formats that we will send the input params as
 				#	- $c_types:	the result column names and the formats that they are transported as
 				#	- $columns: a list of column names (can contain duplicates)
@@ -4005,6 +4346,10 @@ oo::class create ::pgwire {
 					ops_cache			{} \
 					param_types			$param_types \
 					delims				[lmap {name type delim} $c_types {set delim}] \
+					debug_cx [list \
+						params_assigned		$params_assigned \
+						sql_compiled		$compiled \
+					] \
 				]]
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
@@ -4026,7 +4371,7 @@ oo::class create ::pgwire {
 			}
 			# Sets:
 			#	- $stmt_name: the name of the prepared statement (as known to the server)
-			#	- $build_params: script to run to gather the input params
+			#	- $build_params: lambda to run to gather the input params
 			#	- $rformats: the marshalled count and formats that we will send the input params as
 			#	- $c_types:	the result column names and the formats that they are transported as
 			#	- $columns: a list of column names (can contain duplicates)
@@ -4079,15 +4424,21 @@ oo::class create ::pgwire {
 							throw unterminated_string "No null terminator found"
 						}
 						set message	[string range $data 0 [- $idx 1]]
-						return [list CommandComplete $message $datarows]
+						set res	[list CommandComplete $message $datarows]
+						::pgwire::restap [self] $res
+						return $res
 						#>>>
 					}
 					I { # EmptyQueryResponse <<<
-						return {EmptyQueryResponse {} {}}
+						set res	{EmptyQueryResponse {} {}}
+						::pgwire::restap [self] $res
+						return $res
 						#>>>
 					}
 					s { # PortalSuspended <<<
-						return [list PortalSuspended [llength $datarows] $datarows]
+						set res	[list PortalSuspended [llength $datarows] $datarows]
+						::pgwire::restap [self] $res
+						return $res
 						#>>>
 					}
 					E { # ErrorResponse <<<
@@ -4115,7 +4466,7 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method _bind_and_execute {stmt_name portal_name rformats parameters max_rows_per_batch} { #<<<
+	method _bind_and_execute {stmt_name portal_name rformats parameters max_rows_per_batch stmt_info} { #<<<
 		set enc_stmt	[encoding convertto $tcl_encoding $stmt_name]
 
 		if {$portal_name eq ""} {
@@ -4126,6 +4477,8 @@ oo::class create ::pgwire {
 
 		set bindmsg		$enc_portal\u0$enc_stmt\u0$parameters$rformats
 		set executemsg	$enc_portal\u0
+
+		::pgwire::bindtap [self] $stmt_info $parameters
 
 		if {$max_rows_per_batch == 0} {
 			# Simplified flow: no batches, pre-send Sync
@@ -4260,7 +4613,7 @@ oo::class create ::pgwire {
 					append makerow	{set row {}} \n
 				}
 				vars {
-					append makerow_prefix	{upvar 1}
+					append makerow_prefix	{upvar 2}
 				}
 				default {
 					error "Unhandled result format: \"$as\""
@@ -4421,7 +4774,7 @@ oo::class create ::pgwire {
 					dicts          {}
 					dicts_no_nulls { append makerow	"\} else \{\n\tlappend row [list $field_name] {}\n" }
 					lists          { append makerow	"\} else \{\n\tlappend row {}\n" }
-					vars           { append makerow "\} else \{\n\tunset [list upvar_$field_name]\n" }
+					vars           { append makerow "\} else \{\n\tunset -nocomplain [list upvar_$field_name]\n" }
 				}
 
 				append makerow "\}\n"
@@ -4450,146 +4803,12 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
-	method allrows args { #<<<
-		variable ::pgwire::arr_fmt_cache
-
-		set args	[my parse_tdbc_args $args opts]
-		switch -exact -- [llength $args] {
-			1 {set sqlcode [lindex $args 0]}
-			2 {lassign $args sqlcode param_values}
-			default {
-				return -code error -errorcode [concat TDBC GENERAL_ERROR HY000 {} wrongNumArgs] \
-						"wrong # args: should be [lrange [info level 0] 0 1]\
-						 ?-option value?... ?--? sqlcode ?dictionary?"
-			}
-		}
-		set as	[dict get $opts -as]
-
-		my buffer_nesting
-
-		if {[dict exists $opts -columnsvariable]} {
-			upvar 1 [dict get $opts -columnsvariable] columns
-		}
-
-		#set max_rows_per_batch	17
-		#set max_rows_per_batch	$batchsize
-		set max_rows_per_batch	0
-		#set max_rows_per_batch	500
-
-		my variable coro_seq
-		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
-
-		set retries	1
-		while 1 {
-			set stmt_info	[my prepare_extended_query $sqlcode]
-			dict with stmt_info {}
-			# Sets:
-			#	- $stmt_name: the name of the prepared statement (as known to the server)
-			#	- $field_names:	the result column names and the local variables they are unpacked into
-			#	- $build_params: script to run to gather the input params
-			#	- $columns: a list of column names (can contain duplicates)
-			#	- $heat: how frequently this prepared statement has been used recently, relative to others
-			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
-			#	- $delims: for each column, the array string format element delimiter (blank if not array type)
-			try $build_params on ok parameters {}
-
-			if {$::pgwire::accelerators} {
-				if {[dict exists $ops_cache $as]} {
-					set ops	[dict get $ops_cache $as]
-				} else {
-					set ops	[::pgwire::build_ops $as $c_types]
-					my save_ops $sqlcode $as $ops
-				}
-			} else {
-				set addrow	[format {
-					%s
-					lappend rows	$row
-				} [my tcl_makerow $as $c_types]]
-			}
-
-			try {
-				coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch
-			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
-			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-				# 0A000 - happens if a schema change alters the result row format
-				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
-				my close_statement $stmt_name
-				dict unset prepared $sqlcode
-				if {[incr retries -1] >= 0} {
-					continue
-				}
-				return -options $options $errmsg
-			}
-			break
-		}
-
-		try {
-			set rows	{}
-			while 1 {
-				lassign [$rowbuffer nextbatch] outcome details datarows
-
-				if {$::pgwire::accelerators} {
-					switch -exact -- $outcome \
-						CommandComplete - \
-						PortalSuspended {
-							#::pgwire::log notice "before c_allrows_batch: [tcl::unsupported::representation $rows]"
-							::pgwire::c_allrows_batch rows $ops $columns $tcl_encoding $datarows $delims
-						}
-				} else {
-					switch -exact -- $outcome \
-						CommandComplete - \
-						PortalSuspended "
-							foreach datarow \$datarows [list $addrow]
-						"
-				}
-				#set h	[open /tmp/datarow wb]
-				#puts -nonewline $h $datarow
-				#close $h
-				#set h	[open /tmp/vars w]
-				#puts $h [list \
-				#	ops				$ops \
-				#	columns			$columns \
-				#	tcl_encoding	$tcl_encoding \
-				#	c_types			$c_types \
-				#]
-				#close $h
-
-				switch -exact -- $outcome {
-					CommandComplete -
-					EmptyQueryResponse {
-						break
-					}
-					PortalSuspended {}
-					default {
-						error "Unexpected outcome from _read_batch: \"$outcome\""
-					}
-				}
-			}
-
-			set rows
-		} finally {
-			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
-				$rowbuffer destroy
-			}
-			if {!$ready_for_query && !$sync_outstanding} {
-				#::pgwire::log notice "foreach finally send sync"
-				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
-				flush $socket
-			}
-			if {$sync_outstanding} {
-				#::pgwire::log notice "foreach finally skip_to_sync"
-				my skip_to_sync
-			}
-		}
-	}
-
-	#>>>
-	method rowbuffer_coro {stmt_name portal_name rformats parameters batchsize} { #<<<
+	method rowbuffer_coro {stmt_name portal_name rformats parameters batchsize stmt_info} { #<<<
 		set pending_rowbuffer	[info coroutine]
 
 		try {
 			#::pgwire::log notice "rowbuffer_coro [info coroutine] bind and execute $batchsize"
-			set waiting	[my _bind_and_execute $stmt_name $portal_name $rformats $parameters $batchsize]
+			set waiting	[my _bind_and_execute $stmt_name $portal_name $rformats $parameters $batchsize $stmt_info]
 			lassign $waiting last_outcome
 			#::pgwire::log notice "rowbuffer_coro [info coroutine] last_outcome $last_outcome"
 			set res	started
@@ -4662,6 +4881,140 @@ oo::class create ::pgwire {
 	}
 
 	#>>>
+	method allrows args { #<<<
+		variable ::pgwire::arr_fmt_cache
+
+		set args	[my parse_tdbc_args $args opts]
+		switch -exact -- [llength $args] {
+			1 {set sqlcode [lindex $args 0]}
+			2 {lassign $args sqlcode param_values}
+			default {
+				return -code error -errorcode [concat TDBC GENERAL_ERROR HY000 {} wrongNumArgs] \
+						"wrong # args: should be [lrange [info level 0] 0 1]\
+						 ?-option value?... ?--? sqlcode ?dictionary?"
+			}
+		}
+		set as	[dict get $opts -as]
+
+		my buffer_nesting
+
+		if {[dict exists $opts -columnsvariable]} {
+			upvar 1 [dict get $opts -columnsvariable] columns
+		}
+
+		#set max_rows_per_batch	17
+		#set max_rows_per_batch	$batchsize
+		set max_rows_per_batch	0
+		#set max_rows_per_batch	500
+
+		my variable coro_seq
+		set rowbuffer	[namespace current]::rowbuffer_coro_[incr coro_seq]
+
+		set retries	1
+		while 1 {
+			set stmt_info	[my prepare_extended_query $sqlcode]
+			dict with stmt_info {}
+			# Sets:
+			#	- $stmt_name: the name of the prepared statement (as known to the server)
+			#	- $field_names:	the result column names and the local variables they are unpacked into
+			#	- $build_params: lambda to run to gather the input params
+			#	- $columns: a list of column names (can contain duplicates)
+			#	- $heat: how frequently this prepared statement has been used recently, relative to others
+			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
+			#	- $delims: for each column, the array string format element delimiter (blank if not array type)
+			set parameters	[apply $build_params]
+
+			if {$::pgwire::accelerators} {
+				if {[dict exists $ops_cache $as]} {
+					set ops	[dict get $ops_cache $as]
+				} else {
+					set ops	[::pgwire::build_ops $as $c_types]
+					my save_ops $sqlcode $as $ops
+				}
+			} else {
+				set addrows	[format {
+					apply {{datarows tcl_encoding} {
+						variable ::pgwire::arr_fmt_cache
+						upvar 1 rows rows
+						foreach datarow $datarows {
+							%s
+							lappend rows $row
+						}
+					}} $datarows $tcl_encoding
+				} [my tcl_makerow $as $c_types]]
+			}
+
+			try {
+				coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch $stmt_info
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# 0A000 - happens if a schema change alters the result row format
+				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				my close_statement $stmt_name
+				dict unset prepared $sqlcode
+				if {[incr retries -1] >= 0} continue
+				return -options $options $errmsg
+			}
+			break
+		}
+
+		try {
+			set rows	{}
+			while 1 {
+				lassign [$rowbuffer nextbatch] outcome details datarows
+
+				if {$::pgwire::accelerators} {
+					switch -exact -- $outcome {
+						CommandComplete - PortalSuspended {
+							#::pgwire::log notice "before c_allrows_batch: [tcl::unsupported::representation $rows]"
+							::pgwire::c_allrows_batch rows $ops $columns $tcl_encoding $datarows $delims
+						}
+					}
+				} else {
+					switch -exact -- $outcome \
+						CommandComplete - PortalSuspended $addrows
+				}
+				#set h	[open /tmp/datarow wb]
+				#puts -nonewline $h $datarow
+				#close $h
+				#set h	[open /tmp/vars w]
+				#puts $h [list \
+				#	ops				$ops \
+				#	columns			$columns \
+				#	tcl_encoding	$tcl_encoding \
+				#	c_types			$c_types \
+				#]
+				#close $h
+
+				switch -exact -- $outcome {
+					CommandComplete - EmptyQueryResponse {
+						break
+					}
+					PortalSuspended {}
+					default {
+						error "Unexpected outcome from _read_batch: \"$outcome\""
+					}
+				}
+			}
+
+			set rows
+		} finally {
+			if {[info exists rowbuffer] && [llength [info commands $rowbuffer]] > 0} {
+				$rowbuffer destroy
+			}
+			if {!$ready_for_query && !$sync_outstanding} {
+				#::pgwire::log notice "foreach finally send sync"
+				puts -nonewline $socket S\u0\u0\u0\u4; incr sync_outstanding
+				flush $socket
+			}
+			if {$sync_outstanding} {
+				#::pgwire::log notice "foreach finally skip_to_sync"
+				my skip_to_sync
+			}
+		}
+	}
+
+	#>>>
 	method foreach args { #<<<
 		variable ::pgwire::arr_fmt_cache
 
@@ -4698,13 +5051,13 @@ oo::class create ::pgwire {
 			# Sets:
 			#	- $stmt_name: the name of the prepared statement (as known to the server)
 			#	- $field_names:	the result column names and the local variables they are unpacked into
-			#	- $build_params: script to run to gather the input params
+			#	- $build_params: lambda to run to gather the input params
 			#	- $columns: a list of column names (can contain duplicates)
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
 			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 			#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 
-			try $build_params on ok parameters {}
+			set parameters	[apply $build_params]
 
 			try {
 				if {$::pgwire::accelerators} {
@@ -4715,42 +5068,47 @@ oo::class create ::pgwire {
 						my save_ops $sqlcode $as $ops
 					}
 					set foreach_batch {
+						#::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script $delims
 						uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script $delims]
 					}
 				} else {
-					upvar 1 $row_varname row
 					#set makerow	[my tcl_makerow $as $c_types]
 					set foreach_batch [string map [list \
 						%makerow%		[my tcl_makerow $as $c_types] \
 						%script%		[list $script] \
 					] {
-						foreach datarow $datarows {
-							%makerow%
-							try {
-								uplevel 1 %script%
-							} on break {} {
-								set broken	1
-								break
-							} on continue {} {
-							} on return {r o} {
-								#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
-								set broken	1
-								dict incr o -level 1
-								dict set o -code return
-								set rethrow	[list -options $o $r]
-								break
-							} on error {r o} {
-								#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
-								set broken	1
-								dict incr o -level 1
-								set rethrow	[list -options $o $r]
-								break
+						apply {{row_varname datarows tcl_encoding} {
+							variable ::pgwire::arr_fmt_cache
+							upvar 2 $row_varname row
+							foreach datarow $datarows {
+								%makerow%
+								try {
+									uplevel 2 %script%
+								} on break {} {
+									set broken	1
+									break
+								} on continue {} {
+								} on return {r o} {
+									#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
+									set broken	1
+									dict incr o -level 1
+									dict set o -code return
+									set rethrow	[list -options $o $r]
+									break
+								} on error {r o} {
+									#::pgwire::log notice "foreach script caught error r: ($r), o: ($o)"
+									set broken	1
+									dict incr o -level 1
+									set rethrow	[list -options $o $r]
+									break
+								}
 							}
-						}
+						}} $row_varname $datarows $tcl_encoding
 					}]
+					#::pgwire::log notice "foreach_batch, as: $as, c_types: ($c_types):\n$foreach_batch"
 				}
 				coroutine $rowbuffer my rowbuffer_coro \
-					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 				# 0A000 - happens if a schema change alters the result row format
@@ -4814,7 +5172,7 @@ oo::class create ::pgwire {
 			default {
 				return -code error -errorcode [list TDBC GENERAL_ERROR HY000 {} wrongNumArgs] \
 						"wrong # args: should be [lrange [info level 0] 0 1]\
-						 sqlcode ?dictionary? script"
+						 sqlcode ?dictionary?"
 			}
 		}
 
@@ -4828,13 +5186,13 @@ oo::class create ::pgwire {
 				# Sets:
 				#	- $stmt_name: the name of the prepared statement (as known to the server)
 				#	- $field_names:	the result column names and the local variables they are unpacked into
-				#	- $build_params: script to run to gather the input params
+				#	- $build_params: lambda to run to gather the input params
 				#	- $columns: a list of column names (can contain duplicates)
 				#	- $heat: how frequently this prepared statement has been used recently, relative to others
 				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 				#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 
-				try $build_params on ok parameters {}
+				set parameters	[apply $build_params]
 
 				set max_rows_per_batch	0
 
@@ -4849,7 +5207,7 @@ oo::class create ::pgwire {
 					set makerow	[my tcl_makerow lists $c_types]
 				}
 
-				lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+				lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch $stmt_info] \
 					outcome details datarows
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
@@ -4935,13 +5293,13 @@ oo::class create ::pgwire {
 					# Sets:
 					#	- $stmt_name: the name of the prepared statement (as known to the server)
 					#	- $field_names:	the result column names and the local variables they are unpacked into
-					#	- $build_params: script to run to gather the input params
+					#	- $build_params: lambda to run to gather the input params
 					#	- $columns: a list of column names (can contain duplicates)
 					#	- $heat: how frequently this prepared statement has been used recently, relative to others
 					#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 					#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 
-					try $build_params on ok parameters {}
+					set parameters	[apply $build_params]
 
 					set max_rows_per_batch	0
 
@@ -4953,10 +5311,13 @@ oo::class create ::pgwire {
 							my save_ops $sql vars $ops
 						}
 					} else {
-						set makerow	[my tcl_makerow vars $c_types]
+						set makerow	[list {datarow tcl_encoding} [format {
+							variable ::pgwire::arr_fmt_cache
+							%s
+						} [my tcl_makerow vars $c_types]]]
 					}
 
-					lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch] \
+					lassign [my _bind_and_execute $stmt_name "" $rformats $parameters $max_rows_per_batch $stmt_info] \
 						outcome details datarows
 				} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 				  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
@@ -4975,8 +5336,7 @@ oo::class create ::pgwire {
 			try {
 				if {$::pgwire::accelerators} {
 					switch -exact -- $outcome {
-						CommandComplete -
-						PortalSuspended {
+						CommandComplete - PortalSuspended {
 							if {[llength $datarows] > 0} {
 								uplevel 1 [list ::pgwire::c_makerow2 $ops $columns $tcl_encoding [lindex $datarows 0] $delims]
 							}
@@ -4985,11 +5345,9 @@ oo::class create ::pgwire {
 					}
 				} else {
 					switch -exact -- $outcome {
-						CommandComplete -
-						PortalSuspended {
+						CommandComplete - PortalSuspended {
 							if {[llength $datarows] > 0} {
-								set datarow	[lindex $datarows 0]
-								try $makerow
+								apply $makerow [lindex $datarows 0] $tcl_encoding
 							}
 						}
 						EmptyQueryResponse {}
@@ -5013,7 +5371,6 @@ oo::class create ::pgwire {
 		variable ::pgwire::arr_fmt_cache
 		upvar 1 $chanvar chan
 
-
 		my buffer_nesting
 
 		set retries	1
@@ -5025,13 +5382,13 @@ oo::class create ::pgwire {
 				# Sets:
 				#	- $stmt_name: the name of the prepared statement (as known to the server)
 				#	- $field_names:	the result column names and the local variables they are unpacked into
-				#	- $build_params: script to run to gather the input params
+				#	- $build_params: lambda to run to gather the input params
 				#	- $columns: a list of column names (can contain duplicates)
 				#	- $heat: how frequently this prepared statement has been used recently, relative to others
 				#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 				#	- $delims: for each column, the array string format element delimiter (blank if not array type)
 
-				try $build_params on ok parameters {}
+				set parameters	[apply $build_params]
 
 				set enc_stmt	[encoding convertto $tcl_encoding $stmt_name]
 				set enc_portal	""

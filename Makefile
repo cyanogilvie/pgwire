@@ -7,7 +7,7 @@ test: all
 	$(DC) run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 tcpdump: all
-	$(DC) run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" TCPDUMP="/tmp/testdump-" AWS_PROFILE="$(AWS_PROFILE)"
+	$(DC) run --rm -e TCPDUMP="/tmp/tcldump_" pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 valgrind: all
 	$(DC) run --rm pgwire valgrind TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
@@ -18,7 +18,7 @@ gdb: all
 benchmark: all
 	$(DC) up -d db
 	#-$(DC) exec db tc qdisc del dev eth0 root netem
-	#$(DC) exec db tc qdisc add dev eth0 root netem delay .5ms
+	#$(DC) exec db tc qdisc add dev eth0 root netem delay .16ms
 	$(DC) run --rm pgwire benchmark TESTFLAGS="$(TESTFLAGS)"
 	#$(DC) exec db tc qdisc del dev eth0 root netem
 

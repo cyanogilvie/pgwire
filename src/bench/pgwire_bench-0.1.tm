@@ -1,11 +1,12 @@
 package require math::statistics
 
-namespace eval bench {
+namespace eval ::bench {
 	namespace export *
 
 	variable match		*
 	variable run		{}
 	variable skipped	{}
+	variable skip		{}
 
 	# Override this to a new lambda to capture the output
 	variable output {
@@ -70,7 +71,38 @@ proc _writefile {fn dat} { #<<<
 #>>>
 proc _run_if_set script { #<<<
 	if {$script eq ""} return
-	uplevel 2 [list if 1 $script]
+	set lambda	[list {} $script ::_bench_private]
+	uplevel 2 [list apply $lambda]
+}
+
+#>>>
+proc _pick {mode variant patterns} { #<<<
+	set chain	0
+	set found	0
+	set res [lmap {pat e} $patterns {
+		if {$pat eq {}} {set default $e}
+		if {!$chain && ![string match $pat $variant]} continue
+		if {$e eq "-"} {
+			set chain	1
+			continue
+		}
+		set chain	0
+		switch -exact -- $mode {
+			first - first!	{return $e}
+			all - all!		{set found 1; set e}
+			default	{error "Invalid _pick mode: ($mode)"}
+		}
+	}]
+	if {!$found && [info exists default]} {
+		return [switch -exact -- $mode {
+			all - all!		{list $default}
+			default			{set default}
+		}]
+	}
+	if {!$found && [string match *! $mode]} {
+		error "No pattern matches for \"$variant\""
+	}
+	set res
 }
 
 #>>>
@@ -78,7 +110,7 @@ proc _verify_res {variant retcodes expected match_mode got options} { #<<<
 	variable current_bench
 
 	if {[dict get $options -code] ni $retcodes} {
-		bench::output error "Error: $got\n[dict get $options -errorinfo]"
+		::bench::output error "Error: $got\n[dict get $options -errorinfo]"
 		throw [list BENCH BAD_CODE $current_bench $variant $retcodes [dict get $options -code]] \
 			"$current_bench/$variant: Expected codes [list $retcodes], got [dict get $options -code]"
 	}
@@ -118,10 +150,15 @@ proc _make_stats times { #<<<
 #>>>
 proc bench {name desc args} { #<<<
 	variable match
+	variable skip
 	variable run
 	variable skipped
 	variable output
 	variable current_bench
+
+	# For auto-cleanup
+	set beforevars	[lsort [info vars ::_bench_private::*]]
+	set beforecmds	[lsort [info commands ::_bench_private::*]]
 
 	# -target_cv		- Run until the coefficient of variation is below this, up to -max_time
 	# -max_time 		- Maximum number of seconds to keep running while the cv is converging
@@ -137,20 +174,24 @@ proc bench {name desc args} { #<<<
 		-returnCodes	{ok return}
 		-target_cv		{0.0015}
 		-min_time		0.0
-		-max_time		4.0
+		-max_time		1.0
 		-min_it			30
 		-window			30
+		-overhead		{}
+		-deps			{}
+		-combinations	{}
+		-transform		{}
 	}
 	array set opts $args
 	set badargs [lindex [_intersect3 [array names opts] {
-		-setup -compare -cleanup -batch -match -result -returnCodes -target_cv -min_time -max_time -min_it -window
+		-setup -compare -cleanup -batch -match -result -results -returnCodes -target_cv -min_time -max_time -min_it -window -overhead -deps -combinations -transform
 	}] 0]
 
 	if {[llength $badargs] > 0} {
 		error "Unrecognised arguments: [join $badargs {, }]"
 	}
 
-	if {![string match $match $name]} {
+	if {![string match $match $name] || [string match $skip $name]} {
 		lappend skipped $name
 		return
 	}
@@ -166,69 +207,167 @@ proc bench {name desc args} { #<<<
 		}
 	}]
 
-	set make_script {
-		{batch script} {
-			format {set __bench_i %d; while {[incr __bench_i -1] >= 0} %s} \
-				[list $batch] [list $script]
-		}
-	}
+	set make_blambda {script {
+		list c [format {incr c; while {[incr c -1]} {apply %s}} [list [list {} $script ::_bench_private]]]
+	}}
 
 	set variant_stats {}
+
+	set overheads	{}
 
 	set current_bench $name
 	_run_if_set $opts(-setup)
 	try {
+		# Expand the variant out to the product of the -combinations <<<
+		set expanded_compare	{}
 		dict for {variant script} $opts(-compare) {
-			set hint	[lindex [time {
-				catch {uplevel 1 $script} r o
-			}] 0]
-			if {[info exists opts(-result)]} {
-				_verify_res $variant $normalized_codes $opts(-result) $opts(-match) $r $o
+			set substs	{}
+			foreach combsets [_pick all $variant $opts(-combinations)] {
+				#apply $output notice "combsets: ($combsets)"
+				foreach {pat values} $combsets {
+					if {[string first $pat $variant] == -1} continue
+					dict lappend substs $pat {*}$values
+				}
+			}
+			#apply $output notice "substs: ($substs) from combinations ($opts(-combinations))"
+			set all_c	{{}}
+			dict for {pat values} $substs {
+				set new_all_c	{}
+				foreach c $all_c {
+					foreach v $values {
+						lappend new_all_c [list {*}$c $pat $v]
+					}
+				}
+				set all_c	$new_all_c
 			}
 
-			set single_empty {
-				uplevel 1 [list if 1 {}]
-			}
-			set single_ex_s	{
-				uplevel 1 [list if 1 $script]
-			}
-			if 1 $single_empty	;# throw the first away
-			if 1 $single_ex_s	;# throw the first away
+			#apply $output notice "all_c: ($all_c)"
+			#apply $output notice "Expanded variant $variant:"
+			foreach map $all_c {
+				set cscript		$script
+				set name_map	{}
+				unset -nocomplain script_map
+				foreach {pat vals} $map {
+					lappend name_map	$pat [lindex $vals 0]
+					if {[llength $vals] >= 2} {
+						#apply $output notice "${pat}([lindex $vals 0]) defines a script_map: ([lindex $vals 1])"
+						lappend script_map	{*}[lindex $vals 1]
+					}
+				}
+				if {[info exists script_map]} {
+					set macros	{}
+					set script_map	[dict map {pat rep} $script_map {
+						if {[regexp {^%(.*?)\((.*)\)%$} $pat - mname arglist]} {
+							#                regexp                  lambda
+							lappend macros   %${mname}\\((.*?)\\)%   [list $arglist $rep]
+							continue
+						}
+						set rep
+					}]
+					set cscript	[string map $script_map $cscript]
+					if {[llength $macros]} {
+						foreach {regexp lambda} $macros {
+							set mscript	{}
+							set from	0
+							foreach {m argvalsidx} [regexp -all -inline -indices $regexp $cscript] {
+								set pref	[string range $cscript $from [lindex $m 0]-1]
+								set from	[expr {[lindex $m 1]+1}]
+								set argvals	[string range $cscript {*}$argvalsidx]
+								append mscript $pref [apply $lambda {*}$argvals]
+							}
+							append mscript	[string range $cscript $from end]
+							set cscript	$mscript
+						}
+					}
+					#apply $output notice "    script_map($script_map):\n$cscript"
+				}
 
-			set single_overhead	[lindex [time $single_empty 1000] 0]
-			#puts stderr "single overhead: $single_overhead"
+				dict set expanded_compare [string map $name_map $variant] [string map $name_map $cscript]
+				#apply $output notice "    using map ($map) to: ([string map $name_map $variant])"
+			}
+		}
+		#>>>
 
+		dict for {variant script} $expanded_compare {
+			set variant_start	[clock microseconds]
+			set overhead_script	[join [_pick all $variant $opts(-overhead)] \n]
+			foreach transform	[_pick all $variant $opts(-transform)] {
+				if {[lindex $transform 2] eq ""} {
+					lset transform 2 ::_bench_private
+				}
+				set script			[apply $transform $script]
+				set overhead_script	[apply $transform $overhead_script]
+			}
+			#apply $output notice "\nVariant: $variant:\n$script\noverhead_script:\n$overhead_script"
+
+			set lambda			[list {} $script ::_bench_private]
+			set single_empty	{apply {{} {} ::_bench_private}}
+			set single_lambda	[list apply $lambda]
+			set blambda			[apply $make_blambda $script]
+
+			try {
+				namespace eval ::_bench_private [join [_pick all $variant $opts(-deps)] \n]
+			} on error {errmsg options} {
+				apply $output notice "Skipping variant $current_bench/$variant: $errmsg"
+				#apply $output notice "([join [_pick all $variant $opts(-deps)] \n]): [dict get $options -errorinfo]"
+				continue
+			}
 			# Verify the first result against -result (if given), and estimate an appropriate batchsize to target a batch time of 1 ms to reduce quantization noise <<<
-			set est_it	[expr {
-				max(1, int(round(
-					100.0/$hint
-				)))
-			}]
-			#puts stderr "hint: $hint, est_it: $est_it"
-			set extime	[lindex [time $single_ex_s $est_it] 0]
-			set extime_comp	[expr {$extime - $single_overhead}]
-			#puts stderr "extime: $extime, extime comp: $extime_comp"
-			if {$opts(-batch) eq "auto"} {
-				set batch	[expr {int(round(max(1, 1000.0/$extime_comp)))}]
-				#puts stderr "Guessed batch size of $batch based on sample execution time $extime_comp usec"
-			} else {
-				set batch	$opts(-batch)
+			if 1 $single_empty	;# throw the first away
+			catch $single_lambda r o
+			unset -nocomplain expected
+			if {[info exists opts(-results)]} {
+				set expected	[_pick first! $variant $opts(-results)]
+			} elseif {[info exists opts(-result)]} {
+				set expected	$opts(-result)
+			}
+			if {[info exists expected]} {
+				#apply $output debug "Verifying expected output for $current_bench/$variant"
+				_verify_res $variant $normalized_codes $expected $opts(-match) $r $o
 			}
 			#>>>
 
-			# Measure the instrumentation overhead to compensate for it <<<
-			set times	{}
-			set start	[clock microseconds]	;# Prime [clock microseconds], start var
-			set bscript	[apply $make_script $batch {}]
-			uplevel 1 [list if 1 $script]
-			for {set i 0} {$i < int(100000 / ($batch*0.15))} {incr i} {
-				set start [clock microseconds]
-				uplevel 1 [list if 1 $bscript]
-				lappend times [- [clock microseconds] $start]
+			# Try to guess a batch number that means each batch runs for about $target_usec <<<
+			if {$opts(-batch) eq "auto"} {
+				set target_usec	10000.0
+				set target_ms	[expr {round($target_usec / 1000.0)}]
+				set target_bit	10
+				set target_bms	[expr {round($target_ms*$target_bit)}]
+				set tres		[timerate $single_lambda $target_ms]
+				set batch		[lindex $tres 2]
+				#apply $output notice "Initial guess: $batch: $tres, target_bms: $target_bms"
+				set runbatch	[list apply $blambda $batch]
+				if 0 {
+				apply $output notice "first batch run: [timerate $runbatch 1 1]"
+				set tres		[timerate $runbatch $target_bms]
+				set it_usec		[lindex $tres 0]
+				apply $output notice "wanted: $target_usec, got: $it_usec (with batch size of ($batch): $tres"
+				set accuracy	[expr {1.0 - abs($it_usec - $target_usec) / $target_usec}]
+				if {0 && $accuracy < 0.9} {
+					set bit			[lindex $tres 2]
+					set batch		[expr {max(3, round($target_usec * 1.0/$it_usec * $batch))}]
+					apply $output notice "accuracy: $accuracy, refined guess: $batch: $tres"
+					set runbatch	[list apply $blambda $batch]
+					if 1 $runbatch
+				}
+				apply $output notice "tuned for $target_usec / it: [timerate $runbatch $target_bms]"
+				}
+			} else {
+				set runbatch	[list apply $blambda $batch]
 			}
-			set overhead	[::tcl::mathfunc::min {*}[lmap e $times {expr {$e / double($batch)}}]]
-			#apply $output debug [format {Overhead: %.3f usec, mean: %.3f for batch %d} $overhead [expr {double([+ {*}$times]) / ([llength $times]*$batch)}] $batch]
-			# Measure the instrumentation overhead to compensate for it >>>
+
+			#apply $output notice "Picked batchsize: $batch, runbatch:\n$runbatch"
+			#>>>
+
+			# Measure the instrumentation overhead to compensate for it <<<
+			#apply $output debug "Measuring overhead for $current_bench/$variant"
+			if {![dict exists $overheads $overhead_script]} {
+				# Only run each unique overhead script once (so the related variants are adjusted consistently)
+				set blambda_overhead	[list apply [apply $make_blambda $overhead_script] $batch]
+				dict set overheads $overhead_script	[lindex [timerate $blambda_overhead 100 1000000] 0]
+				#apply $output notice "overhead: [dict get $overheads $overhead_script] for\n$blambda_overhead with batch: ($batch)"
+			}
+			set overhead			[dict get $overheads $overhead_script]
 
 			set cv {data { # Calculate the coefficient of variation of $data <<<
 				lassign [::math::statistics::basic-stats $data] \
@@ -247,29 +386,32 @@ proc bench {name desc args} { #<<<
 			set cvmeans	{}
 			set cvtimes	{}
 			set elapsed	0
-			set bscript	[apply $make_script $batch $script]
 			#puts stderr "bscript $variant: $bscript"
 			# Run at least:
 			# - -min_it times
 			# - for half a second
 			# - until the coefficient of variability of the means has fallen below -target_cv, or a max of -max_time seconds
+			#apply $output notice "$name/$variant timing runbatch:\n$runbatch"
 			while {
 				[llength $times] < $opts(-min_it) ||
 				$elapsed < $opts(-min_time) ||
 				($elapsed < $opts(-max_time) && $cvmeans > $opts(-target_cv))
 			} {
-				set start [clock microseconds]
-				uplevel 1 [list if 1 $bscript]
-				set batchtime	[- [clock microseconds] $start]
-				lappend times [expr {
-					$batchtime / double($batch) - $overhead
-				}]
+				#set before	[clock microseconds]
+				set batchtime	[lindex [set tres [timerate -overhead $overhead $runbatch 100]] 0]
+				if {$batchtime == 0} {
+					# The calibration can cause this run to return below the measured overhead and be clamped to 0
+					#apply $output notice "Overhead compensation clamping: [expr {([clock microseconds]-$before)}] usec clamped to 0 with -overhead $overhead, tres: $tres"
+					set batchtime	[expr {1e-16}]
+				}
+				lappend times [expr {$batchtime / double($batch)}]
+				#apply $output notice "Recorded time [lindex $times end], from \$before: [expr {[clock microseconds]-$before}], batch: $batch, tres: $tres"
 				set elapsed		[expr {([clock microseconds] - $begin)/1e6}]
 				set cvtimes		[lrange $times end-[+ 1 $opts(-window)] end]	;# Consider the last $opts(-window) data in estimating the variation
 				lappend means	[expr {[+ {*}$cvtimes]/[llength $cvtimes]}]
 				set _cv			[apply $cv $cvtimes]
 				set cvmeans		[apply $cv [lrange $means end-[+ 1 $opts(-window)] end]]
-				#puts stderr "Got time for $variant batch($batch), batchtime $batchtime usec: [format %.4f [lindex $times end]], elapsed: [format %.3f $elapsed] sec[if {[info exists cvmeans]} {format {, cvmeans: %.3f} $cvmeans}][if {[info exists _cv]} {format {, cv: %.3f} $_cv}], mean: [format %.5f [lindex $means end]]"
+				#apply $output notice "Got time for $variant batch($batch), batchtime $batchtime usec: [format %.4f [lindex $times end]], elapsed: [format %.3f $elapsed] sec[if {[info exists cvmeans]} {format {, cvmeans: %.3f} $cvmeans}][if {[info exists _cv]} {format {, cv: %.3f} $_cv}], mean: [format %.5f [lindex $means end]]"
 			}
 
 			dict set variant_stats $variant [_make_stats $cvtimes]
@@ -277,11 +419,51 @@ proc bench {name desc args} { #<<<
 			dict set variant_stats $variant cv			[apply $cv $cvtimes]
 			dict set variant_stats $variant runtime		$elapsed
 			dict set variant_stats $variant it			[llength $cvtimes]
+			apply $output notice "Measured $name/$variant: [format %.3f [expr {([clock microseconds]-$variant_start)/1e6}]] seconds"
 		}
 
 		lappend run $name $desc $variant_stats
 	} finally {
 		_run_if_set $opts(-cleanup)
+
+		# Auto cleanup <<<
+		set aftervars	[lsort [info vars ::_bench_private::*]]
+		set aftercmds	[lsort [info commands ::_bench_private::*]]
+		#apply $output notice "beforecmds: ($beforecmds)"
+		#apply $output notice " aftercmds: ($aftercmds)"
+		set cleanvars	{}
+		while {[llength $aftervars]} {
+			if {[llength $beforevars] == 0} {
+				lappend cleanvars	{*}$aftervars
+				break
+			}
+			switch [string compare [lindex $beforevars 0] [lindex $aftervars 0]] {
+				-1	{set beforevars	[lrange $beforevars 1 end]}
+				0	{set aftervars	[lrange $aftervars 1 end]; set beforevars [lrange $beforevars 1 end]}
+				1	{set aftervars	[lassign $aftervars newvar]; lappend cleanvars $newvar}
+			}
+		}
+		#apply $output notice "Autocleaning vars: $cleanvars"
+		unset -nocomplain {*}$cleanvars
+
+		set cleancmds	{}
+		while {[llength $aftercmds]} {
+			if {[llength $beforecmds] == 0} {
+				lappend cleancmds	{*}$aftercmds
+				break
+			}
+			switch [string compare [lindex $beforecmds 0] [lindex $aftercmds 0]] {
+				-1	{set beforecmds	[lrange $beforecmds 1 end]}
+				0	{set aftercmds	[lrange $aftercmds 1 end]; set beforecmds [lrange $beforecmds 1 end]}
+				1	{set aftercmds	[lassign $aftercmds newcmd]; lappend cleancmds $newcmd}
+			}
+		}
+		foreach cmd $cleancmds {
+			#apply $output notice "Autocleaning cmd ($cmd)"
+			rename $cmd {}
+		}
+		#>>>
+
 		unset current_bench
 	}
 }; namespace export bench
@@ -305,7 +487,7 @@ namespace eval display_bench {
 	proc short {name desc variant_stats relative {pick median}} { #<<<
 		variable output
 
-		bench::output notice [_heading [format {%s: "%s"} $name $desc]]
+		::bench::output notice [_heading [format {%s: "%s"} $name $desc]]
 
 		# Gather the union of all the variant names from this and past runs
 		set variants	[dict keys $variant_stats]
@@ -370,10 +552,10 @@ namespace eval display_bench {
 		# Output the row data
 		foreach row $rows {
 			set data	[list {*}$row {*}[lrepeat [- $col_count [llength $row]] --]]
-			bench::output notice [format $fmt {*}$data]
+			::bench::output notice [format $fmt {*}$data]
 		}
 
-		bench::output notice ""
+		::bench::output notice ""
 	}
 
 	#>>>
@@ -382,12 +564,15 @@ proc run_benchmarks {dir args} { #<<<
 	variable skipped
 	variable run
 	variable match
+	variable skip
 	variable output
 
 	set match				*
+	set skip				{}
 	set relative			{}
 	set display_mode		short
 	set display_mode_args	{}
+	set rundata				.
 
 	set consume_args [list  \
 		count {
@@ -408,19 +593,34 @@ proc run_benchmarks {dir args} { #<<<
 		lassign [apply $consume_args 1] next
 
 		switch -- $next {
+			-rundata {
+				lassign [apply $consume_args 1] rundata
+			}
+
+			-load {
+				lassign [apply $consume_args 1] load_script
+				namespace eval :: $load_script
+			}
+
 			-match {
 				lassign [apply $consume_args 1] match
 			}
 
+			-skip {
+				lassign [apply $consume_args 1] skip
+			}
+
 			-relative {
 				lassign [apply $consume_args 2] label rel_fn
+				set rel_fn	[file join $rundata $rel_fn]
 				if {[file readable $rel_fn]} {
-					dict set relative $label [_readfile $rel_fn]
+					dict set relative $label [_readfile [file join $rundata $rel_fn]]
 				}
 			}
 
 			-save {
 				lassign [apply $consume_args 1] save_fn
+				set save_fn	[file join $rundata $save_fn]
 			}
 
 			-display {
@@ -438,12 +638,18 @@ proc run_benchmarks {dir args} { #<<<
 		}
 	}
 
+	timerate -calibrate {} 1000
 	set stats	{}
 	foreach f [glob -nocomplain -type f -dir $dir -tails *.bench] {
-		uplevel 1 [list if 1 [list source [file join $dir $f]]]
+		try {
+			namespace eval ::_bench_private {namespace path {::bench}}
+			namespace eval ::_bench_private [list source [file join $dir $f]]
+		} finally {
+			namespace delete ::_bench_private
+		}
 	}
 
-	set save {{save_fn run} {
+	set save [list {save_fn run} {
 		set save_data	$run
 		if {[file readable $save_fn]} {
 			# If the save file already exists, merge this run's data with it
@@ -457,9 +663,9 @@ proc run_benchmarks {dir args} { #<<<
 			}
 		}
 		_writefile $save_fn $save_data
-	}}
+	} [namespace current]]
 
-	apply $save last $run	;# Always save as "last", even if explicitly saving as something else too
+	apply $save [file join $rundata last] $run	;# Always save as "last", even if explicitly saving as something else too
 	if {[info exists save_fn]} {
 		apply $save $save_fn $run
 	}

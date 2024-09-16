@@ -3,126 +3,274 @@ if {"bench" ni [info commands bench]} {
 	namespace import bench::*
 }
 
-
 package require pgwire
-package require tdbc::pgwire
-package require tdbc::postgres
 
-proc main {} {
-bench tdbcpgwire-4.1 {prepared statement allrows, 1 row, 1 column} -setup { #<<<
-	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
-	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+source [file join [file dirname [file normalize [info script]]] common.tcl]
 
-	set film_id	286
-	set q		{select title from film where film_id=:film_id}
-	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
-	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
-} -compare {
-	tdbc_pgwire {
-		[dict get $stmts tdbc_pgwire] allrows
+proc make_tdbc_pgwire_stmts {} { #<<<
+	variable stmts
+	variable q
+	package require tdbc::pgwire
+	if {[info commands tdbc_pgwire] eq ""} {
+		tdbc::pgwire::connection create tdbc_pgwire -host db -db pagila -user postgres -password insecure
+		dict set stmts tdbc_pgwire	[tdbc_pgwire prepare $q]
 	}
-	tdbc_postgres {
-		[dict get $stmts tdbc_postgres] allrows
-	}
-} -cleanup {
-	dict for {k v} $stmts {
-		if {[info object isa object $v]} {
-			$v destroy
-		}
-	}
-	foreach obj {tdbc_pgwire tdbc_postgres} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	unset -nocomplain stmts k v film_id q
-} -result {{title {ENOUGH RAGING}}}
-#>>>
-bench tdbcpgwire-4.2 {prepared statement allrows, many rows, many columns} -setup { #<<<
-	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
-	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
-
-	set q		{select * from film}
-	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
-	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
-} -compare {
-	tdbc_pgwire {
-		llength [[dict get $stmts tdbc_pgwire] allrows]
-	}
-	tdbc_postgres {
-		llength [[dict get $stmts tdbc_postgres] allrows]
-	}
-} -cleanup {
-	dict for {k v} $stmts {
-		if {[info object isa object $v]} {
-			$v destroy
-		}
-	}
-	foreach obj {tdbc_pgwire tdbc_postgres} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	unset -nocomplain stmts k v film_id q
-} -result 1000
-#>>>
-bench tdbcpgwire-20.1 {resultset allrows, many rows, many columns} -setup { #<<<
-	tdbc::pgwire::connection   create tdbc_pgwire   -host db -db pagila -user postgres -password insecure
-	tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
-
-	set q		{select * from film}
-	dict set stmts tdbc_pgwire		[tdbc_pgwire   prepare $q]
-	dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
-} -compare {
-	tdbc_pgwire {
-		set res			{}
-		set count		0
-		set resultset	[[dict get $stmts tdbc_pgwire] execute]
-		while {[$resultset nextdict row]} {
-			incr count
-			if {![dict exists $row film_id]} {
-				::pgwire::log error "No film_id in row: ($row)"
-				continue
-			}
-			if {[dict get $row film_id] == 286} {
-				lappend res	[dict get $row title]
-			}
-		}
-		list $count [$resultset rowcount] $res
-	}
-	tdbc_postgres {
-		set res			{}
-		set count		0
-		set resultset	[[dict get $stmts tdbc_postgres] execute]
-		while {[$resultset nextdict row]} {
-			incr count
-			if {![dict exists $row film_id]} {
-				::pgwire::log error "No film_id in row: ($row)"
-				continue
-			}
-			if {[dict get $row film_id] == 286} {
-				lappend res	[dict get $row title]
-			}
-		}
-		list $count [$resultset rowcount] $res
-	}
-} -cleanup {
-	dict for {k v} $stmts {
-		if {[info object isa object $v]} {
-			$v destroy
-		}
-	}
-	foreach obj {tdbc_pgwire tdbc_postgres} {
-		if {[info object isa object $obj]} {
-			$obj destroy
-		}
-	}
-	unset -nocomplain stmts k v q res count stmt resultset row
-} -result {1000 1000 {{ENOUGH RAGING}}}
-#>>>
-
 }
 
-main
+#>>>
+proc make_tdbc_postgres_stmts {} { #<<<
+	variable stmts
+	variable q
+	package require tdbc::postgres
+	if {[info commands tdbc_postgres] eq ""} {
+		tdbc::postgres::connection create tdbc_postgres -host db -db pagila -user postgres -password insecure
+		dict set stmts tdbc_postgres	[tdbc_postgres prepare $q]
+	}
+}
+
+#>>>
+proc destroy_stmts {} { #<<<
+	variable stmts
+	dict for {k v} $stmts {
+		if {[info object isa object $v]} {
+			$v destroy
+		}
+	}
+}
+
+#>>>
+
+# allrows
+bench tdbcpgwire-1.1 {prepared statement allrows, 1 row, 1 column} -setup { #<<<
+	variable film_id	286
+	variable q			{select title from film where film_id=:film_id}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable film_id; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ [dict get $stmts tdbc_pgwire] allrows }
+	pgwire_%acc%		{ pgwire_lo allrows $q }
+	tdbc_postgres		{ [dict get $stmts tdbc_postgres] allrows }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result {{title {ENOUGH RAGING}}}
+#>>>
+bench tdbcpgwire-1.2 {prepared statement allrows, all rows, 1 column} -setup { #<<<
+	variable q			{select film_id from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ foreach row [[dict get $stmts tdbc_pgwire] allrows]   {incr idsum [dict get $row film_id]}; set idsum }
+	pgwire_%acc%		{ foreach row [pgwire_lo allrows $q]                    {incr idsum [dict get $row film_id]}; set idsum }
+	tdbc_postgres		{ foreach row [[dict get $stmts tdbc_postgres] allrows] {incr idsum [dict get $row film_id]}; set idsum }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result 500500
+#>>>
+bench tdbcpgwire-1.3 {prepared statement allrows, all rows, medium number columns} -setup { #<<<
+	variable q			{select film_id,title,description,release_year from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ foreach row [[dict get $stmts tdbc_pgwire] allrows]   {incr idsum [dict get $row film_id]}; set idsum }
+	pgwire_%acc%		{ foreach row [pgwire_lo allrows $q]                    {incr idsum [dict get $row film_id]}; set idsum }
+	tdbc_postgres		{ foreach row [[dict get $stmts tdbc_postgres] allrows] {incr idsum [dict get $row film_id]}; set idsum }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result 500500
+#>>>
+bench tdbcpgwire-1.4 {prepared statement allrows, all rows, all columns} -setup { #<<<
+	variable q			{select * from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ foreach row [[dict get $stmts tdbc_pgwire] allrows]   {incr idsum [dict get $row film_id]}; set idsum }
+	pgwire_%acc%		{ foreach row [pgwire_lo allrows $q]                    {incr idsum [dict get $row film_id]}; set idsum }
+	tdbc_postgres		{ foreach row [[dict get $stmts tdbc_postgres] allrows] {incr idsum [dict get $row film_id]}; set idsum }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result 500500
+#>>>
+
+# foreaach
+bench tdbcpgwire-2.1 {prepared statement foreach, 1 row, 1 column} -setup { #<<<
+	variable film_id	286
+	variable q			{select title from film where film_id=:film_id}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable film_id; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ [dict get $stmts tdbc_pgwire]   foreach row {lappend rows $row}; set rows }
+	pgwire_%acc%		{ pgwire_lo foreach row $q                    {lappend rows $row}; set rows }
+	tdbc_postgres		{ [dict get $stmts tdbc_postgres] foreach row {lappend rows $row}; set rows }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result {{title {ENOUGH RAGING}}}
+#>>>
+bench tdbcpgwire-2.2 {prepared statement foreach, all rows, 1 column} -setup { #<<<
+	variable q			{select film_id from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ foreach row [[dict get $stmts tdbc_pgwire] allrows]   {incr idsum [dict get $row film_id]}; set idsum }
+	pgwire_%acc%		{ foreach row [pgwire_lo allrows $q]                    {incr idsum [dict get $row film_id]}; set idsum }
+	tdbc_postgres		{ foreach row [[dict get $stmts tdbc_postgres] allrows] {incr idsum [dict get $row film_id]}; set idsum }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result 500500
+#>>>
+bench tdbcpgwire-2.3 {prepared statement foreach, all rows, medium number columns} -setup { #<<<
+	variable q			{select film_id,title,description,release_year from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ foreach row [[dict get $stmts tdbc_pgwire] allrows]   {incr idsum [dict get $row film_id]}; set idsum }
+	pgwire_%acc%		{ foreach row [pgwire_lo allrows $q]                    {incr idsum [dict get $row film_id]}; set idsum }
+	tdbc_postgres		{ foreach row [[dict get $stmts tdbc_postgres] allrows] {incr idsum [dict get $row film_id]}; set idsum }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result 500500
+#>>>
+bench tdbcpgwire-2.4 {prepared statement foreach, all rows, all columns} -setup { #<<<
+	variable q			{select * from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -transform {
+	* {script {return "variable stmts; variable q; $script"}}
+} -combinations {
+	*	{%acc% {tcl c}}
+} -deps {
+	*_tcl			disable_acc
+	*_c				try_force_acc
+	{}				restore_acc
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -compare {
+	tdbc_pgwire_%acc%	{ foreach row [[dict get $stmts tdbc_pgwire] allrows]   {incr idsum [dict get $row film_id]}; set idsum }
+	pgwire_%acc%		{ foreach row [pgwire_lo allrows $q]                    {incr idsum [dict get $row film_id]}; set idsum }
+	tdbc_postgres		{ foreach row [[dict get $stmts tdbc_postgres] allrows] {incr idsum [dict get $row film_id]}; set idsum }
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result 500500
+#>>>
+
+bench tdbcpgwire-22.1 {resultset allrows, many rows, many columns} -setup { #<<<
+	variable q		{select * from film}
+
+	save_acc
+	make_tdbc_pgwire_stmts
+	make_pgwire_lo
+} -deps {
+	tdbc_postgres	make_tdbc_postgres_stmts
+} -transform {
+	* {script {return "variable stmts; $script"}}
+} -combinations {
+	* {%driver% {pgwire postgres}}
+} -compare {
+	tdbc_%driver% {
+		set res			{}
+		set count		0
+		set resultset	[[dict get $stmts tdbc_%driver%] execute]
+		while {[$resultset nextdict row]} {
+			incr count
+			if {![dict exists $row film_id]} {
+				::pgwire::log error "No film_id in row: ($row)"
+				continue
+			}
+			if {[dict get $row film_id] == 286} {
+				lappend res	[dict get $row title]
+			}
+		}
+		list $count [$resultset rowcount] $res
+	}
+} -cleanup {
+	destroy_stmts
+	restore_acc
+} -result {1000 1000 {{ENOUGH RAGING}}}
+#>>>
 
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

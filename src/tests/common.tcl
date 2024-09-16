@@ -8,6 +8,40 @@ package require pgwire
 #puts "db: [exec ping -c 1 db]"
 package require unix_sockets
 
+proc _ms {desc script} {
+	global _ts_stack
+	if {[info exists _ts_stack]} {
+		lappend _ts_stack	{}
+	} else {
+		set _ts_stack {{}}
+	}
+	set a			[clock microseconds]
+	set code		[catch {uplevel 1 $script} r o]
+	set end			[clock microseconds]
+	set range		[expr {$end - $a}]
+	set elapsed		[expr {$range/1e6}]
+	set stamps		[lindex $_ts_stack end]
+	set _ts_stack	[lrange $_ts_stack 0 end-1]
+	if {[llength $_ts_stack] == 0} {unset _ts_stack}
+	set msg	"_ms($desc): [format %.3f $elapsed] ms"
+	if {[llength $stamps]} {
+		append msg	", stamps:\n[join [lmap e $stamps {
+			lassign $e usec tsdesc
+			set f	[expr {($usec-$a)*100.0/$range}]
+			format {  %5.1f %%: %s} $f $tsdesc 
+		}] \n]"
+	}
+	puts $msg
+	if {$code == 1} {return -code $code -options $o $r}
+	return -code $code $r
+}
+
+proc _ts {desc {res {}}} {
+	global _ts_stack
+	lset _ts_stack end end+1 [list [clock microseconds] $desc]
+	set res
+}
+
 #set connect {
 #	unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]
 #}
@@ -15,8 +49,14 @@ set connect {
 	socket db 5432
 }
 set std_setup {
-	set dbchan	[try $connect]
-	pgwire create pg $dbchan pagila postgres insecure
+	set _std_setup_before	[clock microseconds]
+	try {
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} finally {
+		#puts stderr "std_setup time: [format %.3f [expr {([clock microseconds]-$_std_setup_before)/1e6}]] ms"
+		unset -nocomplain _std_setup_before
+	}
 }
 
 if {[info object isa object pgwire_tap]} {

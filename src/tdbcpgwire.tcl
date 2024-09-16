@@ -313,6 +313,8 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		con
 		sql
 
+		stmt_info
+
 		stmt_name
 		build_params
 		rformats
@@ -321,6 +323,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		ops_cache
 		param_types
 		delims
+		debug_cx
 	}
 
 	constructor {instance sqlcode} { #<<<
@@ -357,7 +360,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	method _start_query {as opts args} { #<<<
 		$con buffer_nesting
 
-		try {uplevel 1 $build_params} on ok parameters {}
+		set parameters	[uplevel 1 [list apply $build_params]]
 
 		if {[dict exists $opts -columnsvariable]} {
 			upvar 2 [dict get $opts -columnsvariable] cols
@@ -371,18 +374,34 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 				set ops	[::pgwire::build_ops $as $c_types]
 				$con save_ops $sql $as $ops
 			}
-			set makerow	{set row [::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow $delims]}
+			set makerow	{::pgwire::c_makerow2 $ops $columns $tcl_encoding $datarow $delims}
+			set makerows [list {ops columns tcl_encoding datarows delims} [format {
+				variable ::pgwire::arr_fmt_cache
+				upvar 1 rows rows
+				foreach datarow $datarows {
+					lappend rows [%s]
+				}
+			} $makerow]]
 		} else {
 			set ops		{}
 			set makerow	[$con tcl_makerow $as $c_types]
+			set makerows [list {ops columns tcl_encoding datarows delims} [format {
+				variable ::pgwire::arr_fmt_cache
+				upvar 1 rows rows
+				foreach datarow $datarows {
+					%s
+					lappend rows $row
+				}
+			} $makerow]]
 		}
 
-		list $makerow $parameters $ops
+		list $makerow $parameters $ops $makerows
 	}
 
 	#>>>
 	method allrows args { #<<<
 		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
 
 		set args	[::tdbc::ParseConvenienceArgs $args opts]
 		switch -exact -- [llength $args] {
@@ -399,13 +418,13 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		set max_rows_per_batch	0
 
 		set tcl_encoding	[$con tcl_encoding]
-		lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+		lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
 
 		try {
 			set rowbuffer	[namespace current]::portal
 			try {
 				coroutine $rowbuffer $con rowbuffer_coro \
-					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 				# 0A000 - happens if a schema change alters the result row format
@@ -415,12 +434,12 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 				set stmt_info	[$con reprepare $sql]
 				dict with stmt_info {}
 
-				lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+				lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
 
 				coroutine $rowbuffer $con rowbuffer_coro \
-					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
 			} on error {errmsg options} {
-				puts stderr "Unhandled error: $options"
+				::pgwire::log error "Unhandled error: $options"
 			}
 
 			set rows	{}
@@ -428,16 +447,10 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			while 1 {
 				lassign [$rowbuffer nextbatch] outcome details datarows
 
-				foreach datarow $datarows {
-					try $makerow
-					lappend rows $row
-				}
+				apply $makerows $ops $columns $tcl_encoding $datarows $delims
 
 				switch -exact -- $outcome {
-					CommandComplete -
-					EmptyQueryResponse {
-						break
-					}
+					CommandComplete - EmptyQueryResponse {break}
 					PortalSuspended {}
 					default {
 						error "Unexpected outcome from rowbuffer nextbatch: \"$outcome\""
@@ -462,6 +475,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	#>>>
 	method foreach args { #<<<
 		variable ::tdbc::generalError
+		variable ::pgwire::arr_fmt_cache
 
 		set args	[::tdbc::ParseConvenienceArgs $args opts]
 		switch -exact -- [llength $args] {
@@ -479,12 +493,12 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		set max_rows_per_batch	[$con batchsize]
 
 		set tcl_encoding	[$con tcl_encoding]
-		lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+		lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
 
 		set rowbuffer	[namespace current]::portal
 		try {
 			coroutine $rowbuffer $con rowbuffer_coro \
-				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
 		} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 		  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 			# 0A000 - happens if a schema change alters the result row format
@@ -494,10 +508,10 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 			set stmt_info	[$con reprepare $sql]
 			dict with stmt_info {}
 
-			lassign [my _start_query $as $opts {*}$args] makerow parameters ops
+			lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
 
 			coroutine $rowbuffer $con rowbuffer_coro \
-				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch
+				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
 		} on error {errmsg options} {
 			puts stderr "Unhandled error: $options"
 		}
@@ -509,7 +523,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 				lassign [$rowbuffer nextbatch] outcome details datarows
 
 				foreach datarow $datarows {
-					try $makerow
+					set row	[try $makerow]
 					try {
 						uplevel 1 $script
 					} on break {} {
@@ -531,10 +545,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 				}
 
 				switch -exact -- $outcome {
-					CommandComplete -
-					EmptyQueryResponse {
-						break
-					}
+					CommandComplete - EmptyQueryResponse {break}
 					PortalSuspended {}
 					default {
 						error "Unexpected outcome from rowbuffer nextbatch: \"$outcome\""
@@ -600,6 +611,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	method ops_cache {} { set ops_cache }
 	method sqlcode {} { set sql }
 	method delims {} { set delims }
+	method stmt_info {} { set stmt_info }
 }
 
 #>>>
@@ -620,6 +632,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		ops_dicts
 		ops_lists
 		delims
+		stmt_info
 	}
 
 	constructor {stmt args} { #<<<
@@ -648,6 +661,7 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set stmt_name			[$stmt stmt_name]
 		set ops_cache			[$stmt ops_cache]
 		set delims				[$stmt delims]
+		set stmt_info			[$stmt stmt_info]
 		set tcl_encoding		[$con tcl_encoding]
 		set max_rows_per_batch	[$con batchsize]
 		foreach format {dicts lists} {
@@ -674,8 +688,8 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 
 		$con buffer_nesting
 
-		try [$stmt build_params] on ok parameters {}
-		coroutine [namespace current]::portal $con rowbuffer_coro $stmt_name [self] $rformats $parameters $max_rows_per_batch
+		set parameters	[apply [$stmt build_params]]
+		coroutine [namespace current]::portal $con rowbuffer_coro $stmt_name [self] $rformats $parameters $max_rows_per_batch $stmt_info
 
 		set open	1
 	}
@@ -741,9 +755,11 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			set datarows	[lassign $datarows[unset datarows] datarow]
 			#::pgwire::log notice "Popped data: [string length $datarow], [llength $datarows] rows remain"
 
+			set row	[
 			# makerow_start
-			set row	[::pgwire::c_makerow2 $ops_%format%s $columns $tcl_encoding $datarow $delims]
+			::pgwire::c_makerow2 $ops_%format%s $columns $tcl_encoding $datarow $delims
 			# makerow_end
+			]
 			return 1
 		}]
 	}

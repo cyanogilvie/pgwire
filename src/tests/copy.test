@@ -15,6 +15,7 @@ foreach impl {tcl c} {
 
 	# common -setup and -cleanup <<<
 	set commonargs	[list -setup {
+		set test_cleanup	{}
 		set dbchan	[try $connect]
 		pgwire create pg $dbchan pagila postgres insecure "application_name $::testname"
 		pg allrows {create temporary table if not exists copy_from_test (id serial, name text)}
@@ -23,7 +24,7 @@ foreach impl {tcl c} {
 		pg allrows {drop table if exists copy_from_test}
 		eval $test_cleanup
 		if {[info object isa object pg]} {rename pg {}}
-		unset -nocomplain dbchan
+		unset -nocomplain dbchan test_cleanup
 	}]
 	#>>>
 

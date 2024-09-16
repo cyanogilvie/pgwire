@@ -1,0 +1,71 @@
+if {"bench" ni [info commands bench]} {
+	package require bench
+	namespace import bench::*
+}
+
+package require pgwire
+source [file join [file dirname [file normalize [info script]]] common.tcl]
+
+bench build_params-1.0 {Many bound params} -setup { #<<<
+	save_acc
+	make_pgwire_lo
+
+	variable vars	[lmap e {a b c d e f g h i j k l} {string cat var_ $e}]
+	variable dict	{}
+
+	set n	0
+	foreach v $vars {
+		variable $v [incr n]
+		dict set dict $v $n
+	}
+
+} -combinations {
+	* {
+		%af%		{lo uds}
+		%varsource%	{
+			{vars {%source% {}}}
+			{dict {%source%	{$dict}}}
+		}
+		%acc%		{tcl c}
+	}
+} -transform {
+	* {script {
+		variable vars
+		set terms	[join [lmap v $vars {format {:%s::integer} $v}] { + }]
+		set script_map	[list %%terms%% $terms]
+		return "[join [lmap v $vars {subst {variable $v}}] {;}]; variable dict; [string map $script_map $script]"
+	}}
+} -deps {
+	*_tcl	{ set ::pgwire::accelerators 0 }
+	*_c		{ variable acc; if {!$acc} {error "Accelerators not available"}; set ::pgwire::accelerators 1 }
+	{}		{ variable acc; set ::pgwire::accelerators	$acc }
+	*_uds_*	{ make_pgwire_uds }
+	tdbc_*	{ make_tdbc_postgres }
+
+} -overhead {
+	pgwire_* {
+		#pgwire_uds sync	;# Just compensate for the sync round-trip
+	}
+	tdbc_* {
+		#tdbc_postgres allrows -as lists {select 1}
+	}
+
+} -compare {
+	pgwire_%af%_%varsource%_%acc% {
+		pgwire_%af% onecolumn {
+			select %%terms%%
+		} %source%
+	}
+
+	tdbc_%varsource% {
+		lindex [tdbc_postgres allrows -as lists {
+			select %%terms%%
+		} %source%] 0 0
+	}
+
+} -cleanup {
+	restore_acc
+} -result 78
+#>>>
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

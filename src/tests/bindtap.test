@@ -1,0 +1,41 @@
+source [file join [file dirname [file normalize [info script]]] common.tcl]
+
+test bindtap-1.1 {Test basic query} -setup { #<<<
+	set ::tap_h	[file tempfile]
+	chan configure $::tap_h -translation binary -buffersize 1000000
+	proc ::pgwire::bindtap {obj stmt_info parameters} {
+		global tap_h
+		puts $tap_h "bindtap obj: $obj, c_types: [dict get $stmt_info c_types], [dict get $stmt_info debug_cx], parameters [regexp -all -inline .. [binary encode hex $parameters]]"
+	}
+	proc ::pgwire::restap {obj res} {
+		global tap_h
+		puts $tap_h "restap obj: $obj [regexp -all -inline .. [binary encode hex $res]]"
+	}
+	set dbchan	[try $connect]
+	pgwire create pg $dbchan pagila postgres insecure
+	set a	6
+	set b	7
+} -body {
+	list [pg onecolumn {select :a::integer * :b::integer}] [seek $::tap_h 0; read $::tap_h]
+} -cleanup {
+	foreach obj {pg} {
+		if {[info object isa object $obj]} {
+			$obj destroy
+		}
+	}
+	if {[info exists dbchan] && $dbchan in [chan names]} {
+		close $dbchan
+	}
+	proc ::pgwire::bindtap args {}
+	proc ::pgwire::restap args {}
+	close $::tap_h
+	unset -nocomplain dbchan obj a b ::tap_h
+} -result {42 {bindtap obj: ::pg, c_types: ?column? int4 {}, params_assigned {a {id 1} b {id 2}} sql_compiled {select $1::integer * $2::integer}, parameters 00 02 00 01 00 01 00 02 00 00 00 04 00 00 00 06 00 00 00 04 00 00 00 07
+restap obj: ::pg 43 6f 6d 6d 61 6e 64 43 6f 6d 70 6c 65 74 65 20 7b 53 45 4c 45 43 54 20 31 7d 20 00 01 00 00 00 04 00 00 00 2a
+}}
+#>>>
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
