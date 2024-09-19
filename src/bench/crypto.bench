@@ -1,0 +1,218 @@
+if {"bench" ni [info commands bench]} {
+	package require bench
+	namespace import bench::*
+}
+
+package require pgwire
+
+source [file join [file dirname [file normalize [info script]]] common.tcl]
+
+proc have_jitc {} { #<<<
+	package require jitc
+	variable base
+	variable jitc_hash_cdef [list options {-Wall -Werror} code [readfile [file join $base jitc_hash.c]]]
+	jitc::bind [namespace current]::_jitc_sha256		$jitc_hash_cdef sha256
+	jitc::bind [namespace current]::_jitc_hmac_sha256	$jitc_hash_cdef hmac_sha256
+	jitc::bind [namespace current]::_jitc_sasl_hi		$jitc_hash_cdef sasl_hi
+	jitc::bind [namespace current]::_jitc_md5			$jitc_hash_cdef md5
+}
+
+#>>>
+proc have_tc_cdef {} { #<<<
+	have_jitc;
+	package require tomcrypt;
+	if {![info exists ::pgwire::tc_cdef]} {error "No ::pgwire::tc_cdef"}
+	::jitc::bind [namespace current]::_tc_sha256 $::pgwire::tc_cdef sha256
+}
+
+#>>>
+proc have_af_alg {} { #<<<
+	package require jitc
+	if {
+		[exec uname -s] ne "Linux" ||
+		[exec uname -r] < "2.6.38"
+	} {
+		error "No AF_ALG support"
+	} else {
+		::jitc::bind [namespace current]::_af_alg_sha256 $::pgwire::af_alg_cdef hash sha256
+	}
+}
+
+#>>>
+proc have_hash {} { #<<<
+	package require hash
+	proc _sha256 bytes {binary decode hex [::hash::sha256 $bytes]}
+	proc _hmac_sha256 {K m} { #<<<
+		set opad	[string repeat \x5C 64]
+		set ipad	[string repeat \x36 64]
+		set keylen	[string length $K]
+		if {$keylen > 64} {
+			set K	[_sha256 $K]
+			set keylen	[string length $K]
+		} elseif {$keylen < 64} {
+			set K	$K[string repeat \0 [expr {64 - $keylen}]]
+		}
+		_sha256 [::pgwire::_xor $K $opad][_sha256 [::pgwire::_xor $K $ipad]$m]
+	}
+
+	#>>>
+	proc _sasl_hi {str salt it} { #<<<
+		set res		[_hmac_sha256 $str $salt[binary format Iu 1]]
+		set next	$res
+		for {set i 1} {$i < $it} {incr i} {
+			set next	[_hmac_sha256 $str $next]
+			set res		[::pgwire::_xor $res $next]
+		}
+		set res
+	}
+
+	#>>>
+}
+
+#>>>
+proc have_sha256sum {} { #<<<
+	proc _sha256sum bytes {
+		set h	[open |[list sha256sum] rb+]
+		try {
+			puts -nonewline $h $bytes
+			close $h write
+			binary decode hex [read $h 64]
+		} finally {
+			close $h
+		}
+	}
+
+	if {[_sha256sum foo] ne [binary decode hex 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae]} {
+		error "No functional sha256sum available"
+	}
+}
+
+#>>>
+
+bench crypto-1.1 {sha256 primitive implementations} -setup { #<<<
+	variable bytes	{Some bytes (no unicode)}
+} -transform {
+	* {script {return "variable bytes; $script"}}
+} -deps {
+	af_alg			have_af_alg
+	tomcrypt		have_tc_cdef
+	tomcrypt_tcl	{package require tomcrypt}
+	jitc			have_jitc
+	jitc_capply		{ variable jitc_hash_cdef; set jitc_hash_cdef }
+	hash			have_hash
+	tcllib			{ package require sha256 }
+	sha256sum		have_sha256sum
+} -compare {
+	af_alg			{ _af_alg_sha256 $bytes }
+	tomcrypt		{ _tc_sha256 $bytes }
+	tomcrypt_tcl	{ ::tomcrypt::hash sha256 $bytes }
+	jitc			{ _jitc_sha256 $bytes }
+	jitc_capply		{ variable jitc_hash_cdef; ::jitc::capply $jitc_hash_cdef sha256 $bytes }
+	hash			{ _sha256 $bytes }
+	tcllib			{ ::sha2::sha256 -bin -- $bytes }
+	sha256sum		{ _sha256sum $bytes }
+} -result [binary decode hex 3d9c24f0e6b531c066c2a2aeb6c7ef16cb43eeda9e0f1b7b12077300b4a20de9]
+
+#>>>
+bench crypto-2.1 {hmac_sha256 primitive implementations} -setup { #<<<
+	# K and data are from RFC 4231 Test Case 1
+	variable key	"\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b"
+	variable bytes	{Hi There}
+} -transform {
+	* {script {return "variable key; variable bytes; $script"}}
+} -deps {
+	af_alg		have_af_alg
+	tomcrypt	have_tc_cdef
+	jitc		have_jitc
+	hash_hmac	have_hash
+	tcllib		{ package require sha256 }
+} -compare {
+	af_alg		{ variable ::pgwire::af_alg_cdef; ::jitc::capply $af_alg_cdef hmac sha256 $key $bytes }
+	tomcrypt	{ variable ::pgwire::tc_cdef;     ::jitc::capply $tc_cdef     hmac_sha256 $key $bytes }
+	jitc		{ _jitc_hmac_sha256 $key $bytes }
+	hash_hmac	{ _hmac_sha256 $key $bytes }
+	tcllib		{ ::sha2::hmac -bin -key $key -- $bytes }
+} -result [binary decode hex b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7]
+
+#>>>
+bench crypto-3.1 {sasl_hi implementations} -setup { #<<<
+	package require stringprep	;# from tcllib
+	stringprep::register SASLprep \
+		-mapping		{B.1} \
+		-normalization	KC \
+		-prohibited		{C.1.2 C.2.1 C.2.2 C.3 C.4 C.5 C.6 C.7 C.8 C.9} \
+		-prohibitedBidi	true
+
+	variable it		4096
+	variable str	[stringprep::stringprep SASLprep "insecure"]
+	variable salt	"\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b"
+} -transform {
+	* {script {return "variable str; variable salt; variable it; $script"}}
+} -deps {
+	af_alg		have_af_alg
+	tomcrypt	have_tc_cdef
+	jitc		have_jitc
+	hash_hmac	have_hash
+	tcllib {
+		package require sha256
+		proc _tcllib_sasl_hi {str salt it} {
+			set res		[::sha2::hmac -bin -key $str -- $salt[binary format Iu 1]]
+			set next	$res
+			for {set i 1} {$i < $it} {incr i} {
+				set next	[::sha2::hmac -bin -key $str -- $next]
+				set res		[::pgwire::_xor $res $next]
+			}
+			set res
+		}
+		error disabled;		# Very, very slow
+	}
+} -compare {
+	af_alg		{ variable ::pgwire::af_alg_cdef; ::jitc::capply $af_alg_cdef sasl_hi $str $salt $it }
+	tomcrypt	{ variable ::pgwire::tc_cdef;     ::jitc::capply $tc_cdef     sasl_hi $str $salt $it }
+	jitc		{ _jitc_sasl_hi $str $salt $it }
+	hash_hmac	{ _sasl_hi $str $salt $it }
+	tcllib		{ _tcllib_sasl_hi $str $salt $it }
+} -result [binary decode hex 33951fa9b4e9febe0e32db1993c2f46fa0a4d03eb3875cb541e7f83b3a82cfe8]
+
+#>>>
+bench crypto-4.1 {xor implementations} -setup { #<<<
+	variable a	[binary decode hex 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae]
+	variable b	[binary decode hex fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9]
+} -transform {
+	* {script {return "variable a; variable b; $script"}}
+} -deps {
+	jitc {
+		jitc::bind [namespace current]::_jitc_xor $::pgwire::accel xor
+   	}
+	tcl {
+		proc _tcl_xor {a b} {
+			binary scan $a c* aL
+			binary scan $b c* bL
+			binary format c* [lmap ab $aL bb $bL {::tcl::mathop::^ $ab $bb}]
+		}
+	}
+} -compare {
+	tcl		{ _tcl_xor  $a $b }
+	jitc	{ _jitc_xor $a $b }
+} -result [binary decode hex d0f89f45b35aad7bf1fb5a8b3cceda6820cf3d9e261d1fef57df4f3eedd96817]
+
+#>>>
+bench crypto-5.1 {md5 implementations} -setup { #<<<
+	variable bytes	{Some bytes (no unicode)}
+} -transform {
+	* {script {return "variable bytes; $script"}}
+} -deps {
+	tomcrypt_tcl	{package require tomcrypt}
+	jitc			have_jitc
+	hash			have_hash
+	tcllib			{package require md5 2}
+} -compare {
+	tomcrypt_tcl	{::tomcrypt::hash md5 $bytes}
+	jitc			{_jitc_md5 $bytes}
+	hash			{::hash::md5 $bytes}
+	tcllib			{::md5::md5 $bytes}
+} -result [binary decode hex c63a7c2f07a789f4a0f4e9e20a2eff09]
+
+#>>>
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

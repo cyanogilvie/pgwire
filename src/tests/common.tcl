@@ -42,11 +42,22 @@ proc _ts {desc {res {}}} {
 	set res
 }
 
+if {[info exists ::env(PGHOST)]} {
+	set PGHOST	$::env(PGHOST)
+} else {
+	set PGHOST	db
+}
+if {[info exists ::env(PGPORT)]} {
+	set PGPORT	$::env(PGPORT)
+} else {
+	set PGPORT	5432
+}
+
 #set connect {
 #	unix_sockets::connect [file join $::env(PGHOST) .s.PGSQL.5432]
 #}
 set connect {
-	socket db 5432
+	socket $PGHOST $PGPORT
 }
 set std_setup {
 	set _std_setup_before	[clock microseconds]

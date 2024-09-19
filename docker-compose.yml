@@ -36,7 +36,8 @@ services:
             - ~/.aws:/root/.aws
         environment:
             POSTGRES_PASSWORD: insecure
-            PGHOST: /run/postgresql
+            #PGHOST: /run/postgresql
+            PGHOST: db
         security_opt:
           - seccomp:unconfined
         cap_add:

@@ -1,11 +1,7 @@
-package require tcltest
-namespace import ::tcltest::*
-::tcltest::loadTestedCommands
+set here	[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
 
-package require tdbc::pgwire
-package require tdbc::postgres
-
-set connargs	{-db pagila -user postgres -password insecure -host db -port 5432}
+set connargs	[list -db pagila -user postgres -password insecure -host $PGHOST -port $PGPORT]
 
 foreach impl {tcl c} {
 	unset -nocomplain saved_accelerators saved_force_generic_array
@@ -301,15 +297,11 @@ foreach impl {tcl c} {
 	#>>>
 	test tdbcpgwire_$impl-22.1.2 {tables method with pattern} -setup { #<<<
 		tdbc::pgwire::connection create tdbcpgwire {*}$connargs
-		tdbc::postgres::connection create tdbcpostgres {*}$connargs
 	} -body {
 		tdbcpgwire tables payment_%
 	} -cleanup {
 		if {[info object isa object tdbcpgwire]} {
 			tdbcpgwire destroy
-		}
-		if {[info object isa object tdbcpostgres]} {
-			tdbcpostgres destroy
 		}
 	} -result {payment_p2020_01 payment_p2020_02 payment_p2020_03 payment_p2020_04 payment_p2020_05 payment_p2020_06}
 	#>>>

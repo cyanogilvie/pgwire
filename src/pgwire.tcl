@@ -30,7 +30,10 @@ apply {{} {
 	}
 }}
 namespace eval ::pgwire { #<<<
-	if {[llength [info commands ::pgwire::log]] == 0} {
+	variable here			[file dirname [file normalize [info script]]]
+	variable arr_fmt_cache	{}
+
+	if {[llength [info commands ::pgwire::log]] == 0} { # Configure logging <<<
 		if {[info commands ::ns_log] ne ""} {
 			proc log {lvl msg} {
 				ns_log $lvl $msg
@@ -42,6 +45,8 @@ namespace eval ::pgwire { #<<<
 		}
 	}
 
+	#>>>
+	# Bind and response tap mechanism <<<
 	if {[llength [info commands ::pgwire::bindtap]] == 0} {
 		proc bindtap args {}
 		# receive a callback with each bind by redefining ::pgwire::bindtap {obj stmt_info parameters} {...}
@@ -50,15 +55,14 @@ namespace eval ::pgwire { #<<<
 		proc restap args {}
 		# receive a callback with each bind by redefining ::pgwire::restap {obj } {...}
 	}
-
-	variable arr_fmt_cache	{}
+	#>>>
 
 	# Testing toggles
 	if {![info exists _force_generic_array]} {
 		variable _force_generic_array	0
 	}
 
-	namespace eval tapchan {
+	namespace eval tapchan { # Tap all bytes sent and received <<<
 		namespace export *
 		namespace ensemble create -prefixes no
 
@@ -184,6 +188,7 @@ namespace eval ::pgwire { #<<<
 		#>>>
 	}
 
+	#>>>
 	namespace eval copy_from { # Stacked channel implementation for streaming COPY FROM data to the backend <<<
 		namespace export *
 		namespace ensemble create -prefixes no -map {
@@ -279,6 +284,23 @@ namespace eval ::pgwire { #<<<
 			set last $proc
 			return -level 0 $res
 		}
+	}
+
+	#>>>
+
+	proc _use_jitc {} { # True if an acceptable version of jitc is available and not blocked <<<
+		expr {
+			![info exists ::pgwire::block_accelerators] &&
+			![info exists ::env(PGWIRE_BLOCK_ACCELERATORS)] &&
+			![catch {package require jitc 0.5.5}]
+		}
+	}
+
+	#>>>
+	proc _read_c fn { #<<<
+		variable here
+		set h	[open [file join $here $fn] r]
+		try {read $h} finally {close $h}
 	}
 
 	#>>>
@@ -439,8 +461,8 @@ namespace eval ::pgwire { #<<<
 	set accel_ops	[apply {{} {
 		set res	{}
 
-		set opargs	{const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], Tcl_Obj* delim}
-		append res "typedef void (col_op)($opargs);\n"
+		set opargs	{Tcl_Interp* interp, const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], Tcl_Obj* delim}
+		append res "typedef int (col_op)($opargs);\n"
 
 		set opnames	{}
 		foreach {format add_column_key handle_null} {
@@ -452,7 +474,7 @@ namespace eval ::pgwire { #<<<
 			dicts {
 				replace_tclobj(rowv + c->rs++, c->cols[colnum]);
 			} {
-				return;
+				return TCL_OK;
 			}
 
 			dicts_no_nulls {
@@ -462,17 +484,15 @@ namespace eval ::pgwire { #<<<
 			}
 
 			vars {
-				replace_tclobj(&val, Tcl_ObjSetVar2(g_interp, c->cols[colnum], NULL, val, TCL_LEAVE_ERR_MSG));
-				if (val == NULL) {
-					// TODO: how best to handle this?
-					Tcl_BackgroundException(g_interp, TCL_ERROR);
-				}
+				replace_tclobj(&val, Tcl_ObjSetVar2(interp, c->cols[colnum], NULL, val, TCL_LEAVE_ERR_MSG));
+				if (val == NULL) return TCL_ERROR;
 				c->rs == -1;	// Signal that we don't set a rowvar
-				return;
+				replace_tclobj(&val, NULL);
+				return TCL_OK;
 			} {
-				Tcl_UnsetVar(g_interp, Tcl_GetString(c->cols[colnum]), 0);
+				Tcl_UnsetVar(interp, Tcl_GetString(c->cols[colnum]), 0);
 				c->rs == -1;	// Signal that we don't set a rowvar
-				return;
+				return TCL_OK;
 			}
 		} { 
 			foreach {type makeval} {
@@ -526,7 +546,8 @@ namespace eval ::pgwire { #<<<
 					%opname%			$opname \
 					%opargs%			$opargs \
 				] { //@begin=c@
-					static void %opname%(%opargs%) //<<<
+					#line 1 "<%opname%>"
+					static int %opname%(%opargs%) //<<<
 					{
 						Tcl_Obj*	val = NULL;
 
@@ -540,11 +561,12 @@ namespace eval ::pgwire { #<<<
 						%add_column_key%
 						replace_tclobj(&rowv[c->rs++], val);
 						replace_tclobj(&val, NULL);
+						return TCL_OK;
 					}
 
 					//>>>
-						//@end=c@@begin=c@
-					static void %opname%_array(%opargs%) //<<<
+					//@end=c@@begin=c@
+					static int %opname%_array(%opargs%) //<<<
 					{
 						Tcl_Obj*	val = NULL;
 
@@ -639,8 +661,9 @@ namespace eval ::pgwire { #<<<
 						}
 
 						%add_column_key%
-						replace_tclobj(rowv + c->rs++, val);
+						replace_tclobj(&rowv[c->rs++], val);
 						replace_tclobj(&val, NULL);
+						return TCL_OK;
 					}
 
 					//>>>
@@ -656,7 +679,8 @@ namespace eval ::pgwire { #<<<
 				%opname%			$opname \
 				%opargs%			$opargs \
 			] { // @begin=c@
-				static void %opname%_array(%opargs%) //<<<
+				#line 1 "<%opname%_array>"
+				static int %opname%_array(%opargs%) //<<<
 				{
 					Tcl_Obj*	val = NULL;
 
@@ -859,6 +883,7 @@ done:
 					%add_column_key%
 					replace_tclobj(&rowv[c->rs++], val);
 					replace_tclobj(&val, NULL);
+					return TCL_OK;
 				}
 
 				//>>>
@@ -876,9 +901,10 @@ done:
 			%opname_strings%	$opname_strings \
 			%opname_addrs%		$opname_addrs \
 		] {
+			#line 1 "<compile_ops>"
 			int compile_ops(Tcl_Interp* interp, Tcl_Obj* ops, col_op* opv[], int expecting)
 			{
-				int			retcode = TCL_OK;
+				int			code = TCL_OK;
 				Tcl_Obj**	ov = NULL;
 				int			oc;
 				static const char* opnames[] = {
@@ -890,887 +916,134 @@ done:
 				};
 				int opidx, i, opi = 0;
 
-				if (TCL_OK != (retcode = Tcl_ListObjGetElements(interp, ops, &oc, &ov)))
-					goto done;
+				TEST_OK_LABEL(finally, code, Tcl_ListObjGetElements(interp, ops, &oc, &ov));
 
 				if (oc != expecting) {
 					Tcl_SetObjResult(interp, Tcl_ObjPrintf("Expecting %d ops, got %d", expecting, oc));
-					retcode = TCL_ERROR;
-					goto done;
+					code = TCL_ERROR;
+					goto finally;
 				}
 
 				for (i=0; i<oc; i++) {
-					if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, ov[i], opnames, "op", TCL_EXACT, &opidx)))
-						goto done;
-
+					TEST_OK_LABEL(finally, code, Tcl_GetIndexFromObj(interp, ov[i], opnames, "op", TCL_EXACT, &opidx));
 					opv[opi++] = opaddr[opidx];
 				}
 
-done:
-				return retcode;
+			finally:
+				return code;
 			}
 
 			/* Testing only */
 			int compile_ops_cmd(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[])
 			{
-				int			retcode = TCL_OK;
+				int			code = TCL_OK;
 				int			expecting;
 				col_op**	ops = NULL;
 
-				if (objc != 3) {
-					Tcl_WrongNumArgs(interp, 1, objv, "ops expecting");
-					retcode = TCL_ERROR;
-					goto done;
-				}
+				enum {A_cmd, A_OPS, A_EXPECTING, A_objc};
+				CHECK_ARGS_LABEL(finally, code, "ops expecting");
 
-				if (TCL_OK != (retcode = Tcl_GetIntFromObj(interp, objv[2], &expecting)))
-					goto done;
+				TEST_OK_LABEL(finally, code, Tcl_GetIntFromObj(interp, objv[A_EXPECTING], &expecting));
 
 				ops = (col_op**)malloc(sizeof(col_op*) * expecting);
 
-				if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops, expecting)))
-					goto done;
+				TEST_OK_LABEL(finally, code, compile_ops(interp, objv[A_OPS], ops, expecting));
 
-			done:
+			finally:
 				if (ops) { free(ops); ops = NULL; }
-				return retcode;
+				return code;
 			}
 		}]
 
 		set res
 	}}]
 	#>>>
-	# C code <<<
+
 	set c_code	[string map [list \
 		%accel_ops%	$::pgwire::accel_ops \
-		%line%		[expr {46 + [dict get [info frame 0] line]}] \
-	] {
-		//@begin=c@
-		#include <byteswap.h>
-		#include <stdint.h>
-		#include <string.h>
-		#include <stdlib.h>
-
-		#define PGWIRE_LITS \
-			X( BLANK,	"" ) \
-			X( ONE,		"1" ) \
-			X( ZERO,	"0" ) \
-			X( TRUE,	"1" ) \
-			X( FALSE,	"0" )
-		enum {
-			#define X(sym, str) PGWIRE_LIT_##sym,
-			PGWIRE_LITS
-			#undef X
-			PGWIRE_LIT_SIZE
-		};
-		const char* lit_str[PGWIRE_LIT_SIZE] = {
-			#define X(sym, str) str,
-			PGWIRE_LITS
-			#undef X
-		};
-		static Tcl_Obj*	lit[PGWIRE_LIT_SIZE] = {0};
-
-		Tcl_Interp*		g_interp = NULL;
-
-		INIT {
-			g_interp = interp;
-			for (size_t i=0; i<PGWIRE_LIT_SIZE; i++) replace_tclobj(&lit[i], Tcl_NewStringObj(lit_str[i], -1));
-			//Tcl_Eval(interp,
-			//	"puts \"Init pgwire cdef, tid: [file tail [file readlink /proc/thread-self]], [thread::id], name: [if {[info exists ::ns_shim::interp_name]} {set ::ns_shim::interp_name}][if {[info exists ::ns_shim::interp_name_suffix]} {string cat / $::ns_shim::interp_name_suffix}]\"");
-			return TCL_OK;
-		}
-
-		RELEASE {
-			//fprintf(stderr, "pgwire cdef release\n");
-			g_interp = NULL;
-			for (size_t i=0; i<PGWIRE_LIT_SIZE; i++) replace_tclobj(&lit[i], NULL);
-		}
-
-		struct column_cx {
-			Tcl_Encoding	encoding;
-			int				rs;
-			Tcl_Obj**		cols;
-		};
-
-		//@end=c@@begin=c@
-
-		%accel_ops%
-		//#line %line%
-
-		struct foreach_state {
-			struct column_cx	col;
-			int					r;
-			int					datarowc;
-			Tcl_Obj**			datarowv;
-			int					colcount;
-			Tcl_Obj**			rowv;
-			Tcl_Obj*			row;
-			Tcl_Obj*			rowvar;
-			Tcl_Obj*			script;
-			col_op**			ops;
-			int					delimc;
-			Tcl_Obj**			delimv;
-		};
-
-		int c_makerow(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
-		{
-			const char* restrict		data = NULL;
-			int							data_len;
-			Tcl_Obj**					c_types = NULL;
-			int							c_types_len;
-			Tcl_Encoding				encoding;
-			int							i;
-			const char* restrict		p = NULL;
-			const char* restrict		e = NULL;
-			uint16_t					colcount;
-			int							retcode = TCL_OK;
-			static const char* types[] = {
-				"bool",
-				"int1",
-				"smallint",
-				"int2",
-				"int4",
-				"integer",
-				"bigint",
-				"int8",
-				"bytea",
-				"float4",
-				"float8",
-				"varchar",
-				"text",
-				(char*)NULL
-			};
-			int type_idx;
-			enum {
-				TYPE_BOOL,
-				TYPE_INT1,
-				TYPE_SMALLINT,
-				TYPE_INT2,
-				TYPE_INT4,
-				TYPE_INTEGER,
-				TYPE_BIGINT,
-				TYPE_INT8,
-				TYPE_BYTEA,
-				TYPE_FLOAT4,
-				TYPE_FLOAT8,
-				TYPE_VARCHAR,
-				TYPE_TEXT
-			};
-			static const char* formats[] = {
-				"dicts",
-				"lists",
-				"dicts_no_nulls",
-				(char*)NULL
-			};
-			int format;
-			enum {
-				FORMAT_DICTS,
-				FORMAT_LISTS,
-				FORMAT_DICTS_NO_NULLS
-			};
-
-			if (objc != 5) {
-				Tcl_WrongNumArgs(interp, 1, objv, "data c_types tcl_encoding format");
-				return TCL_ERROR;
-			}
-
-			p = data = (const char*)Tcl_GetByteArrayFromObj(objv[1], &data_len);
-			e = p + data_len;
-			if (Tcl_ListObjGetElements(interp, objv[2], &c_types_len, &c_types) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_GetEncodingFromObj(interp, objv[3], &encoding) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_GetIndexFromObj(interp, objv[4], formats, "format", TCL_EXACT, &format) != TCL_OK)
-				return TCL_ERROR;
-
-			if (c_types_len % 3 != 0) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("c_types length must be a multiple of 3"));
-				return TCL_ERROR;
-			}
-
-			if (data_len < 4) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
-				return TCL_ERROR;
-			}
-
-			colcount = bswap_16(*(uint16_t*)p); p+=2;
-			if (colcount != c_types_len/3) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
-				return TCL_ERROR;
-			}
-
-			{
-				const int	rslots = colcount * (format == FORMAT_LISTS ? 1 : 2);
-				Tcl_Obj**	rowv = NULL;
-				int			c;		/* col num */
-				int			rs;		/* rowv slot */
-				Tcl_Obj*	nullobj = NULL;
-
-				rowv = ckalloc(sizeof(Tcl_Obj*)*rslots);
-
-				Tcl_IncrRefCount(nullobj = Tcl_NewObj());	/* TODO: store a static null obj in an interp AssocData */
-
-				/* Zero the pointers, so that we don't leak partial rows of Tcl_Objs on error */
-				memset(rowv, 0, sizeof(Tcl_Obj*) * rslots);
-
-				for (i=0, c=1, rs=0; i<c_types_len; i+=3, c++) {
-					const int collen = bswap_32(*(uint32_t*)p);
-
-					p += 4;
-
-					if (collen == -1) {
-						/* NULL */
-						switch (format) {
-							case FORMAT_DICTS_NO_NULLS:
-								Tcl_IncrRefCount(rowv[rs++] = c_types[i]);
-								// Falls through
-							case FORMAT_LISTS:
-								Tcl_IncrRefCount(rowv[rs++] = nullobj);
-						}
-						continue;
-					}
-
-					if (e-p < collen) {
-						Tcl_SetObjResult(interp, Tcl_ObjPrintf("Insufficient data for column %d: need %d but %ld remain", i/2, collen, e-p));
-						retcode = TCL_ERROR;
-						goto done;
-					}
-
-					if (format == FORMAT_DICTS || format == FORMAT_DICTS_NO_NULLS) {
-						Tcl_IncrRefCount(rowv[rs++] = c_types[i]);
-					}
-
-					if (TCL_OK != (retcode = Tcl_GetIndexFromObj(interp, c_types[i+1], types, "type", TCL_EXACT, &type_idx)))
-						goto done;
-
-					switch (type_idx) {
-						case TYPE_BOOL:
-							// TODO: check that this is in fact 1 byte
-							// TODO: instead of Tcl_NewBooleanObj, ref a static true or false obj?
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewBooleanObj(*p != 0));
-							break;
-						case TYPE_INT1:
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(*p));	// Signed?
-							break;
-						case TYPE_SMALLINT:
-						case TYPE_INT2:
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_16(*(int16_t*)p)));	// Signed?
-							break;
-						case TYPE_INT4:
-						case TYPE_INTEGER:
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_32(*(int32_t*)p)));	// Signed?
-							break;
-						case TYPE_BIGINT:
-						case TYPE_INT8:
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewIntObj(bswap_64(*(int64_t*)p)));	// Signed?
-							break;
-						case TYPE_BYTEA:
-							Tcl_IncrRefCount(rowv[rs++] = Tcl_NewByteArrayObj((const unsigned char*)p, collen));
-							break;
-						case TYPE_FLOAT4:
-							{
-								char buf[4];
-								*(int32_t*)buf = bswap_32(*(int32_t*)p);
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(float*)buf));
-							}
-							break;
-						case TYPE_FLOAT8:
-							{
-								char buf[8];
-								*(int64_t*)buf = bswap_64(*(int64_t*)p);
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewDoubleObj(*(double*)buf));
-							}
-							break;
-						case TYPE_VARCHAR:
-						case TYPE_TEXT:
-							{
-								Tcl_DString		utf8;
-
-								Tcl_DStringInit(&utf8);
-
-								Tcl_ExternalToUtfDString(encoding, p, collen, &utf8);
-								Tcl_IncrRefCount(rowv[rs++] = Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
-								Tcl_DStringFree(&utf8);
-							}
-							break;
-						default:
-							Tcl_SetObjResult(interp, Tcl_ObjPrintf("Unrecognised type \"%s\" for column \"%s\"", Tcl_GetString(c_types[i+1]), Tcl_GetString(c_types[i])));
-							retcode = TCL_ERROR;
-							goto done;
-					}
-					p += collen;
-				}
-
-				Tcl_SetObjResult(interp, Tcl_NewListObj(rs, rowv));
-
-done:
-				while (--rs >= 0) {
-					if (rowv[rs] != NULL) {
-						Tcl_DecrRefCount(rowv[rs]);
-						rowv[rs] = NULL;
-					}
-				}
-				if (nullobj) {
-					Tcl_DecrRefCount(nullobj); nullobj = NULL;
-				}
-				if (rowv) {
-					ckfree(rowv); rowv = NULL;
-				}
-				return retcode;
-			}
-		}
-		//>>>
-		static void free_foreach_state(struct foreach_state* s) //<<<
-		{
-			int		i;
-
-			//fprintf(stderr, "freeing foreach_state %p\n", s);
-			if (s) {
-				if (s->col.cols) {
-					for (i=0; i < s->colcount; i++) {
-						if (s->col.cols[i]) {
-							Tcl_DecrRefCount(s->col.cols[i]); s->col.cols[i] = NULL;
-						}
-					}
-					ckfree(s->col.cols); s->col.cols = NULL;
-				}
-
-				if (s->datarowv) {
-					for (i=0; i < s->datarowc; i++) {
-						Tcl_DecrRefCount(s->datarowv[i]); s->datarowv[i] = NULL;
-					}
-					ckfree(s->datarowv); s->datarowv = NULL;
-				}
-
-				if (s->rowv) {
-					int i;
-					for (i = 0; i < s->colcount * 2; i++)
-						replace_tclobj(&s->rowv[i], NULL);
-					ckfree(s->rowv); s->rowv = NULL;
-				}
-
-				if (s->row) {
-					Tcl_DecrRefCount(s->row); s->row = NULL;
-				}
-
-				if (s->rowvar) {
-					Tcl_DecrRefCount(s->rowvar); s->rowvar = NULL;
-				}
-
-				if (s->script) {
-					Tcl_DecrRefCount(s->script); s->script = NULL;
-				}
-
-				if (s->ops) {
-					ckfree(s->ops); s->ops = NULL;
-				}
-
-				ckfree(s); s = NULL;
-			}
-		}
-
-		//>>>
-		int c_foreach_batch_nr_setup(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]);
-		int c_foreach_batch_nr_loop_top(Tcl_Interp* interp, struct foreach_state* s);
-		int c_foreach_batch_nr_loop_bot(ClientData cdata[], Tcl_Interp* interp, int result);
-		int c_foreach_batch_nr(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
-		{
-			//fprintf(stderr, "c_foreach_batch_nr\n");
-			return Tcl_NRCallObjProc(interp, c_foreach_batch_nr_setup, cdata, objc, objv);
-		}
-
-		//>>>
-		int c_foreach_batch_nr_setup(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
-		{
-			struct foreach_state*	s = NULL;
-			int					retcode = TCL_OK;
-			Tcl_Obj**			datarowv = NULL;
-			int					datarowc;
-			Tcl_Obj*			script = NULL;
-			Tcl_Obj**			colv = NULL;
-			int					colc;
-			Tcl_Obj*			rowvar = NULL;
-			Tcl_Encoding		encoding;
-			int					i;
-			Tcl_Obj**			delimv = NULL;
-			int					delimc;
-
-			//fprintf(stderr, "c_foreach_batch_nr_setup\n");
-			if (objc != 8) {
-				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script delims");
-				return TCL_ERROR;
-			}
-
-			rowvar = objv[1];
-			if (Tcl_ListObjGetElements(interp, objv[3], &colc, &colv) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_ListObjGetElements(interp, objv[5], &datarowc, &datarowv) != TCL_OK)
-				return TCL_ERROR;
-
-			if (datarowc == 0)
-				return TCL_OK;
-
-			Tcl_IncrRefCount(script = objv[6]);
-			if (Tcl_ListObjGetElements(interp, objv[7], &delimc, &delimv) != TCL_OK)
-				return TCL_ERROR;
-
-			s = ckalloc(sizeof(*s));
-			memset(s, 0, sizeof(*s));
-
-			s->col.encoding = encoding;
-			//s->col.rs = 0;
-			s->col.cols = ckalloc(colc * sizeof(Tcl_Obj*));
-			for (i=0; i<colc; i++)
-				Tcl_IncrRefCount(s->col.cols[i] = colv[i]);
-			//s->r = 0;
-			s->datarowc = datarowc;
-			s->datarowv = ckalloc(datarowc * sizeof(Tcl_Obj*));
-			for (i=0; i<datarowc; i++)
-				Tcl_IncrRefCount(s->datarowv[i] = datarowv[i]);
-			s->colcount = colc;
-			s->rowv = ckalloc(colc*2 * sizeof(Tcl_Obj*));
-			memset(s->rowv, 0, colc*2 * sizeof(Tcl_Obj*));
-			//s->row = NULL;
-			Tcl_IncrRefCount(s->rowvar = rowvar);
-			Tcl_IncrRefCount(s->script = script);
-			s->ops = ckalloc(colc * sizeof(col_op*));
-			s->delimc = delimc;
-			s->delimv = delimv;
-			if (TCL_OK != (retcode = compile_ops(interp, objv[2], s->ops, colc)))
-				goto err;
-
-			return c_foreach_batch_nr_loop_top(interp, s);
-
-		err:
-			if (s) {
-				free_foreach_state(s); s = NULL;
-			}
-
-			return retcode;
-		}
-
-		//>>>
-		int c_foreach_batch_nr_loop_top(Tcl_Interp* interp, struct foreach_state* s) //<<<
-		{
-			int				retcode = TCL_OK;
-			int				data_len, c;
-			unsigned char*	data = Tcl_GetByteArrayFromObj(s->datarowv[s->r], &data_len);
-			unsigned char*	p = data+2;
-
-			s->col.rs = 0;
-
-			/*
-			// per datarow:
-
-			if (data_len < 4) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
-				retcode = TCL_ERROR;
-				goto done;
-			}
-
-			colcount = bswap_16(*(int16_t*)p); p+=2;
-			if (colcount != c_types_len/3) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
-				retcode = TCL_ERROR;
-				goto done;
-			}
-			*/
-
-			//fprintf(stderr, "data_len: %d\n", data_len);
-			for (c=0; c < s->colcount; c++) {
-				const int	collen = bswap_32(*(int32_t*)p);
-				//const int	old_rs = s->col.rs;
-
-				//fprintf(stderr, "-> c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, s->col.rs, s->rowv[s->col.rs], s->col.rs+1, s->rowv[s->col.rs+1]);
-				p += 4;
-				s->ops[c](c, collen, &p, &s->col, s->rowv, s->delimv[c]);
-				//fprintf(stderr, "<- c: %d, rs: %d, p-data: %d, collen: %d, rowv[%d]: %p, rowv[%d]: %p\n", c, s->col.rs, p-data, collen, old_rs, s->rowv[old_rs], old_rs+1, s->rowv[old_rs+1]);
-			}
-
-			if (s->col.rs >= 0) {
-				// The "vars" op handler sets cols.rs to -1 to signal that we don't have a rowvar to set
-				replace_tclobj(&s->row, Tcl_NewListObj(s->col.rs, s->rowv));
-
-				if (NULL == Tcl_ObjSetVar2(interp, s->rowvar, NULL, s->row, TCL_LEAVE_ERR_MSG)) {
-					retcode = TCL_ERROR;
-					goto done;
-				}
-
-				//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(s->row), Tcl_GetString(s->script));
-			}
-
-			Tcl_NRAddCallback(interp, c_foreach_batch_nr_loop_bot, s, NULL, NULL, NULL);
-			return Tcl_NREvalObj(interp, s->script, 0);
-
-		done:
-			if (s) {
-				free_foreach_state(s); s = NULL;
-			}
-
-			return retcode;
-		}
-
-		//>>>
-		int c_foreach_batch_nr_loop_bot(ClientData cdata[], Tcl_Interp* interp, int result) //<<<
-		{
-			struct foreach_state*	s = cdata[0];
-			int						retcode = TCL_OK;
-
-			switch (result) {
-				case TCL_OK:
-				case TCL_CONTINUE:
-					goto checkloop;
-				default:
-					retcode = result;
-					goto done;
-			}
-
-		checkloop:
-			s->r++;
-			if (s->r < s->datarowc) {
-				//fprintf(stderr, "checkloop, looping: r: %d, datarowc: %d\n", s->r, s->datarowc);
-				return c_foreach_batch_nr_loop_top(interp, s);
-			}
-
-		done:
-			//fprintf(stderr, "done\n");
-			if (s) {
-				free_foreach_state(s); s = NULL;
-			}
-			//fprintf(stderr, "returning %d\n", retcode);
-			return retcode;
-		}
-
-		//>>>
-		int c_foreach_batch(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
-		{
-			int					retcode = TCL_OK;
-			Tcl_Obj**			datarowv = NULL;
-			int					datarowc;
-			Tcl_Obj*			script = NULL;
-			Tcl_Obj**			colv = NULL;
-			int					colc;
-			Tcl_Obj*			row = NULL;
-			Tcl_Obj*			rowvar = NULL;
-			Tcl_Encoding		encoding;
-			col_op**			ops = NULL;
-			Tcl_Obj**			rowv = NULL;
-			Tcl_Obj**			delimv = NULL;
-			int					delimc;
-
-			if (objc != 8) {
-				Tcl_WrongNumArgs(interp, 1, objv, "rowvar ops columns tcl_encoding datarows script delims");
-				return TCL_ERROR;
-			}
-
-			rowvar = objv[1];
-
-			if (Tcl_ListObjGetElements(interp, objv[3], &colc, &colv) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_ListObjGetElements(interp, objv[5], &datarowc, &datarowv) != TCL_OK)
-				return TCL_ERROR;
-			Tcl_IncrRefCount(script = objv[6]);
-			if (Tcl_ListObjGetElements(interp, objv[7], &delimc, &delimv) != TCL_OK)
-				return TCL_ERROR;
-
-			ops = (col_op**)malloc(sizeof(col_op*) * colc);
-			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
-			memset(rowv, 0, sizeof(Tcl_Obj*)*colc*2);
-			{
-				const int			colcount = colc;
-				int					r;
-				struct column_cx	col;
-
-				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops, colcount)))
-					goto done;
-
-				col.encoding = encoding;
-				col.cols = colv;
-
-				for (r=0; r<datarowc; r++) {
-					int				data_len, c;
-					unsigned char*	data = Tcl_GetByteArrayFromObj(datarowv[r], &data_len);
-					unsigned char*	p = data+2;
-
-					col.rs = 0;
-
-					//fprintf(stderr, "data_len: %d\n", data_len);
-					for (c=0; c<colcount; c++) {
-						const int	collen = bswap_32(*(int32_t*)p);
-
-						//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
-						p += 4;
-						ops[c](c, collen, &p, &col, rowv, delimv[c]);
-					}
-
-					if (col.rs >= 0) {
-						replace_tclobj(&row, Tcl_NewListObj(col.rs, rowv));
-
-						if (NULL == Tcl_ObjSetVar2(interp, rowvar, NULL, row, TCL_LEAVE_ERR_MSG)) {
-							retcode = TCL_ERROR;
-							goto done;
-						}
-
-						//fprintf(stderr, "running script for row %s:\n%s\n", Tcl_GetString(row), Tcl_GetString(script));
-					}
-
-					retcode = Tcl_EvalObjEx(interp, script, 0);
-					switch (retcode) {
-						case TCL_OK:
-							break;
-						case TCL_CONTINUE:
-							retcode = TCL_OK;
-							continue;
-						default:
-							goto done;
-					}
-				}
-			}
-
-
-			/*
-			// per datarow:
-
-			if (data_len < 4) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
-				retcode = TCL_ERROR;
-				goto done;
-			}
-
-			colcount = bswap_16(*(int16_t*)p); p+=2;
-			if (colcount != c_types_len/3) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
-				retcode = TCL_ERROR;
-				goto done;
-			}
-			*/
-
-done:
-			if (ops) { free(ops); ops = NULL; }
-			if (rowv) {
-				int i;
-				for (i=0; i<colc*2; i++)
-					replace_tclobj(&rowv[i], NULL);
-				free(rowv);
-				rowv = NULL;
-			}
-			if (script) {
-				Tcl_DecrRefCount(script); script = NULL;
-			}
-			if (row) {
-				Tcl_DecrRefCount(row); row = NULL;
-			}
-			return retcode;
-		}
-
-		//>>>
-		int c_allrows_batch(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
-		{
-			int					retcode = TCL_OK;
-			Tcl_Obj**			datarowv = NULL;
-			int					datarowc;
-			Tcl_Obj**			colv = NULL;
-			int					colc;
-			Tcl_Encoding		encoding;
-			Tcl_Obj*			rows = NULL;
-			col_op**			ops = NULL;
-			Tcl_Obj**			rowv = NULL;
-			Tcl_Obj**			delimv = NULL;
-			int					delimc;
-
-			if (objc != 7) {
-				Tcl_WrongNumArgs(interp, 1, objv, "rowsvar ops columns tcl_encoding datarows delims");
-				return TCL_ERROR;
-			}
-
-			if (Tcl_ListObjGetElements(interp, objv[3], &colc, &colv) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_GetEncodingFromObj(interp, objv[4], &encoding) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_ListObjGetElements(interp, objv[5], &datarowc, &datarowv) != TCL_OK)
-				return TCL_ERROR;
-			if (datarowc == 0)
-				return TCL_OK;
-			if (Tcl_ListObjGetElements(interp, objv[6], &delimc, &delimv) != TCL_OK)
-				return TCL_ERROR;
-
-			/* Retrieve the existing value from $rowsvar and ensure it's unshared */
-			rows = Tcl_ObjGetVar2(interp, objv[1], NULL, 0);
-			if (rows == NULL) {
-				rows = Tcl_NewListObj(0, NULL);
-			} else if (Tcl_IsShared(rows)) {
-				rows = Tcl_DuplicateObj(rows);
-			}
-
-			ops = (col_op**)malloc(sizeof(col_op*) * colc);
-			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
-			memset(rowv, 0, sizeof(Tcl_Obj*)*colc*2);
-			{
-				const int			colcount = colc;
-				int					r;
-				struct column_cx	col;
-
-				if (TCL_OK != (retcode = compile_ops(interp, objv[2], ops, colcount)))
-					goto done;
-
-				col.encoding = encoding;
-				col.cols = colv;
-
-				for (r=0; r<datarowc; r++) {
-					int				data_len, c;
-					unsigned char*	data = Tcl_GetByteArrayFromObj(datarowv[r], &data_len);
-					unsigned char*	p = data+2;
-
-					col.rs = 0;
-
-					for (c=0; c<colcount; c++) {
-						const int	collen = bswap_32(*(int32_t*)p);
-
-						p += 4;
-						ops[c](c, collen, &p, &col, rowv, delimv[c]);
-					}
-
-					if (col.rs >= 0)
-						if (TCL_OK != (retcode = Tcl_ListObjAppendElement(interp, rows, Tcl_NewListObj(col.rs, rowv))))
-							goto done;
-				}
-			}
-
-
-			/*
-			// per datarow:
-
-			if (data_len < 4) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
-				retcode = TCL_ERROR;
-				goto done;
-			}
-
-			colcount = bswap_16(*(int16_t*)p); p+=2;
-			if (colcount != c_types_len/3) {
-				Tcl_SetObjResult(interp, Tcl_ObjPrintf("data claims %d columns, but c_types describes only %d", colcount, c_types_len/3));
-				retcode = TCL_ERROR;
-				goto done;
-			}
-			*/
-
-			Tcl_SetObjResult(interp, rows);
-
-			if (NULL == Tcl_ObjSetVar2(interp, objv[1], NULL, rows, TCL_LEAVE_ERR_MSG)) {
-				retcode = TCL_ERROR;
-				goto done;
-			}
-
-done:
-			if (rows) {
-				/* rows may have a 0 refcount, if we created a fresh obj, or duplicated one, and didn't make it to the end.  In that case we need to free it to avoid a leak */
-				Tcl_IncrRefCount(rows);
-				Tcl_DecrRefCount(rows); rows = NULL;
-			}
-			if (ops) { free(ops); ops = NULL; }
-			if (rowv) {
-				int i;
-				for (i=0; i<colc*2; i++)
-					replace_tclobj(&rowv[i], NULL);
-				free(rowv);
-				rowv = NULL;
-			}
-			return retcode;
-		}
-
-		//>>>
-		int c_makerow2(ClientData cdata, Tcl_Interp* interp, int objc, Tcl_Obj *const objv[]) //<<<
-		{
-			int					retcode = TCL_OK;
-			Tcl_Obj**			colv = NULL;
-			int					colc;
-			Tcl_Encoding		encoding;
-			unsigned char*		data = NULL;
-			int					data_len;
-			col_op**			ops = NULL;
-			Tcl_Obj**			rowv = NULL;
-			Tcl_Obj**			delimv = NULL;
-			int					delimc;
-
-
-			if (objc != 6) {
-				Tcl_WrongNumArgs(interp, 1, objv, "ops columns tcl_encoding datarow delims");
-				return TCL_ERROR;
-			}
-
-			if (Tcl_ListObjGetElements(interp, objv[2], &colc, &colv) != TCL_OK)
-				return TCL_ERROR;
-			if (Tcl_GetEncodingFromObj(interp, objv[3], &encoding) != TCL_OK)
-				return TCL_ERROR;
-			data = Tcl_GetByteArrayFromObj(objv[4], &data_len);
-			if (Tcl_ListObjGetElements(interp, objv[5], &delimc, &delimv) != TCL_OK)
-				return TCL_ERROR;
-
-			ops = (col_op**)malloc(sizeof(col_op*) * colc);
-			rowv = (Tcl_Obj**)malloc(sizeof(Tcl_Obj*) * colc * 2);
-			memset(rowv, 0, sizeof(Tcl_Obj*)*colc*2);
-			{
-				const int			colcount = colc;
-				struct column_cx	col;
-				int					c;
-				unsigned char*		p = data+2;
-
-				if (TCL_OK != (retcode = compile_ops(interp, objv[1], ops, colcount)))
-					goto done;
-
-				col.encoding = encoding;
-				col.cols = colv;
-				col.rs = 0;
-
-				//fprintf(stderr, "data_len: %d\n", data_len);
-				for (c=0; c<colcount; c++) {
-					const int	collen = bswap_32(*(int32_t*)p);
-
-					//fprintf(stderr, "c: %d, rs: %d, p-data: %d, collen: %d\n", c, col.rs, p-data, collen);
-					p += 4;
-					ops[c](c, collen, &p, &col, rowv, delimv[c]);
-				}
-
-				// The "vars" op handler sets cols.rs to -1 to signal that we don't have a rowvar to set
-				if (col.rs >= 0) {
-					Tcl_SetObjResult(interp, Tcl_NewListObj(col.rs, rowv));
-				}
-			}
-
-done:
-			if (ops) { free(ops); ops = NULL; }
-			if (rowv) {
-				int i;
-				for (i=0; i<colc*2; i++)
-					replace_tclobj(&rowv[i], NULL);
-				free(rowv);
-				rowv = NULL;
-			}
-			return retcode;
-		}
-
-		//>>>
-	//@end=c@}]
-	# C code >>>
+	] [_read_c accel.c]]
 	unset accel_ops
-	set lineno	0
-	#::pgwire::log notice "c code:\n[join [lmap line [split $c_code \n] {format {%3d: %s} [incr lineno] $line}] \n]"
+
+	# Procure a csprng <<<
+	if {![catch {package require tomcrypt}]} {
+		tomcrypt::prng create _prng chacha20
+		proc _csprng n {_prng bytes $n}
+	} elseif {![catch {package require crypto}]} {
+		proc _csprng n {crypto::blowfish::csprng $n}
+	} elseif {[file readable /dev/urandom]} {
+		proc _csprng n {set h [open /dev/urandom rb]; try {read $h $n} finally {close $h}}
+	} else {
+		proc _csprng n {error "No CSPRNG available"}
+	}
+	#>>>
+	# Procure hash and related functions: sha256, md5, hmac_sha256, sasl_hi <<<
+	if {![catch {package require tomcrypt}]} {
+		proc _sha256 bytes {::tomcrypt::hash sha256 $bytes}
+		proc _md5    bytes {::tomcrypt::hash md5    $bytes}
+	} elseif {![catch {package require hash}]} {
+		proc _sha256 bytes {binary decode hex [::hash::sha256 $bytes]}
+		proc _md5    bytes {::hash::md5 $bytes}
+	} elseif {[_use_jitc]} {
+		# c implementations of sha256, md5, hmac_sha256, sasl_hi <<<
+		variable jitc_hash_cdef [list options {-Wall -Werror} code [_read_c jitc_hash.c]]
+		foreach {cmd c_cmd} {
+			_sha256			sha256
+			_hmac_sha256	hmac_sha256
+			_sasl_hi		sasl_hi
+			_md5			md5
+		} {
+			::jitc::bind [namespace current]::$cmd $jitc_hash_cdef $c_cmd
+		}
+		#>>>
+	} else {
+		if {
+			[llength [info commands sha256]] &&
+			![catch {string range [binary encode hex [sha256 -foo]] 0 4} r] &&
+			$r in {04bac 30346 424c7}
+		} {
+			switch -exact $r {
+				04bac { proc _sha256 bytes {                      sha256 $bytes } }
+				30346 { proc _sha256 bytes {binary decode hex    [sha256 $bytes]} }
+				424c7 { proc _sha256 bytes {binary decode base64 [sha256 $bytes]} }
+			}
+		} elseif {![catch {package require sha256}]} { # tcllib
+			proc _sha256 bytes {::sha2::sha256 -bin -- $bytes}
+		} else {
+			proc _sha256 bytes {error "No SHA256 available"}
+		}
+
+		if {
+			[llength [info commands md5]] &&
+			![catch {string range [binary encode hex [md5 -foo]] 0 4} r] &&
+			$r in {313e9 33313 4d543}
+		} {
+			switch -exact $r {
+				313e9 { proc _md5 bytes {                      md5 $bytes } }
+				33313 { proc _md5 bytes {binary decode hex    [md5 $bytes]} }
+				4d543 { proc _md5 bytes {binary decode base64 [md5 $bytes]} }
+			}
+		} elseif {![catch {package require md5 2}]} {	# tcllib
+			proc _md5 bytes {::md5::md5 $bytes}
+		} else {
+			proc _md5 bytes {error "No MD5 available"}
+		}
+	}
+	#>>>
+	proc nonce n { # printable ascii, excluding "," <<<
+		set nonce		{}
+		while {[string length $nonce] < $n} {
+			append nonce	[regsub -all {[^\x21-\x2b\x2d-\x73]} [_csprng 64] {}]
+		}
+		string range $nonce 0 $n-1
+	}
+
+	#>>>
 }
 #>>>
 
 
-#proc writefile {fn chars} {
-#	set h	[open $fn w]
-#	try {puts -nonewline $h $chars} finally {close $h}
-#}
-#writefile /tmp/pgwire_accel.c "#include <tcl.h>\n$::pgwire::c_code"
-
 set ::pgwire::accelerators	0
-if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BLOCK_ACCELERATORS)] && ![catch {package require jitc}]} {
+if {[::pgwire::_use_jitc]} {
 	apply {{} {
 		variable accel	{}
 		variable accelerators
@@ -1784,476 +1057,98 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 
 		foreach {cmd c_cmd} {
 			c_makerow2			c_makerow2
-			c_foreach_batch		c_foreach_batch
 			c_foreach_batch_nr	c_foreach_batch_nr_setup
 			c_allrows_batch		c_allrows_batch
 			compile_ops			compile_ops_cmd
+			_xor				xor
 		} {
-			proc $cmd args "variable accel; tailcall ::jitc::capply \$accel [list $c_cmd] {*}\$args"
+			#proc $cmd args "variable accel; tailcall ::jitc::capply \$accel [list $c_cmd] {*}\$args"
+			::jitc::bind ::pgwire::$cmd $accel $c_cmd
 		}
 
 		# Accelerated SQL tokenizer <<<
-		variable tokenize_cdef [list {*}{
-			options		{-Wall -Werror -g -std=gnu17}
-			filter		{jitc::re2c -W --case-ranges --no-debug-info}
-			code {
-				Tcl_Obj*	g_lit_id = NULL;
-
-				INIT {
-					replace_tclobj(&g_lit_id, Tcl_NewStringObj("id", 2));
-					return TCL_OK;
-				}
-
-				RELEASE {
-					replace_tclobj(&g_lit_id, NULL);
-				}
-
-				OBJCMD(tokenize) {
-					int			code = TCL_OK;
-					Tcl_Obj*	res = NULL;
-					Tcl_Obj*	bindvar = NULL;
-					Tcl_Obj*	val = NULL;
-					Tcl_Obj*	bindvars = NULL;
-					Tcl_Obj*	bindslots = NULL;
-					Tcl_Obj*	tmp = NULL;
-					Tcl_Obj*	tmp2 = NULL;
-					int			slotseq = 0;
-					int			standard_conforming_strings = 0;
-					static const char*	modes[] = {
-						"interpolate",
-						"bindparse",
-						NULL
-					};
-					int	bindparse;
-
-					enum {A_cmd, A_MODE, A_SQL, A_STDSTR, A_args, A_objc};
-					const int	A_DICT = A_args;
-					CHECK_RANGE_ARGS_LABEL(finally, code, "mode sql standard_conforming_strings ?dict?");
-					TEST_OK_LABEL(finally, code, Tcl_GetBooleanFromObj(interp, objv[A_STDSTR], &standard_conforming_strings));
-					TEST_OK_LABEL(finally, code, Tcl_GetIndexFromObj(interp, objv[A_MODE], modes, "mode", TCL_EXACT, &bindparse));
-
-					if (bindparse) {
-						replace_tclobj(&bindvars, Tcl_NewListObj(0, NULL));
-						replace_tclobj(&bindslots, Tcl_NewDictObj());
-					}
-					replace_tclobj(&res, Tcl_NewObj());
-					const char*	sql = Tcl_GetString(objv[A_SQL]);
-					const char* cur = sql;
-					const char*	tok = cur;
-					const char* mar;
-					for (;;) {
-						const char	*b1, *b2;
-						/*!stags:re2c:sql format = "const char* @@;"; */
-						/*!local:re2c:sql
-							re2c:define:YYCTYPE		= char;
-							re2c:define:YYCURSOR	= cur;
-							re2c:define:YYMARKER	= mar;
-							re2c:yyfill:enable		= 0;
-							re2c:tags				= 1;
-
-							end		= [\x00];
-							any		= [^] \ end;
-							esc		= [\\];
-							dquote	= ["];
-							squote	= ['];
-							dqpair	= esc any;
-							sqpair	= esc any | squote squote;
-							schar	= any \ squote | sqpair;
-							dchar	= any \ dquote | dqpair;
-							sqlit	= squote schar* squote;
-							dqlit	= dquote dchar* dquote;
-							comment	= "--" [^\n\x00]*;
-							pgcast	= "::";
-							bindvar	= [_a-zA-Z0-9]+;
-							ign		= comment
-									| sqlit
-									| dqlit
-									| pgcast;
-
-							end		{ Tcl_AppendToObj(res, tok, (int)(cur-tok-1)); break; }
-							ign		{ continue; }
-							*		{ continue; }
-
-							":" @b1 bindvar @b2 {
-								Tcl_AppendToObj(res, tok, (int)(b1-1-tok));
-								tok = b2;
-								replace_tclobj(&bindvar, Tcl_NewStringObj(b1, (int)(b2-b1)));
-								goto interpolate_bindvar;
-							}
-						*/
-
-					interpolate_bindvar:
-						if (bindparse) {
-							Tcl_Obj*	loan = NULL;
-							TEST_OK_LABEL(finally, code, Tcl_DictObjGet(interp, bindslots, bindvar, &loan));
-							if (loan) {
-								TEST_OK_LABEL(finally, code, Tcl_DictObjGet(interp, loan, g_lit_id, &loan));
-								replace_tclobj(&tmp, loan);
-							} else {
-								replace_tclobj(&tmp, Tcl_NewIntObj(++slotseq));
-								replace_tclobj(&tmp2, Tcl_NewDictObj());
-								TEST_OK_LABEL(finally, code, Tcl_DictObjPut(interp, tmp2, g_lit_id, tmp));
-								TEST_OK_LABEL(finally, code, Tcl_DictObjPut(interp, bindslots, bindvar, tmp2));
-								TEST_OK_LABEL(finally, code, Tcl_ListObjAppendElement(interp, bindvars, bindvar));
-							}
-							Tcl_AppendToObj(res, "$", 1);
-							Tcl_AppendObjToObj(res, tmp);
-							continue;
-						}
-
-						if (A_DICT < objc) {
-							Tcl_Obj*	loan = NULL;
-							TEST_OK_LABEL(finally, code, Tcl_DictObjGet(interp, objv[A_DICT], bindvar, &loan));
-							replace_tclobj(&val, loan);
-						} else {
-							replace_tclobj(&val, Tcl_ObjGetVar2(interp, bindvar, NULL, 0));
-						}
-
-						if (!val) {
-							Tcl_AppendToObj(res, "NULL", 4);
-							continue;
-						}
-
-						Tcl_AppendToObj(res, "'", 1);
-						const char*	valstr = Tcl_GetString(val);
-						const char* valcur = valstr;
-						const char*	valmar;
-						for (;;) {
-							const char*	valtok = valcur;
-							/*!local:re2c:val
-								re2c:define:YYCTYPE		= char;
-								re2c:define:YYCURSOR	= valcur;
-								re2c:define:YYMARKER	= valmar;
-								re2c:yyfill:enable		= 0;
-
-								end		= [\x00];
-								ok		= [^'\\] \ end;
-
-								end		{ break; }
-								ok+		{ Tcl_AppendToObj(res, valtok, (int)(valcur-valtok)); continue; }
-								"'"		{ Tcl_AppendToObj(res, "''", 2); continue; }
-								"\\"	{ Tcl_AppendToObj(res, "\\\\", standard_conforming_strings ? 1 : 2); continue; }
-								*		{ Tcl_AppendToObj(res, tok, 1); continue; }
-							*/
-						}
-						Tcl_AppendToObj(res, "'", 1);
-					}
-
-					if (bindparse)
-						replace_tclobj(&res, Tcl_NewListObj(2, (struct Tcl_Obj*[]){bindslots, res}));
-
-					Tcl_SetObjResult(interp, res);
-
-				finally:
-					replace_tclobj(&res, NULL);
-					replace_tclobj(&bindvar, NULL);
-					replace_tclobj(&bindvars, NULL);
-					replace_tclobj(&bindslots, NULL);
-					replace_tclobj(&val, NULL);
-					replace_tclobj(&tmp, NULL);
-					replace_tclobj(&tmp2, NULL);
-					return code;
-				}
-			}
-		}]
+		variable tokenize_cdef [list \
+			options		{-Wall -Werror -g -std=gnu17} \
+			filter		{jitc::re2c -W --case-ranges --no-debug-info} \
+			code		[_read_c tokenize.c] \
+		]
 		#>>>
-		proc interpolate args "variable tokenize_cdef; uplevel 1 \[list ::jitc::capply \$tokenize_cdef tokenize interpolate {*}\$args\]"
-		proc bindparse args "variable tokenize_cdef; uplevel 1 \[list ::jitc::capply \$tokenize_cdef tokenize bindparse {*}\$args\]"
+		foreach mode {interpolate bindparse} {
+			::jitc::bind [namespace current]::$mode $tokenize_cdef tokenize $mode
+		}
 		set accelerators	1
 
-		try {
+		# ::pgwire::af_alg_cdef: use Linux's AF_ALG crypto primitives <<<
+		variable af_alg_cdef [list \
+			options	{-Wall -Werror -std=gnu17 -gdwarf-5} \
+			filter	{jitc::re2c -W --case-ranges -Wno-nondeterministic-tags --no-debug-info} \
+			code	[_read_c af_alg.c] \
+		]
+		#>>>
+
+		if {![catch {
 			package require tomcrypt 0.5.5
 			lindex [glob -nocomplain -type f -directory [file dirname [file normalize [package files tomcrypt]]] *[info sharedlibextension]] 0
-		} on ok libtomcrypt {
-			if {[file readable $libtomcrypt]} {
-				# We have tomcrypt available (and loaded), pilfer the tomcrypt primitves from its dll <<<
-				variable tc_cdef	[list define [list LIBTC "\"[string map [list \" \\\"] $libtomcrypt]\""] {*}{
-					options	{-Wall -Werror -gdwarf-5 -std=gnu17}
-					code {
-						#include <stdint.h>
-						#include <string.h>
-						#include <stdlib.h>
-
-						struct sha256_state {
-							uint64_t		length;
-							uint32_t		state[8];
-							uint32_t		curlen;
-							unsigned char	buf[64];
-						};
-
-						static Tcl_LoadHandle	libtc;
-
-						static const char* tc_syms[] = {
-							"sha256_init",
-							"sha256_process",
-							"sha256_done",
-							NULL
-						};
-						static void* procs[sizeof(tc_syms) / sizeof(tc_syms[0]) - 1] = {0};
-
-						static void (*tc_sha256_init)(struct sha256_state* md);
-						static void (*tc_sha256_process)(struct sha256_state* md, const unsigned char* in, unsigned long inlen);
-						static void (*tc_sha256_done)(struct sha256_state* md, unsigned char* hash);
-
-						INIT { //<<<
-							int			code = TCL_OK;
-							Tcl_Obj*	libpath = NULL;
-
-							replace_tclobj(&libpath, Tcl_NewStringObj(LIBTC, -1));
-							TEST_OK_LABEL(finally, code, Tcl_LoadFile(interp, libpath, tc_syms, TCL_LOAD_LAZY, procs, &libtc));
-							*(void**)(&tc_sha256_init)		= procs[0];
-							*(void**)(&tc_sha256_process)	= procs[1];
-							*(void**)(&tc_sha256_done)		= procs[2];
-
-						finally:
-							replace_tclobj(&libpath, NULL);
-							return code;
-						}
-
-						//>>>
-						RELEASE { //<<<
-							Tcl_FSUnloadFile(interp, libtc);
-						}
-
-						//>>>
-
-						static void do_hmac_sha256(const uint8_t* k_bytes, size_t k_len, const uint8_t* m, size_t m_len, uint8_t* hash) //<<<
-						{
-							struct sha256_state	md;
-							#define BLEN	64
-							#define HLEN	32
-							uint8_t	k_prime[BLEN];
-							if (k_len > BLEN) {
-								tc_sha256_init(&md);
-								tc_sha256_process(&md, k_bytes, k_len);
-								tc_sha256_done(&md, hash);
-								memcpy(k_prime, hash, HLEN);
-								memset(k_prime+HLEN, 0, BLEN-HLEN);
-							} else {
-								memcpy(k_prime, k_bytes, k_len);
-								memset(k_prime+k_len, 0, BLEN-k_len);
-							}
-
-							#define STATICSIZE	1024
-							uint8_t			sbuf[STATICSIZE];
-							const size_t	buflen = BLEN + HLEN + BLEN + m_len;
-							uint8_t*		dbuf = (buflen <= STATICSIZE) ? sbuf : malloc(buflen);
-							uint8_t*		h_i = NULL;
-							uint8_t*		tail = NULL;
-							{
-								const uint64_t*restrict	k = (const uint64_t*)k_prime;
-								uint64_t*restrict		p = (uint64_t*)dbuf;
-
-								p[0] = k[0] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[1] = k[1] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[2] = k[2] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[3] = k[3] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[4] = k[4] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[5] = k[5] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[6] = k[6] ^ 0x5c5c5c5c5c5c5c5cULL;
-								p[7] = k[7] ^ 0x5c5c5c5c5c5c5c5cULL;
-								h_i = (uint8_t*)(p+8);
-
-								p = (uint64_t*)(dbuf + BLEN + HLEN);
-								p[0] = k[0] ^ 0x3636363636363636ULL;
-								p[1] = k[1] ^ 0x3636363636363636ULL;
-								p[2] = k[2] ^ 0x3636363636363636ULL;
-								p[3] = k[3] ^ 0x3636363636363636ULL;
-								p[4] = k[4] ^ 0x3636363636363636ULL;
-								p[5] = k[5] ^ 0x3636363636363636ULL;
-								p[6] = k[6] ^ 0x3636363636363636ULL;
-								p[7] = k[7] ^ 0x3636363636363636ULL;
-								tail = (uint8_t*)(dbuf + BLEN + HLEN + BLEN);
-							}
-							memcpy(tail, m, m_len);
-
-							tc_sha256_init(&md);
-							tc_sha256_process(&md, h_i+HLEN, BLEN+m_len);
-							tc_sha256_done(&md, h_i);
-
-							tc_sha256_init(&md);
-							tc_sha256_process(&md, dbuf, BLEN+HLEN);
-							tc_sha256_done(&md, hash);
-
-							if (dbuf && dbuf != sbuf) {
-								free(dbuf);
-								dbuf = NULL;
-							}
-							#undef BLEN
-							#undef HLEN
-							#undef STATICSIZE
-						}
-
-						//>>>
-
-						OBJCMD(sha256) { //<<<
-							int					code = TCL_OK;
-
-							enum {A_cmd, A_BYTES, A_objc};
-							CHECK_ARGS_LABEL(finally, code, "bytes");
-
-							int					len;
-							#ifdef Tcl_GetBytesFromObj
-							const uint8_t*const	bytes = Tcl_GetBytesFromObj(interp, objv[A_BYTES], &len);
-							if (!bytes) {code = TCL_ERROR; goto finally;}
-							#else
-							const uint8_t*const	bytes = Tcl_GetByteArrayFromObj(objv[A_BYTES], &len);
-							#endif
-							struct sha256_state	md;
-							uint8_t				hash[256/8];
-
-							tc_sha256_init(&md);
-							tc_sha256_process(&md, bytes, len);
-							tc_sha256_done(&md, hash);
-
-							Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(hash, sizeof(hash)));
-
-						finally:
-							return code;
-						}
-
-						//>>>
-						OBJCMD(hmac_sha256) { //<<<
-							int					code = TCL_OK;
-							struct sha256_state	md;
-							uint8_t				hash[256/8];
-
-							enum {A_cmd, A_K, A_M, A_objc};
-							CHECK_ARGS_LABEL(finally, code, "K m");
-
-							int					k_len, m_len;
-							#ifdef Tcl_GetBytesFromObj
-							const uint8_t*const	k_bytes = Tcl_GetBytesFromObj(interp, objv[A_K], &k_len);
-							if (!k_bytes) {code = TCL_ERROR; goto finally;}
-							const uint8_t*const	m_bytes = Tcl_GetBytesFromObj(interp, objv[A_M], &m_len);
-							if (!m_bytes) {code = TCL_ERROR; goto finally;}
-							#else
-							const uint8_t*const	k_bytes = Tcl_GetByteArrayFromObj(objv[A_K], &k_len);
-							const uint8_t*const	m_bytes = Tcl_GetByteArrayFromObj(objv[A_M], &m_len);
-							#endif
-
-							do_hmac_sha256(k_bytes, k_len, m_bytes, m_len, hash);
-
-							Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(hash, sizeof(hash)));
-
-						finally:
-							return code;
-						}
-
-						//>>>
-						OBJCMD(sasl_hi) { //<<<
-							int			code = TCL_OK;
-
-							enum {A_cmd, A_STR, A_SALT, A_IT, A_objc};
-							CHECK_ARGS_LABEL(finally, code, "str salt it");
-
-							int		str_len;
-							int		salt_len;
-							#ifdef Tcl_GetBytesFromObj
-							const uint8_t*const	str_bytes  = Tcl_GetBytesFromObj(interp, objv[A_STR],  &str_len);
-							if (!str_bytes) {code = TCL_ERROR; goto finally;}
-							const uint8_t*const	salt_bytes = Tcl_GetBytesFromObj(interp, objv[A_SALT], &salt_len);
-							if (!salt_bytes) {code = TCL_ERROR; goto finally;}
-							#else
-							const uint8_t*const	str_bytes  = Tcl_GetByteArrayFromObj(objv[A_STR],  &str_len);
-							const uint8_t*const	salt_bytes = Tcl_GetByteArrayFromObj(objv[A_SALT], &salt_len);
-							#endif
-							int		it;
-							TEST_OK_LABEL(finally, code, Tcl_GetIntFromObj(interp, objv[A_IT], &it));
-
-							#define HLEN	32
-							uint8_t		res[HLEN];
-							uint8_t		next[HLEN];
-
-							{
-								uint8_t		salti[salt_len+4];
-								memcpy(salti, salt_bytes, salt_len);
-								salti[salt_len+0] = 0;
-								salti[salt_len+1] = 0;
-								salti[salt_len+2] = 0;
-								salti[salt_len+3] = 1;
-
-								do_hmac_sha256(str_bytes, str_len, salti, salt_len+4, res);
-							}
-							memcpy(next, res, sizeof(next));
-
-							size_t	c = it-1;
-							while (c--) {
-								uint8_t		tmp1[HLEN];
-								do_hmac_sha256(str_bytes, str_len, next, sizeof(next), tmp1);
-								memcpy(next, tmp1, sizeof(next));
-								{
-									uint64_t*restrict	r = (uint64_t*)res;
-									uint64_t*restrict	n = (uint64_t*)next;
-									r[0] ^= n[0];
-									r[1] ^= n[1];
-									r[2] ^= n[2];
-									r[3] ^= n[3];
-								}
-							}
-
-							Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(res, sizeof(res)));
-
-						finally:
-							return code;
-							#undef HLEN
-						}
-
-						//>>>
-						OBJCMD(xor) { //<<<
-							int			code = TCL_OK;
-							Tcl_Obj*	res = NULL;
-
-							enum {A_cmd, A_A, A_B, A_objc};
-							CHECK_ARGS_LABEL(finally, code, "a b");
-
-							int		a_len, b_len;
-							#ifdef Tcl_GetBytesFromObj
-							const uint8_t*	a = (const uint8_t*)Tcl_GetBytesFromObj(interp, objv[A_A], &a_len);
-							if (!a) {code = TCL_ERROR; goto finally;}
-							const uint8_t*	b = (const uint8_t*)Tcl_GetBytesFromObj(interp, objv[A_B], &b_len);
-							if (!b) {code = TCL_ERROR; goto finally;}
-							#else
-							const uint8_t*	a = Tcl_GetByteArrayFromObj(objv[A_A], &a_len);
-							const uint8_t*	b = Tcl_GetByteArrayFromObj(objv[A_B], &b_len);
-							#endif
-
-							if (a_len != b_len) THROW_ERROR_LABEL(finally, code, "a and b must be the same length");
-
-							replace_tclobj(&res, Tcl_NewByteArrayObj(NULL, a_len));
-							#ifdef Tcl_GetBytesFromObj
-							uint8_t*restrict	r = (uint8_t*)Tcl_GetBytesFromObj(interp, res, NULL);
-							#else
-							uint8_t*restrict	r = (uint8_t*)Tcl_GetByteArrayFromObj(res, NULL);
-							#endif
-
-							size_t	c = a_len;
-							while (c--) *r++ = *a++ ^ *b++;
-
-							Tcl_InvalidateStringRep(res);
-							Tcl_SetObjResult(interp, res);
-
-						finally:
-							replace_tclobj(&res, NULL);
-							return code;
-						}
-
-						//>>>
-					}
-				}]
-				#>>>
-				proc _sasl_hi {str salt it} {variable tc_cdef; ::jitc::capply $tc_cdef sasl_hi $str $salt $it}
-				proc _hmac_sha256 {K m}     {variable tc_cdef; ::jitc::capply $tc_cdef hmac_sha256 $K $m}
-				proc _xor {a b}             {variable tc_cdef; ::jitc::capply $tc_cdef xor $a $b}
-				proc _sha256 bytes          {variable tc_cdef; ::jitc::capply $tc_cdef sha256 $bytes}
+		} libtomcrypt] && [file readable $libtomcrypt]} {
+			# We have tomcrypt available (and loaded), pilfer the tomcrypt primitves from its dll <<<
+			variable tc_cdef	[list define [list LIBTC "\"[string map [list \" \\\"] $libtomcrypt]\""] \
+				options	{-Wall -Werror -gdwarf-5 -std=gnu17} \
+				code	[_read_c tomcrypt_jitc.c] \
+			]
+			#>>>
+			foreach {cmd c_cmd} {
+				_sasl_hi		sasl_hi
+				_hmac_sha256	hmac_sha256
+				_sha256			sha256
+			} {
+				::jitc::bind [namespace current]::$cmd $tc_cdef $c_cmd
 			}
 		}
 
 	} ::pgwire}
 } else {
-	puts stderr "Not using accelerators, block: [info exists ::pgwire::block_accelerators], env block: [info exists ::env(PGWIRE_BLOCK_ACCELERATORS)], jitc versions: ([package versions jitc])"
-	namespace eval ::pgwire {
-		proc interpolate {sql standard_conforming_strings args} { #<<<
+	::pgwire::log notice "Not using accelerators, block: [info exists ::pgwire::block_accelerators], env block: [info exists ::env(PGWIRE_BLOCK_ACCELERATORS)], jitc versions: ([package versions jitc])"
+}
+
+# Tcl implementation fallbacks if we couldn't find a faster alternative:
+namespace eval ::pgwire {
+	if {[llength [info commands ::pgwire::_hmac_sha256]] == 0} { #<<<
+		proc _hmac_sha256 {K m} {
+			set opad	[string repeat \x5C 64]
+			set ipad	[string repeat \x36 64]
+			set keylen	[string length $K]
+			if {$keylen > 64} {
+				set K	[_sha256 $K]
+				set keylen	[string length $K]
+			} elseif {$keylen < 64} {
+				set K	$K[string repeat \0 [expr {64 - $keylen}]]
+			}
+			_sha256 [_xor $K $opad][_sha256 [_xor $K $ipad]$m]
+		}
+	}
+	#>>>
+	if {[llength [info commands ::pgwire::_sasl_hi]] == 0} { #<<<
+		proc _sasl_hi {str salt it} {
+			set res		[_hmac_sha256 $str $salt[binary format Iu 1]]
+			set next	$res
+			for {set i 1} {$i < $it} {incr i} {
+				set next	[_hmac_sha256 $str $next]
+				set res		[_xor $res $next]
+			}
+			set res
+		}
+	}
+	#>>>
+	if {[llength [info commands ::pgwire::_xor]] == 0} { #<<<
+		proc _xor {a b} {
+			binary scan $a c* aL
+			binary scan $b c* bL
+			binary format c* [lmap ab $aL bb $bL {::tcl::mathop::^ $ab $bb}]
+		}
+	}
+	#>>>
+	if {[llength [info commands ::pgwire::interpolate]] == 0} { #<<<
+		proc interpolate {sql standard_conforming_strings args} {
 			parse_args::parse_args $args {
 				dict	{}
 			}
@@ -2308,9 +1203,10 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 			}
 			set quoted
 		}
-
-		#>>>
-		proc bindparse {sql -} { #<<<
+	}
+	#>>>
+	if {[llength [info commands ::pgwire::bindparse]] == 0} { #<<<
+		proc bindparse {sql -} {
 			set seq				0
 			set params_assigned {}
 			set compiled		{}
@@ -2356,44 +1252,6 @@ if {![info exists ::pgwire::block_accelerators] && ![info exists ::env(PGWIRE_BL
 
 			list $params_assigned $compiled
 		}
-
-		#>>>
-	}
-}
-
-if {[llength [info commands ::pgwire::_sasl_hi]] == 0} {
-	# Fall back to a Tcl implementation <<<
-	namespace eval ::pgwire {
-		proc _hmac_sha256 {K m} { #<<<
-			package require hmac	;# from aws 2 (but should be factored out?)
-			hmac::HMAC_SHA256 $K $m
-		}
-
-		#>>>
-		proc _sasl_hi {str salt it} { #<<<
-			package require hmac	;# from aws 2 (but should be factored out?)
-			set res		[_hmac_sha256 $str $salt[binary format Iu 1]]
-			set next	$res
-			for {set i 1} {$i < $it} {incr i} {
-				set next	[_hmac_sha256 $str $next]
-				set res		[_xor $res $next]
-			}
-			set res
-		}
-
-		#>>>
-		proc _xor {a b} { #<<<
-			package require hmac
-			hmac::xor $a $b
-		}
-
-		#>>>
-		proc _sha256 bytes { #<<<
-			package require hash
-			binary decode hex [hash::sha256 $bytes]
-		}
-
-		#>>>
 	}
 	#>>>
 }
@@ -2426,7 +1284,6 @@ oo::class create ::pgwire {
 	}
 
 	constructor args { #<<<
-		#::pgwire::log notice "pgwire::constructor args: ($args)"
 		if {[self next] ne ""} next
 
 		if {"::tcl::mathop" ni [namespace path]} {
@@ -2748,38 +1605,6 @@ oo::class create ::pgwire {
 
 	#>>>
 
-	# Try to find a suitable md5 command <<<
-	if {![catch {package require hash}]} {
-		method _md5_hex bytes {
-			package require hash
-			binary encode hex [hash::md5 $bytes]
-		}
-	} elseif {![catch {md5 foo} r]} {
-		switch -exact -- [binary encode hex $r] {
-			acbd18db4cc2f85cedef654fccc4a4d8 { # md5 command returns binary
-				method _md5_hex bytes {
-					binary encode hex [md5 $bytes]
-				}
-			}
-			6163626431386462346363326638356365646566363534666363633461346438 { # md5 command returns hex
-				method _md5_hex bytes {
-					md5 $bytes
-				}
-			}
-			724c305932307a432b467a74373256507a4d536b32413d3d { # md5 command returns base64
-				method _md5_hex bytes {
-					binary encode hex [binary decode base64 [md5 $bytes]]
-				}
-			}
-			default {
-				error "md5 command return format not recognised"
-			}
-		}
-	} else {
-		# TODO: provide a pure Tcl implementation?
-		error "No md5 command available"
-	}
-	# Try to find a suitable md5 command >>>
 	method _startup {db user password params} { #<<<
 		set payload	[binary format Iu [expr {
 			3 << 16 | 0
@@ -2804,7 +1629,8 @@ oo::class create ::pgwire {
 			AuthenticationOk {} {}
 
 			AuthenticationMD5Password salt {
-				my PasswordMessage md5[my _md5_hex [my _md5_hex [encoding convertto $tcl_encoding $password$user]]$salt]
+				set md5_hex	{b {binary encode hex [::pgwire::_md5 $b]}}
+				my PasswordMessage md5[apply $md5_hex [apply $md5_hex [encoding convertto $tcl_encoding $password$user]]$salt]
 				flush $socket
 			}
 			AuthenticationCleartextPassword	{} {
@@ -2814,38 +1640,21 @@ oo::class create ::pgwire {
 			AuthenticationSASL mechanisms {
 				upvar 1 _sasl_cx _sasl_cx
 				unset -nocomplain _sasl_cx
-				array set _sasl_cx	{}
-				set selected	{}
-				set initial_response	{}
-				foreach mechanism $mechanisms {
-					if {$mechanism in {SCRAM-SHA-256}} {
-						#package require stringprep	;# from tclilib
-						package require crypto
-						#stringprep::register SASLprep \
-						#	-mapping		{B.1} \
-						#	-normalization	KC \
-						#	-prohibited		{C.1.2 C.2.1 C.2.2 C.3 C.4 C.5 C.6 C.7 C.8 C.9} \
-						#	-prohibitedBidi	true
-						set selected	$mechanism
-						set nonce		{}			;# printable ascii, excluding ,
-						while {[string length $nonce] < 24} {	;# 24 - selected arbitrarily
-							append nonce	[regsub -all {[^\x21-\x2b\x2d-\x73]} [crypto::blowfish::csprng 64] {}]
-						}
-						set nonce	[string range $nonce 0 23]
-						set gs2header	n,,
-						set _sasl_cx(gs2header)		$gs2header
-						set _sasl_cx(nonce_client)	$nonce
-						#set _sasl_cx(client_first_message_bare)	"n=[stringprep::stringprep SASLprep [string map {, =2C = =3D} $user]],r=$nonce"		;# n= is ignored - backend uses username sent in the startup message instead
-						set _sasl_cx(client_first_message_bare)	"n=,r=$nonce"		;# n= is ignored - backend uses username sent in the startup message instead
-						append initial_response	$gs2header$_sasl_cx(client_first_message_bare)
-						break
-					}
-				}
-				if {$selected eq {}} {
+				array set _sasl_cx		{}
+
+				if {{SCRAM-SHA-256} in $mechanisms} {
+					set gs2header				n,,
+					set _sasl_cx(gs2header)		$gs2header
+					set nonce					[::pgwire::nonce 24]	;# 24 - selected arbitrarily
+					set _sasl_cx(nonce_client)	$nonce
+					#set _sasl_cx(client_first_message_bare)	"n=[stringprep::stringprep SASLprep [string map {, =2C = =3D} $user]],r=$nonce"		;# n= is ignored - backend uses username sent in the startup message instead
+					set _sasl_cx(client_first_message_bare)	"n=,r=$nonce"		;# n= is ignored - backend uses username sent in the startup message instead
+					append initial_response	$gs2header$_sasl_cx(client_first_message_bare)
+					my SASLInitialResponse SCRAM-SHA-256 $initial_response
+					flush $socket
+				} else {
 					my _error "No shared SASL mechanisms supported from list: $mechanisms"
 				}
-				my SASLInitialResponse $mechanism $initial_response
-				flush $socket
 			}
 			AuthenticationSASLContinue bytes {
 				upvar 1 _sasl_cx _sasl_cx
@@ -3180,6 +1989,7 @@ oo::class create ::pgwire {
 			} trap {TCL LOOKUP DICT} {errmsg options} {
 				my _error "Invalid msgtype: \"$msgtype\", [binary encode hex $msgtype], probably a sync issue, abandoning connection"
 			} on ok messagename {}
+			#::pgwire::log notice "got messagename ($messagename), data: [string length $data]"
 
 			# Parse message <<<
 			#::pgwire::log notice "parsing $messagename"
@@ -4043,7 +2853,7 @@ oo::class create ::pgwire {
 
 	#>>>
 	method gen_stmt_name compiled { #<<<
-		return "[incr name_seq] [string range [my _md5_hex $compiled] 0 7]"
+		return "[incr name_seq] [binary encode hex [string range [::pgwire::_md5 $compiled] 0 3]]"
 	}
 
 	#>>>
