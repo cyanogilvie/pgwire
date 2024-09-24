@@ -431,6 +431,230 @@ foreach impl {tcl c} {
 		unset -nocomplain dbchan rows row obj k v
 	} -result {{ENOUGH RAGING} {film_id title description release_year language_id rental_duration rental_rate length replacement_cost rating last_update special_features fulltext film_id category_id last_update category_id name last_update} Travel}
 	#>>>
+	test pgwire_$impl-5.6.1 {foreach script code=TCL_RETURN} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					set res			{}
+					set film_ids	{256 1 259}
+					pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+						lappend res [dict get $row title]
+						if {[dict get $row title] eq "DROP WATERFRONT"} {
+							return [list early $res]
+						}
+					}
+					lappend res after
+					set res
+				}}] after2
+			}}] after3
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -result {early {{ACADEMY DINOSAUR} {DROP WATERFRONT}} after2 after3}
+	#>>>
+	test pgwire_$impl-5.6.2 {foreach script code=TCL_CONTINUE} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					set res			{}
+					set film_ids	{256 1 259}
+					pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+						if {[dict get $row title] eq "DROP WATERFRONT"} continue
+						lappend res [dict get $row title]
+					}
+					lappend res after
+					set res
+				}}] after2
+			}}] after3
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -result {{ACADEMY DINOSAUR} {DUCK RACER} after after2 after3}
+	#>>>
+	test pgwire_$impl-5.6.3 {foreach script code=TCL_BREAK} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					set res			{}
+					set film_ids	{256 1 259}
+					pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+						lappend res [dict get $row title]
+						if {[dict get $row title] eq "DROP WATERFRONT"} break
+					}
+					lappend res after
+					set res
+				}}] after2
+			}}] after3
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -result {{ACADEMY DINOSAUR} {DROP WATERFRONT} after after2 after3}
+	#>>>
+	test pgwire_$impl-5.6.4 {foreach script code=TCL_ERROR} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					set res			{}
+					set film_ids	{256 1 259}
+					pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+						lappend res [dict get $row title]
+						if {[dict get $row title] eq "DROP WATERFRONT"} {error "aborted"}
+					}
+					lappend res after
+					set res
+				}}] after2
+			}}] after3
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -returnCodes error -result aborted
+	#>>>
+	test pgwire_$impl-5.6.5 {foreach script code=TCL_ERROR, thrown errorcode} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					set res			{}
+					set film_ids	{256 1 259}
+					pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+						lappend res [dict get $row title]
+						if {[dict get $row title] eq "DROP WATERFRONT"} {throw {foo bar} "aborted"}
+					}
+					lappend res after
+					set res
+				}}] after2
+			}}] after3
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -returnCodes error -result aborted -errorCode {foo bar}
+	#>>>
+	test pgwire_$impl-5.7.1 {foreach script code=TCL_RETURN -level 0} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					list {*}[apply {{} {
+						set res			{}
+						set film_ids	{256 1 259}
+						pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+							lappend res [dict get $row title]
+							if {[dict get $row title] eq "DROP WATERFRONT"} {
+								return -code return -level 0 [list early $res]
+							}
+						}
+						#foreach row {{title {ACADEMY DINOSAUR}} {title {DROP WATERFRONT}} {title {DUCK RACER}}} {
+						#	lappend res [dict get $row title]
+						#	if {[dict get $row title] eq "DROP WATERFRONT"} {
+						#		return -code return -level 0 [list early $res]
+						#	}
+						#}
+						lappend res after
+						set res
+					}}] after2
+				}}] after3
+			}}] after4
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -result {early {{ACADEMY DINOSAUR} {DROP WATERFRONT}} after2 after3 after4}
+	#>>>
+	test pgwire_$impl-5.7.2 {foreach script code=TCL_RETURN -level 1} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					list {*}[apply {{} {
+						set res			{}
+						set film_ids	{256 1 259}
+						pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+							lappend res [dict get $row title]
+							if {[dict get $row title] eq "DROP WATERFRONT"} {
+								return -code return -level 1 [list early $res]
+							}
+						}
+						#foreach row {{title {ACADEMY DINOSAUR}} {title {DROP WATERFRONT}} {title {DUCK RACER}}} {
+						#	lappend res [dict get $row title]
+						#	if {[dict get $row title] eq "DROP WATERFRONT"} {
+						#		return -code return -level 1 [list early $res]
+						#	}
+						#}
+						lappend res after
+						set res
+					}}] after2
+				}}] after3
+			}}] after4
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -result {early {{ACADEMY DINOSAUR} {DROP WATERFRONT}} after3 after4}
+	#>>>
+	test pgwire_$impl-5.7.3 {foreach script code=TCL_RETURN -level 2} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			list {*}[apply {{} {
+				list {*}[apply {{} {
+					list {*}[apply {{} {
+						set res			{}
+						set film_ids	{256 1 259}
+						pg foreach row {select title from film where film_id=any(:film_ids) order by film_id asc} {
+							lappend res [dict get $row title]
+							if {[dict get $row title] eq "DROP WATERFRONT"} {
+								return -code return -level 2 [list early $res]
+							}
+						}
+						#foreach row {{title {ACADEMY DINOSAUR}} {title {DROP WATERFRONT}} {title {DUCK RACER}}} {
+						#	lappend res [dict get $row title]
+						#	if {[dict get $row title] eq "DROP WATERFRONT"} {
+						#		return -code return -level 2 [list early $res]
+						#	}
+						#}
+						lappend res after
+						set res
+					}}] after2
+				}}] after3
+			}}] after4
+		}}
+	} -cleanup {
+		if {[info object isa object pg]} {pg destroy}
+		if {[info exists dbchan] && $dbchan in [chan names]} {close $dbchan}
+		unset -nocomplain dbchan
+	} -result {early {{ACADEMY DINOSAUR} {DROP WATERFRONT}} after4}
+	#>>>
 	test pgwire_$impl-6.1 {Transactions, rollback} -setup $std_setup -body { #<<<
 		set res	{}
 		lappend res	[pg transaction_status]
@@ -628,6 +852,98 @@ foreach impl {tcl c} {
 		rename pg {}
 		unset -nocomplain r o code
 	} -result {1 canary namedexception {a b c d1 d2}}
+	#>>>
+	test pgwire_$impl-6.7.1 {transaction control structure, code=TCL_RETURN -level 0} -setup $std_setup -body { #<<<
+		pg onecolumn {create temporary table pgwire_test_data (id integer primary key generated always as identity, val text)}
+		pg onecolumn {insert into pgwire_test_data (val) values ('a'), ('b'), ('c')}
+		list [apply {{} {
+			list [apply {{} {
+				list [apply {{} {
+					list [apply {{} {
+						foreach val {d e f} {
+							pg transaction {
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '1')}
+								if {$val eq "e"} {return -code return -level 0 rval}
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '2')}
+							}
+						}
+						pg onecolumn {insert into pgwire_test_data (val) values ('after1') returning val}
+					}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after2') returning val}]
+				}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after3') returning val}]
+			}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after4') returning val}]
+		}}] [pg allrows -as lists {select val from pgwire_test_data order by id asc}]
+	} -cleanup {
+		rename pg {}
+	} -result {{{{rval after2} after3} after4} {a b c d1 d2 e1 after2 after3 after4}}
+	#>>>
+	test pgwire_$impl-6.7.2 {transaction control structure, code=TCL_RETURN -level 1} -setup $std_setup -body { #<<<
+		pg onecolumn {create temporary table pgwire_test_data (id integer primary key generated always as identity, val text)}
+		pg onecolumn {insert into pgwire_test_data (val) values ('a'), ('b'), ('c')}
+		list [apply {{} {
+			list [apply {{} {
+				list [apply {{} {
+					list [apply {{} {
+						foreach val {d e f} {
+							pg transaction {
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '1')}
+								if {$val eq "e"} {return -code return -level 1 rval}
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '2')}
+							}
+						}
+						pg onecolumn {insert into pgwire_test_data (val) values ('after1') returning val}
+					}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after2') returning val}]
+				}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after3') returning val}]
+			}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after4') returning val}]
+		}}] [pg allrows -as lists {select val from pgwire_test_data order by id asc}]
+	} -cleanup {
+		rename pg {}
+	} -result {{{rval after3} after4} {a b c d1 d2 e1 after3 after4}}
+	#>>>
+	test pgwire_$impl-6.7.3 {transaction control structure, code=TCL_RETURN -level 2} -setup $std_setup -body { #<<<
+		pg onecolumn {create temporary table pgwire_test_data (id integer primary key generated always as identity, val text)}
+		pg onecolumn {insert into pgwire_test_data (val) values ('a'), ('b'), ('c')}
+		list [apply {{} {
+			list [apply {{} {
+				list [apply {{} {
+					list [apply {{} {
+						foreach val {d e f} {
+							pg transaction {
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '1')}
+								if {$val eq "e"} {return -code return -level 2 rval}
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '2')}
+							}
+						}
+						pg onecolumn {insert into pgwire_test_data (val) values ('after1') returning val}
+					}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after2') returning val}]
+				}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after3') returning val}]
+			}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after4') returning val}]
+		}}] [pg allrows -as lists {select val from pgwire_test_data order by id asc}]
+	} -cleanup {
+		rename pg {}
+	} -result {{rval after4} {a b c d1 d2 e1 after4}}
+	#>>>
+	test pgwire_$impl-6.7.4 {transaction control structure, code=TCL_RETURN -level 3} -setup $std_setup -body { #<<<
+		pg onecolumn {create temporary table pgwire_test_data (id integer primary key generated always as identity, val text)}
+		pg onecolumn {insert into pgwire_test_data (val) values ('a'), ('b'), ('c')}
+		list [apply {{} {
+			list [apply {{} {
+				list [apply {{} {
+					list [apply {{} {
+						foreach val {d e f} {
+							pg transaction {
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '1')}
+								if {$val eq "e"} {return -code return -level 3 rval}
+								pg onecolumn {insert into pgwire_test_data (val) values (:val || '2')}
+							}
+						}
+						pg onecolumn {insert into pgwire_test_data (val) values ('after1') returning val}
+					}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after2') returning val}]
+				}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after3') returning val}]
+			}}] [pg onecolumn {insert into pgwire_test_data (val) values ('after4') returning val}]
+		}}] [pg allrows -as lists {select val from pgwire_test_data order by id asc}]
+	} -cleanup {
+		rename pg {}
+	} -result {rval {a b c d1 d2 e1}}
 	#>>>
 	test pgwire_$impl-7.1 {ready_for_query} -setup $std_setup -body { #<<<
 		pg onecolumn {set search_path to public}
@@ -1072,6 +1388,106 @@ foreach impl {tcl c} {
 		}
 		unset -nocomplain dbchan title film_id length res obj
 	} -result {{{ACADEMY DINOSAUR} 86} {{DROP WATERFRONT} 178} {{DUCK RACER} 116}}
+	#>>>
+	test pgwire_$impl-9.3.1 {vars, script, exception} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+		set film_ids	{256 1 259}
+	} -body {
+		try {
+			pg vars {select title, length from film where film_id=any(:film_ids) order by film_id} {
+				lappend res [list $title $length]
+				if {$title eq "DROP WATERFRONT"} {throw foo "Aborting"}
+			}
+			lappend res bad
+		} trap foo {} {}
+		set res
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id length res obj film_ids
+	} -result {{{ACADEMY DINOSAUR} 86} {{DROP WATERFRONT} 178}}
+	#>>>
+	test pgwire_$impl-9.3.2 {vars, script, return} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			set film_ids	{256 1 259}
+			pg vars {select title, length from film where film_id=any(:film_ids) order by film_id} {
+				lappend res [list $title $length]
+				if {$title eq "DROP WATERFRONT"} {return "early: $res"}
+			}
+			lappend res bad
+			set res
+		}}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id length obj
+	} -result {early: {{ACADEMY DINOSAUR} 86} {{DROP WATERFRONT} 178}}
+	#>>>
+	test pgwire_$impl-9.3.3 {vars, script, break} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			set film_ids	{256 1 259}
+			pg vars {select title, length from film where film_id=any(:film_ids) order by film_id} {
+				lappend res [list $title $length]
+				if {$title eq "DROP WATERFRONT"} break
+			}
+			lappend res after
+			set res
+		}}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id length obj
+	} -result {{{ACADEMY DINOSAUR} 86} {{DROP WATERFRONT} 178} after}
+	#>>>
+	test pgwire_$impl-9.3.4 {vars, script, continue} -setup { #<<<
+		set dbchan	[try $connect]
+		pgwire create pg $dbchan pagila postgres insecure
+	} -body {
+		apply {{} {
+			set film_ids	{256 1 259}
+			pg vars {select title, length from film where film_id=any(:film_ids) order by film_id} {
+				if {$title eq "DROP WATERFRONT"} continue
+				lappend res [list $title $length]
+			}
+			lappend res after
+			set res
+		}}
+	} -cleanup {
+		foreach obj {pg} {
+			if {[info object isa object $obj]} {
+				$obj destroy
+			}
+		}
+		if {[info exists dbchan] && $dbchan in [chan names]} {
+			close $dbchan
+		}
+		unset -nocomplain dbchan title film_id length obj
+	} -result {{{ACADEMY DINOSAUR} 86} {{DUCK RACER} 116} after}
 	#>>>
 	test pgwire_$impl-10.1 {casts vs params} -setup { #<<<
 		set dbchan	[try $connect]

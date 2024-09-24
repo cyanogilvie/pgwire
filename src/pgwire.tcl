@@ -3878,11 +3878,9 @@ oo::class create ::pgwire {
 						my save_ops $sqlcode $as $ops
 					}
 					set foreach_batch {
-						#::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script $delims
 						uplevel 1 [list ::pgwire::c_foreach_batch_nr $row_varname $ops $columns $tcl_encoding $datarows $script $delims]
 					}
 				} else {
-					#set makerow	[my tcl_makerow $as $c_types]
 					set foreach_batch [string map [list \
 						%makerow%		[my tcl_makerow $as $c_types] \
 						%script%		[list $script] \
@@ -3890,6 +3888,7 @@ oo::class create ::pgwire {
 						apply {{row_varname datarows tcl_encoding} {
 							variable ::pgwire::arr_fmt_cache
 							upvar 2 $row_varname row
+							upvar 1 broken broken  rethrow rethrow
 							foreach datarow $datarows {
 								%makerow%
 								try {
@@ -3902,7 +3901,6 @@ oo::class create ::pgwire {
 									#::pgwire::log notice "foreach script caught return r: ($r), o: ($o)"
 									set broken	1
 									dict incr o -level 1
-									dict set o -code return
 									set rethrow	[list -options $o $r]
 									break
 								} on error {r o} {
@@ -3938,11 +3936,14 @@ oo::class create ::pgwire {
 			while {!$broken} {
 				lassign [$rowbuffer nextbatch] outcome details datarows
 
-				try $foreach_batch
+				try $foreach_batch on return {r o} {
+					dict incr o -level 1
+					set rethrow	[list -options $o $r]
+					set broken	1
+				}
 
 				switch -exact -- $outcome {
-					CommandComplete -
-					EmptyQueryResponse {
+					CommandComplete - EmptyQueryResponse {
 						break
 					}
 					PortalSuspended {}
@@ -3953,7 +3954,7 @@ oo::class create ::pgwire {
 			}
 
 			if {[info exists rethrow]} {
-				#::pgwire::log notice "rethrowing"
+				#::pgwire::log notice "rethrowing: ($rethrow)"
 				return {*}$rethrow
 			}
 		} finally {
@@ -4088,9 +4089,9 @@ oo::class create ::pgwire {
 		if {[info exists script]} {
 			# With a script arg, we're an alias for foreach -as vars
 			if {[info exists param_values]} {
-				uplevel 1 [list [self] foreach -as vars {} $sql $param_values $script]
+				tailcall my foreach -as vars {} $sql $param_values $script
 			} else {
-				uplevel 1 [list [self] foreach -as vars {} $sql $script]
+				tailcall my foreach -as vars {} $sql $script
 			}
 		} else {
 			my buffer_nesting

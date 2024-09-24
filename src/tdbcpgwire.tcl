@@ -533,7 +533,6 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 					} on return {r o} {
 						set broken	1
 						dict incr o -level 1
-						dict set o -code return
 						set rethrow	[list -options $o $r]
 						break
 					} on error {r o} {

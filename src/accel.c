@@ -255,7 +255,7 @@ done:
 		free_foreach_state(s);
 		s = NULL;
 	}
-	//fprintf(stderr, "returning %d\n", retcode);
+	//fprintf(stderr, "returning %d\n", code);
 	return code;
 }
 
