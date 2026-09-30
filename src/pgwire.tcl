@@ -486,12 +486,12 @@ namespace eval ::pgwire { #<<<
 			vars {
 				replace_tclobj(&val, Tcl_ObjSetVar2(interp, c->cols[colnum], NULL, val, TCL_LEAVE_ERR_MSG));
 				if (val == NULL) return TCL_ERROR;
-				c->rs == -1;	// Signal that we don't set a rowvar
+				c->rs = -1;	// Signal that we don't set a rowvar
 				replace_tclobj(&val, NULL);
 				return TCL_OK;
 			} {
 				Tcl_UnsetVar(interp, Tcl_GetString(c->cols[colnum]), 0);
-				c->rs == -1;	// Signal that we don't set a rowvar
+				c->rs = -1;	// Signal that we don't set a rowvar
 				return TCL_OK;
 			}
 		} { 
