@@ -906,7 +906,7 @@ done:
 			{
 				int			code = TCL_OK;
 				Tcl_Obj**	ov = NULL;
-				int			oc;
+				Tcl_Size	oc;
 				static const char* opnames[] = {
 					%opname_strings%,
 					(char*)NULL
@@ -919,7 +919,7 @@ done:
 				TEST_OK_LABEL(finally, code, Tcl_ListObjGetElements(interp, ops, &oc, &ov));
 
 				if (oc != expecting) {
-					Tcl_SetObjResult(interp, Tcl_ObjPrintf("Expecting %d ops, got %d", expecting, oc));
+					Tcl_SetObjResult(interp, Tcl_ObjPrintf("Expecting %d ops, got %" TCL_SIZE_MODIFIER "d", expecting, oc));
 					code = TCL_ERROR;
 					goto finally;
 				}
@@ -980,6 +980,9 @@ done:
 	if {![catch {package require tomcrypt}]} {
 		proc _sha256 bytes {::tomcrypt::hash sha256 $bytes}
 		proc _md5    bytes {::tomcrypt::hash md5    $bytes}
+		if {[llength [info commands ::tomcrypt::hmac]]} {
+			proc _hmac_sha256 {K m} {::tomcrypt::hmac sha256 $K $m}
+		}
 	} elseif {![catch {package require hash}]} {
 		proc _sha256 bytes {binary decode hex [::hash::sha256 $bytes]}
 		proc _md5    bytes {::hash::md5 $bytes}
@@ -1096,12 +1099,18 @@ if {[::pgwire::_use_jitc]} {
 				code	[_read_c tomcrypt_jitc.c] \
 			]
 			#>>>
-			foreach {cmd c_cmd} {
-				_sasl_hi		sasl_hi
-				_hmac_sha256	hmac_sha256
-				_sha256			sha256
-			} {
-				::jitc::bind [namespace current]::$cmd $tc_cdef $c_cmd
+			# Newer tomcrypt builds don't export libtomcrypt's symbols, in which
+			# case the INIT's symbol lookup fails and we use the fallbacks
+			try {
+				foreach {cmd c_cmd} {
+					_sasl_hi		sasl_hi
+					_hmac_sha256	hmac_sha256
+					_sha256			sha256
+				} {
+					::jitc::bind [namespace current]::$cmd $tc_cdef $c_cmd
+				}
+			} on error {errmsg options} {
+				::pgwire::log debug "Not using tomcrypt primitives from $libtomcrypt: $errmsg"
 			}
 		}
 
@@ -1505,7 +1514,6 @@ oo::class create ::pgwire {
 		chan configure $socket \
 			-blocking		1 \
 			-translation	binary \
-			-encoding		binary \
 			-buffering		full
 
 		chan event $socket readable [namespace code {my read_async}]
@@ -4178,7 +4186,6 @@ oo::class create ::pgwire {
 
 	#>>>
 	method copy_from {chanvar sql script} { #<<<
-		variable ::tdbc::generalError
 		variable ::pgwire::arr_fmt_cache
 		upvar 1 $chanvar chan
 

@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
+
+#ifndef TCL_SIZE_MAX	/* Building against Tcl < 8.7 */
+typedef int Tcl_Size;
+# define TCL_SIZE_MAX		INT_MAX
+# define TCL_SIZE_MODIFIER	""
+#endif
 #include <unistd.h>
 #include <sys/socket.h>
 #if __has_include(<linux/if_alg.h>)
@@ -384,7 +391,7 @@ OBJCMD(hash) { //<<<
 	TEST_OK_LABEL(finally, code, get_af_alg_params_from_obj(interp, crypto_type_hash, objv[A_HASH], &params));
 
 	if (!params->fd) {
-		int			alglen;
+		Tcl_Size			alglen;
 		const char*	alg = Tcl_GetStringFromObj(objv[A_HASH], &alglen);
 
 		sockfd = socket(AF_ALG, SOCK_SEQPACKET, 0);
@@ -411,7 +418,7 @@ OBJCMD(hash) { //<<<
 	}
 
 	{
-		int			len;
+		Tcl_Size			len;
 		const char*	bytes = Tcl_GetByteArrayFromObj(objv[A_BYTES], &len);
 		size_t		remain = len;
 		while (remain) {
@@ -469,7 +476,7 @@ OBJCMD(hmac) { //<<<
 	TEST_OK_LABEL(finally, code, get_af_alg_params_from_obj(interp, crypto_type_hash, objv[A_HASH], &params));
 	const size_t	digestsize = params->digestsize;
 
-	int				hashlen;
+	Tcl_Size				hashlen;
 	const char*		hashname = Tcl_GetStringFromObj(objv[A_HASH], &hashlen);
 	Tcl_DStringAppend(&ds, "hmac(", 5);
 	Tcl_DStringAppend(&ds, hashname, hashlen);
@@ -493,7 +500,7 @@ OBJCMD(hmac) { //<<<
 	if (-1 == bind(sockfd, (struct sockaddr*)salg, sizeof(struct sockaddr_alg)+alglen+1))
 		THROW_POSIX_LABEL(finally, code, "bind");
 
-	int				keylen;
+	Tcl_Size				keylen;
 	const uint8_t*	key = Tcl_GetByteArrayFromObj(objv[A_KEY], &keylen);
 	if (-1 == setsockopt(sockfd, SOL_ALG, ALG_SET_KEY, key, keylen))
 		THROW_POSIX_LABEL(finally, code, "setsockopt");
@@ -502,7 +509,7 @@ OBJCMD(hmac) { //<<<
 	if (fd == -1) THROW_POSIX_LABEL(finally, code, "accept");
 
 	{
-		int			len;
+		Tcl_Size			len;
 		const char*	bytes = Tcl_GetByteArrayFromObj(objv[A_BYTES], &len);
 		size_t		remain = len;
 		while (remain) {
@@ -577,8 +584,8 @@ OBJCMD(sasl_hi) { //<<<
 	enum {A_cmd, A_STR, A_SALT, A_IT, A_objc};
 	CHECK_ARGS_LABEL(finally, code, "str salt it");
 
-	int		str_len;
-	int		salt_len;
+	Tcl_Size		str_len;
+	Tcl_Size		salt_len;
 	#ifdef Tcl_GetBytesFromObj
 	const uint8_t*const	str_bytes  = Tcl_GetBytesFromObj(interp, objv[A_STR],  &str_len);
 	if (!str_bytes) {code = TCL_ERROR; goto finally;}

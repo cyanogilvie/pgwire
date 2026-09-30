@@ -2,6 +2,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+
+#ifndef TCL_SIZE_MAX	/* Building against Tcl < 8.7 */
+typedef int Tcl_Size;
+# define TCL_SIZE_MAX		INT_MAX
+# define TCL_SIZE_MODIFIER	""
+#endif
 
 /* Derived from: LibTomCrypt, modular cryptographic library -- Tom St Denis */
 /* SPDX-License-Identifier: Unlicense */
@@ -268,7 +275,7 @@ OBJCMD(sha256) { //<<<
 	struct sha256_state		md;
 	uint8_t					hash[HLEN];
 
-	int		len;
+	Tcl_Size		len;
 	#ifdef Tcl_GetBytesFromObj
 	const uint8_t*	bytes = Tcl_GetBytesFromObj(interp, objv[A_BYTES], &len);
 	#else
@@ -358,7 +365,7 @@ OBJCMD(hmac_sha256) { //<<<
 	enum {A_cmd, A_K, A_M, A_objc};
 	CHECK_ARGS_LABEL(finally, code, "K m");
 
-	int					k_len, m_len;
+	Tcl_Size					k_len, m_len;
 	#ifdef Tcl_GetBytesFromObj
 	const uint8_t*const	k_bytes = Tcl_GetBytesFromObj(interp, objv[A_K], &k_len);
 	if (!k_bytes) {code = TCL_ERROR; goto finally;}
@@ -384,8 +391,8 @@ OBJCMD(sasl_hi) { //<<<
 	enum {A_cmd, A_STR, A_SALT, A_IT, A_objc};
 	CHECK_ARGS_LABEL(finally, code, "str salt it");
 
-	int		str_len;
-	int		salt_len;
+	Tcl_Size		str_len;
+	Tcl_Size		salt_len;
 	#ifdef Tcl_GetBytesFromObj
 	const uint8_t*const	str_bytes  = Tcl_GetBytesFromObj(interp, objv[A_STR],  &str_len);
 	if (!str_bytes) {code = TCL_ERROR; goto finally;}
@@ -633,7 +640,7 @@ OBJCMD(md5) { //<<<
 	struct md5_state		md;
 	uint8_t					hash[HLEN];
 
-	int		len;
+	Tcl_Size		len;
 	#ifdef Tcl_GetBytesFromObj
 	const uint8_t*	bytes = Tcl_GetBytesFromObj(interp, objv[A_BYTES], &len);
 	#else

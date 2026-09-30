@@ -3,6 +3,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
+
+#ifndef TCL_SIZE_MAX	/* Building against Tcl < 8.7 */
+typedef int Tcl_Size;
+# define TCL_SIZE_MAX		INT_MAX
+# define TCL_SIZE_MODIFIER	""
+#endif
 
 #define PGWIRE_LITS \
 	X( BLANK,	"" ) \
@@ -46,7 +53,7 @@ struct column_cx {
 struct foreach_state {
 	struct column_cx	col;
 	int					r;
-	int					datarowc;
+	Tcl_Size					datarowc;
 	Tcl_Obj**			datarowv;
 	int					colcount;
 	Tcl_Obj**			rowv;
@@ -54,7 +61,7 @@ struct foreach_state {
 	Tcl_Obj*			rowvar;
 	Tcl_Obj*			script;
 	col_op**			ops;
-	int					delimc;
+	Tcl_Size					delimc;
 	Tcl_Obj**			delimv;
 };
 
@@ -109,13 +116,13 @@ OBJCMD(c_foreach_batch_nr_setup) //<<<
 	int						code = TCL_OK;
 	struct foreach_state*	s = NULL;
 	Tcl_Obj**				datarowv = NULL;
-	int						datarowc;
+	Tcl_Size						datarowc;
 	Tcl_Obj**				colv = NULL;
-	int						colc;
+	Tcl_Size						colc;
 	Tcl_Encoding			encoding;
 	int						i;
 	Tcl_Obj**				delimv = NULL;
-	int						delimc;
+	Tcl_Size						delimc;
 
 	enum {A_cmd, A_ROWVAR, A_OPS, A_COLS, A_ENCODING, A_DATAROWS, A_SCRIPT, A_DELIMS, A_objc};
 	CHECK_ARGS_LABEL(err, code, "rowvar ops columns tcl_encoding datarows script delims");
@@ -169,7 +176,8 @@ err:
 static int c_foreach_batch_nr_loop_top(Tcl_Interp* interp, struct foreach_state* s) //<<<
 {
 	int				code = TCL_OK;
-	int				data_len, c;
+	Tcl_Size				data_len;
+	int				c;
 	unsigned char*	data = Tcl_GetByteArrayFromObj(s->datarowv[s->r], &data_len);
 	unsigned char*	p = data+2;
 
@@ -179,7 +187,7 @@ static int c_foreach_batch_nr_loop_top(Tcl_Interp* interp, struct foreach_state*
 	// per datarow:
 
 	if (data_len < 4) {
-		Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
+		Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %" TCL_SIZE_MODIFIER "d", data_len));
 		code = TCL_ERROR;
 		goto finally;
 	}
@@ -264,16 +272,16 @@ OBJCMD(c_allrows_batch) //<<<
 {
 	int					code = TCL_OK;
 	Tcl_Obj**			datarowv = NULL;
-	int					datarowc;
+	Tcl_Size					datarowc;
 	Tcl_Obj**			colv = NULL;
-	int					colc;
+	Tcl_Size					colc;
 	Tcl_Encoding		encoding;
 	Tcl_Obj*			rows = NULL;	// Loaned ref
 	Tcl_Obj*			lrows = NULL;
 	col_op**			ops = NULL;
 	Tcl_Obj**			rowv = NULL;
 	Tcl_Obj**			delimv = NULL;
-	int					delimc;
+	Tcl_Size					delimc;
 
 	enum {A_cmd, A_ROWSVAR, A_OPS, A_COLS, A_ENCODING, A_DATAROWS, A_DELIMS, A_objc};
 	CHECK_ARGS_LABEL(finally, code, "rowsvar ops columns tcl_encoding datarows delims");
@@ -308,7 +316,8 @@ OBJCMD(c_allrows_batch) //<<<
 		col.cols = colv;
 
 		for (r=0; r<datarowc; r++) {
-			int				data_len, c;
+			Tcl_Size				data_len;
+			int				c;
 			unsigned char*	data = Tcl_GetByteArrayFromObj(datarowv[r], &data_len);
 			unsigned char*	p = data+2;
 
@@ -331,7 +340,7 @@ OBJCMD(c_allrows_batch) //<<<
 	// per datarow:
 
 	if (data_len < 4) {
-		Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %d", data_len));
+		Tcl_SetObjResult(interp, Tcl_ObjPrintf("data is too short: %" TCL_SIZE_MODIFIER "d", data_len));
 		code = TCL_ERROR;
 		goto finally;
 	}
@@ -370,14 +379,14 @@ OBJCMD(c_makerow2) //<<<
 {
 	int					code = TCL_OK;
 	Tcl_Obj**			colv = NULL;
-	int					colc;
+	Tcl_Size					colc;
 	Tcl_Encoding		encoding;
 	unsigned char*		data = NULL;
-	int					data_len;
+	Tcl_Size					data_len;
 	col_op**			ops = NULL;
 	Tcl_Obj**			rowv = NULL;
 	Tcl_Obj**			delimv = NULL;
-	int					delimc;
+	Tcl_Size					delimc;
 
 	enum {A_cmd, A_OPS, A_COLS, A_ENCODING, A_DATAROW, A_DELIMS, A_objc};
 	CHECK_ARGS_LABEL(finally, code, "ops columns tcl_encoding datarow delims");
@@ -436,7 +445,7 @@ OBJCMD(xor) //<<<
 	enum {A_cmd, A_A, A_B, A_objc};
 	CHECK_ARGS_LABEL(finally, code, "a b");
 
-	int		a_len, b_len;
+	Tcl_Size		a_len, b_len;
 	#ifdef Tcl_GetBytesFromObj
 	const uint8_t*	a = (const uint8_t*)Tcl_GetBytesFromObj(interp, objv[A_A], &a_len);
 	if (!a) {code = TCL_ERROR; goto finally;}
