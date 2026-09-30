@@ -135,7 +135,7 @@ OBJCMD(tokenize) {
 				ok+		{ Tcl_AppendToObj(res, valtok, (int)(valcur-valtok)); continue; }
 				"'"		{ Tcl_AppendToObj(res, "''", 2); continue; }
 				"\\"	{ Tcl_AppendToObj(res, "\\\\", standard_conforming_strings ? 1 : 2); continue; }
-				*		{ Tcl_AppendToObj(res, tok, 1); continue; }
+				*		{ Tcl_AppendToObj(res, valtok, 1); continue; }
 			*/
 		}
 		Tcl_AppendToObj(res, "'", 1);
