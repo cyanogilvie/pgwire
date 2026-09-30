@@ -13,6 +13,6 @@ RUN mkdir /data && \
 	su postgres -c 'psql -d pagila -c "select count(1) from actor"' && \
 	su postgres -c 'pg_ctl stop'
 RUN apk add --update --no-cache iproute2 util-linux-misc
-ENTRYPOINT ["nice", "-n", "-20", "taskset", "-c", "4-7", "docker-entrypoint.sh"]
-#ENTRYPOINT ["nice", "-n", "-20", "docker-entrypoint.sh"]
+COPY entrypoint.sh /usr/local/bin/pgwire-entrypoint.sh
+ENTRYPOINT ["pgwire-entrypoint.sh", "docker-entrypoint.sh"]
 CMD ["postgres"]

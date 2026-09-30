@@ -32,7 +32,10 @@ services:
         volumes:
             - ./src:/src
             - run:/run
-            - ./tmp:/tmp
+            # Keep /tmp off the host fs: jitc's scratch dirs can't be removed on NFS (ENOTEMPTY)
+            - type: tmpfs
+              target: /tmp
+            - ./tmp:/tmp/out
             - ~/.aws:/root/.aws
         environment:
             POSTGRES_PASSWORD: insecure

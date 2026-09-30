@@ -7,7 +7,7 @@ test: all
 	$(DC) run --rm pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 tcpdump: all
-	$(DC) run --rm -e TCPDUMP="/tmp/tcldump_" pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
+	$(DC) run --rm -e TCPDUMP="/tmp/out/tcldump_" pgwire test TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
 
 valgrind: all
 	$(DC) run --rm pgwire valgrind TESTFLAGS="$(TESTFLAGS)" AWS_PROFILE="$(AWS_PROFILE)"
