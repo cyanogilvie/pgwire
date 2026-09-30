@@ -696,7 +696,7 @@ namespace eval ::pgwire { #<<<
 							Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
 
 							const char*const	str = Tcl_DStringValue(&utf8);
-							const int			str_len = Tcl_DStringLength(&utf8);
+							const Tcl_Size		str_len = Tcl_DStringLength(&utf8);
 							const char*const	end = str + str_len;
 							const char*			p = str;
 							int					level = 0;

@@ -72,14 +72,14 @@ OBJCMD(tokenize) {
 					| dqlit
 					| pgcast;
 
-			end		{ Tcl_AppendToObj(res, tok, (int)(cur-tok-1)); break; }
+			end		{ Tcl_AppendToObj(res, tok, cur-tok-1); break; }
 			ign		{ continue; }
 			*		{ continue; }
 
 			":" @b1 bindvar @b2 {
-				Tcl_AppendToObj(res, tok, (int)(b1-1-tok));
+				Tcl_AppendToObj(res, tok, b1-1-tok);
 				tok = b2;
-				replace_tclobj(&bindvar, Tcl_NewStringObj(b1, (int)(b2-b1)));
+				replace_tclobj(&bindvar, Tcl_NewStringObj(b1, b2-b1));
 				goto interpolate_bindvar;
 			}
 		*/
@@ -132,7 +132,7 @@ OBJCMD(tokenize) {
 				ok		= [^'\\] \ end;
 
 				end		{ break; }
-				ok+		{ Tcl_AppendToObj(res, valtok, (int)(valcur-valtok)); continue; }
+				ok+		{ Tcl_AppendToObj(res, valtok, valcur-valtok); continue; }
 				"'"		{ Tcl_AppendToObj(res, "''", 2); continue; }
 				"\\"	{ Tcl_AppendToObj(res, "\\\\", standard_conforming_strings ? 1 : 2); continue; }
 				*		{ Tcl_AppendToObj(res, valtok, 1); continue; }
