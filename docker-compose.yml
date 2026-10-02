@@ -32,9 +32,6 @@ services:
         volumes:
             - ./src:/src
             - run:/run
-            # Keep /tmp off the host fs: jitc's scratch dirs can't be removed on NFS (ENOTEMPTY)
-            - type: tmpfs
-              target: /tmp
             - ./tmp:/tmp/out
             - ~/.aws:/root/.aws
         environment:
@@ -46,6 +43,11 @@ services:
         cap_add:
             - NET_ADMIN
             - CAP_SYS_NICE
+        # Keep /tmp off the host fs: jitc's scratch dirs can't be removed on NFS
+        # (ENOTEMPTY).  Docker mounts tmpfs noexec by default, but jitc loads the
+        # objects it compiles from there
+        tmpfs:
+            - /tmp:exec,mode=1777
         working_dir: /src
         entrypoint: ["make"]
 volumes:
