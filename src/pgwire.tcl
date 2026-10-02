@@ -977,12 +977,12 @@ done:
 	}
 	#>>>
 	# Procure hash and related functions: sha256, md5, hmac_sha256, sasl_hi <<<
-	if {![catch {package require tomcrypt}]} {
+	if {![catch {package require tomcrypt 0.9.8}]} {
 		proc _sha256 bytes {::tomcrypt::hash sha256 $bytes}
 		proc _md5    bytes {::tomcrypt::hash md5    $bytes}
-		if {[llength [info commands ::tomcrypt::hmac]]} {
-			proc _hmac_sha256 {K m} {::tomcrypt::hmac sha256 $K $m}
-		}
+		proc _hmac_sha256 {K m} {::tomcrypt::hmac sha256 $K $m}
+		# _sasl_hi: the Tcl fallback over tomcrypt's hmac is faster than the
+		# jitc_hash.c implementation
 	} elseif {![catch {package require hash}]} {
 		proc _sha256 bytes {binary decode hex [::hash::sha256 $bytes]}
 		proc _md5    bytes {::hash::md5 $bytes}
@@ -1088,31 +1088,6 @@ if {[::pgwire::_use_jitc]} {
 			code	[_read_c af_alg.c] \
 		]
 		#>>>
-
-		if {![catch {
-			package require tomcrypt 0.5.5
-			lindex [glob -nocomplain -type f -directory [file dirname [file normalize [package files tomcrypt]]] *[info sharedlibextension]] 0
-		} libtomcrypt] && [file readable $libtomcrypt]} {
-			# We have tomcrypt available (and loaded), pilfer the tomcrypt primitves from its dll <<<
-			variable tc_cdef	[list define [list LIBTC "\"[string map [list \" \\\"] $libtomcrypt]\""] \
-				options	{-Wall -Werror -gdwarf-5 -std=gnu17} \
-				code	[_read_c tomcrypt_jitc.c] \
-			]
-			#>>>
-			# Newer tomcrypt builds don't export libtomcrypt's symbols, in which
-			# case the INIT's symbol lookup fails and we use the fallbacks
-			try {
-				foreach {cmd c_cmd} {
-					_sasl_hi		sasl_hi
-					_hmac_sha256	hmac_sha256
-					_sha256			sha256
-				} {
-					::jitc::bind [namespace current]::$cmd $tc_cdef $c_cmd
-				}
-			} on error {errmsg options} {
-				::pgwire::log debug "Not using tomcrypt primitives from $libtomcrypt: $errmsg"
-			}
-		}
 
 	} ::pgwire}
 } else {
