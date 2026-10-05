@@ -330,7 +330,7 @@ static int get_af_alg_params_from_obj(Tcl_Interp* interp, enum info_types type, 
 	if (ir) {
 		*params = ir->twoPtrValue.ptr1;
 	} else {
-		TEST_OK_LABEL(finally, code, get_params(interp, type, obj, params));
+		TEST_OK_LABEL(finally, code, get_params(interp, type, obj, (const struct af_alg_params**)params));
 		Tcl_StoreInternalRep(obj, &objtype_af_alg_params, &(Tcl_ObjInternalRep){.twoPtrValue.ptr1 = *params});
 		register_intrep(obj);
 	}
