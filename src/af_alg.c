@@ -13,7 +13,7 @@ typedef int Tcl_Size;
 #include <unistd.h>
 #include <sys/socket.h>
 #if __has_include(<linux/if_alg.h>)
-#	include <if_alg.h>
+#	include <linux/if_alg.h>
 #else
 struct sockaddr_alg {
 	uint16_t	salg_family;

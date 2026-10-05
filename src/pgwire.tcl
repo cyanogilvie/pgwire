@@ -1132,109 +1132,63 @@ namespace eval ::pgwire {
 	}
 	#>>>
 	if {[llength [info commands ::pgwire::interpolate]] == 0} { #<<<
-		proc interpolate {sql standard_conforming_strings args} {
-			parse_args::parse_args $args {
-				dict	{}
-			}
-			package require tdbc
-			set quoted	{}
-			foreach tok [tdbc::tokenize $sql] {
-				switch -glob -- $tok {
-					::* {
-						# Prevent PG casts from looking like params
-						append quoted	$tok
+		# Pure-Tcl fallbacks for the jitc tokenize.c accelerators (no jitc):
+		# the same tokens and output.  :name is a bind variable; '...' and
+		# "..." literals (with \x and '' escapes), -- comments and :: casts
+		# are passed through untouched.
+		proc _sql_tokenize {mode sql standard_conforming_strings args} {
+			set re		{--[^\n]*|'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.)*"|::|:([_a-zA-Z0-9]+)}
+			set res		{}
+			set slots	{}
+			set seq		0
+			set pos		0
+			while {[regexp -start $pos -indices -- $re $sql m name]} {
+				lassign $m from to
+				append res [string range $sql $pos [expr {$from-1}]]
+				set pos	[expr {$to+1}]
+				if {[lindex $name 0] == -1} {
+					append res [string range $sql $from $to]
+					continue
+				}
+				set name	[string range $sql {*}$name]
+				if {$mode eq "bindparse"} {
+					if {![dict exists $slots $name]} {
+						dict set slots $name id [incr seq]
 					}
-
-					:* - $* - @* {
-						set name	[string range $tok 1 end]
-						if {[regexp {^[0-9]+$} $name]} {
-							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-							# to be parameters from us, but refer to the argument of functions).  Not
-							# watertight, but would require a SQL-dialect aware parser to do properly.
-							append quoted $tok
-							continue
-						}
-
-						if {[info exists dict]} {
-							set exists	[dict exists $dict $name]
-						} else {
-							set exists	[uplevel 1 [list info exists $name]]
-						}
-						if {$exists} {
-							if {[info exists dict]} {
-								set value	[dict get $dict $name]
-							} else {
-								set value	[uplevel 1 [list set $name]]
-							}
-							if {$standard_conforming_strings} {
-								append quoted	' [string map {' ''} $value] '
-							} else {
-								append quoted	' [string map {' '' \\ \\\\} $value] '
-							}
-						} else {
-							append quoted	NULL
-						}
-					}
-
-					; {
-						append quoted $tok
-					}
-
-					default {
-						append quoted $tok
-					}
+					append res \$[dict get $slots $name id]
+					continue
+				}
+				if {[llength $args]} {
+					set exists	[dict exists [lindex $args 0] $name]
+					if {$exists} {set value [dict get [lindex $args 0] $name]}
+				} else {
+					set exists	[uplevel 2 [list info exists $name]]
+					if {$exists} {set value [uplevel 2 [list set $name]]}
+				}
+				if {!$exists} {
+					append res NULL
+				} elseif {$standard_conforming_strings} {
+					append res ' [string map {' ''} $value] '
+				} else {
+					append res ' [string map {' '' \\ \\\\} $value] '
 				}
 			}
-			set quoted
+			append res [string range $sql $pos end]
+			if {$mode eq "bindparse"} {
+				list $slots $res
+			} else {
+				set res
+			}
+		}
+
+		proc interpolate {sql standard_conforming_strings args} {
+			_sql_tokenize interpolate $sql $standard_conforming_strings {*}$args
 		}
 	}
 	#>>>
 	if {[llength [info commands ::pgwire::bindparse]] == 0} { #<<<
-		proc bindparse {sql -} {
-			set seq				0
-			set params_assigned {}
-			set compiled		{}
-
-			package require tdbc
-			foreach tok [tdbc::tokenize $sql] {
-				switch -glob -- $tok {
-					::* {
-						# Prevent PG casts from looking like params
-						append compiled $tok
-					}
-
-					:* - $* - @* {
-						set name	[string range $tok 1 end]
-						if {[regexp {^[0-9]+$} $name]} {
-							# Avoid matching $1, $4, etc in the statement (which usually aren't intended
-							# to be parameters from us, but refer to the argument of functions).  Not
-							# watertight, but would require a SQL-dialect aware parser to do properly.
-							append compiled $tok
-							continue
-						}
-
-						if {![dict exists $params_assigned $name]} {
-							set id	[incr seq]
-							dict set params_assigned $name id		$id
-						} else {
-							set id	[dict get $params_assigned $name id]
-						}
-
-						append compiled \$$id
-					}
-					; {
-						#error "Multiple statements are not supported"
-						# These may be within a function definition or similar.  Build it here and let
-						# the backend sort out whether it will accept it
-						append compiled $tok
-					}
-					default {
-						append compiled $tok
-					}
-				}
-			}
-
-			list $params_assigned $compiled
+		proc bindparse {sql standard_conforming_strings} {
+			_sql_tokenize bindparse $sql $standard_conforming_strings
 		}
 	}
 	#>>>
