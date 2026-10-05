@@ -942,4 +942,86 @@ bench pgwire-8.1 {vars, no script} -setup { #<<<
 } -result {ENOUGH RAGING}
 #>>>
 
+bench pgwire-9.1 {decode only: 20k rows x 16 mixed-type columns} -setup { #<<<
+	# Measures just the row decoding (the jitc-compiled accelerators against the
+	# pure Tcl makerow), without the server or the socket: the DataRows are
+	# fetched once here, then decoded repeatedly.  End-to-end timings of large
+	# results are dominated by the fetch, which hides the decoder's cost, so this
+	# is the one to compare jitc backends / optimisation levels with.
+	make_pgwire_lo
+	variable q {
+		select
+			g								as id,
+			g::int8 * 1000					as i8,
+			(g % 100)::int2					as i2,
+			g * 1.25::float8				as f8,
+			g::float4						as f4,
+			(g * 3.5)::numeric(12,2)		as num,
+			'name ' || g					as name,
+			md5(g::text)					as hash,
+			(g % 2 = 0)						as flag,
+			timestamp '2020-01-01' + g * interval '1 minute'	as ts,
+			date '2020-01-01' + (g % 1000)	as d,
+			case when g % 7 = 0 then null else g % 13 end		as maybe,
+			repeat('x', g % 50)				as pad,
+			md5((g * 7)::text)::uuid		as uuid,
+			jsonb_build_object('k', g)		as js,
+			(g % 5)::text					as cat
+		from
+			generate_series(1, 20000) g
+	}
+	variable nsvars	{datarows columns tcl_encoding delims}
+	foreach fmt {lists dicts vars} {
+		set batch	[get_batch_vars pgwire_lo $q 0 $fmt]
+		variable ops_$fmt	[dict get $batch ops]
+		# As pgwire-7.3: the Tcl makerow script, run per row with the batch vars in scope
+		variable tcl_makerow_$fmt	[list \
+			[list datarow {*}[dict keys $batch]] \
+			"variable ::pgwire::arr_fmt_cache; [dict get $batch tcl_makerow]; [expr {$fmt eq "vars" ? "" : {set row}}]" \
+		]
+		variable batch_$fmt	[dict values $batch]
+		lappend nsvars ops_$fmt tcl_makerow_$fmt batch_$fmt
+	}
+	foreach v {datarows columns tcl_encoding delims} {variable $v [dict get $batch $v]}
+} -transform {
+	*	{script {variable nsvars; return "[join [lmap v $nsvars {format {variable %s} $v}] {; }]; $script"}}
+} -compare {
+	tcl_allrows_lists {
+		set rows	{}
+		foreach datarow $datarows {lappend rows [apply $tcl_makerow_lists $datarow {*}$batch_lists]}
+		llength $rows
+	}
+	tcl_allrows_dicts {
+		set rows	{}
+		foreach datarow $datarows {lappend rows [apply $tcl_makerow_dicts $datarow {*}$batch_dicts]}
+		llength $rows
+	}
+	c_allrows_lists {
+		set rows	{}
+		::pgwire::c_allrows_batch rows $ops_lists $columns $tcl_encoding $datarows $delims
+		llength $rows
+	}
+	c_allrows_dicts {
+		set rows	{}
+		::pgwire::c_allrows_batch rows $ops_dicts $columns $tcl_encoding $datarows $delims
+		llength $rows
+	}
+	c_foreach_lists {
+		set count	0
+		::pgwire::c_foreach_batch_nr row $ops_lists $columns $tcl_encoding $datarows {incr count} $delims
+		set count
+	}
+	c_foreach_dicts {
+		set count	0
+		::pgwire::c_foreach_batch_nr row $ops_dicts $columns $tcl_encoding $datarows {incr count} $delims
+		set count
+	}
+	c_foreach_vars {
+		set count	0
+		::pgwire::c_foreach_batch_nr row $ops_vars $columns $tcl_encoding $datarows {incr count} $delims
+		set count
+	}
+} -result 20000
+#>>>
+
 # vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
