@@ -1,5 +1,5 @@
 # First two numbers are the PostgreSQL protocol version number, rest is ours
-VER = 3.0.0b34
+VER = 3.0.0b35
 TCLSH = tclsh
 VALGRINDEXTRA =
 VALGRINDARGS = --tool=memcheck --num-callers=8 --leak-resolution=high \

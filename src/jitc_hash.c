@@ -5,7 +5,9 @@
 #include <limits.h>
 
 #ifndef TCL_SIZE_MAX	/* Building against Tcl < 8.7 */
+#	ifndef Tcl_Size	/* jitc < 0.8 defines it as a macro */
 typedef int Tcl_Size;
+#	endif
 # define TCL_SIZE_MAX		INT_MAX
 # define TCL_SIZE_MODIFIER	""
 #endif
