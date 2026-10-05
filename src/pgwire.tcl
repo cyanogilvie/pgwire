@@ -1055,7 +1055,7 @@ if {[::pgwire::_use_jitc]} {
 		if {[info exists ::env(PGWIRE_JITC_DEBUG)]} {
 			lappend accel	debug $::env(PGWIRE_JITC_DEBUG)
 		}
-		lappend accel	options {-Wall -Werror -gdwarf-5} code $c_code
+		lappend accel	options {-Wall -Werror -gdwarf-5 -O2} code $c_code
 		unset c_code
 
 		foreach {cmd c_cmd} {
@@ -1071,7 +1071,7 @@ if {[::pgwire::_use_jitc]} {
 
 		# Accelerated SQL tokenizer <<<
 		variable tokenize_cdef [list \
-			options		{-Wall -Werror -g -std=gnu17} \
+			options		{-Wall -Werror -g -O1 -std=gnu17} \
 			filter		{jitc::re2c -W --case-ranges --no-debug-info} \
 			code		[_read_c tokenize.c] \
 		]
@@ -1083,7 +1083,7 @@ if {[::pgwire::_use_jitc]} {
 
 		# ::pgwire::af_alg_cdef: use Linux's AF_ALG crypto primitives <<<
 		variable af_alg_cdef [list \
-			options	{-Wall -Werror -std=gnu17 -gdwarf-5} \
+			options	{-Wall -Werror -std=gnu17 -gdwarf-5 -O1} \
 			filter	{jitc::re2c -W --case-ranges -Wno-nondeterministic-tags --no-debug-info} \
 			code	[_read_c af_alg.c] \
 		]
