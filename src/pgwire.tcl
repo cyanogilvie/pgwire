@@ -988,7 +988,7 @@ done:
 		proc _md5    bytes {::hash::md5 $bytes}
 	} elseif {[_use_jitc]} {
 		# c implementations of sha256, md5, hmac_sha256, sasl_hi <<<
-		variable jitc_hash_cdef [list options {-Wall -Werror} code [_read_c jitc_hash.c]]
+		variable jitc_hash_cdef [list options {-Wall -Werror -O2} code [_read_c jitc_hash.c]]
 		foreach {cmd c_cmd} {
 			_sha256			sha256
 			_hmac_sha256	hmac_sha256
@@ -1071,7 +1071,7 @@ if {[::pgwire::_use_jitc]} {
 
 		# Accelerated SQL tokenizer <<<
 		variable tokenize_cdef [list \
-			options		{-Wall -Werror -g -O1 -std=gnu17} \
+			options		{-Wall -Werror -g -O2 -std=gnu17} \
 			filter		{jitc::re2c -W --case-ranges --no-debug-info} \
 			code		[_read_c tokenize.c] \
 		]
@@ -1083,7 +1083,7 @@ if {[::pgwire::_use_jitc]} {
 
 		# ::pgwire::af_alg_cdef: use Linux's AF_ALG crypto primitives <<<
 		variable af_alg_cdef [list \
-			options	{-Wall -Werror -std=gnu17 -gdwarf-5 -O1} \
+			options	{-Wall -Werror -std=gnu17 -gdwarf-5 -O2} \
 			filter	{jitc::re2c -W --case-ranges -Wno-nondeterministic-tags --no-debug-info} \
 			code	[_read_c af_alg.c] \
 		]
