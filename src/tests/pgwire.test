@@ -1775,6 +1775,18 @@ foreach impl {tcl c} {
 		unset -nocomplain id
 	} -result {pgwire-25.3}
 	#>>>
+	test pgwire_$impl-26.1 {prepared statement whose SQL text has characters above U+00FF (statement name md5 takes bytes)} -setup { #<<<
+		pgwire create pg [try $connect] pagila postgres insecure
+		set x	b
+	} -body {
+		list \
+			[pg onecolumn "select '\u20ac10 \u2014 caf\u00e9'"] \
+			[pg onecolumn "select :x || '\u2603'"]
+	} -cleanup {
+		if {[info object isa object pg]} {rename pg {}}
+		unset -nocomplain x
+	} -result [list "\u20ac10 \u2014 caf\u00e9" "b\u2603"]
+	#>>>
 }
 
 ::tcltest::cleanupTests

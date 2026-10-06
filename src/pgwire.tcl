@@ -1619,12 +1619,13 @@ oo::class create ::pgwire {
 					-prohibited		{C.1.2 C.2.1 C.2.2 C.3 C.4 C.5 C.6 C.7 C.8 C.9} \
 					-prohibitedBidi	true
 
-				set salted_password		[::pgwire::_sasl_hi [stringprep::stringprep SASLprep $password] $salt $it]
+				# RFC 5802: Hi() and HMAC() take the UTF-8 octets
+				set salted_password		[::pgwire::_sasl_hi [encoding convertto utf-8 [stringprep::stringprep SASLprep $password]] $salt $it]
 				set client_key			[::pgwire::_hmac_sha256 $salted_password {Client Key}]
 				set stored_key			[::pgwire::_sha256 $client_key]
 				set client_final_message_without_proof	"c=[binary encode base64 $_sasl_cx(gs2header)],r=$nonce_full"
 				set auth_message		$_sasl_cx(client_first_message_bare),[encoding convertfrom utf-8 $bytes],$client_final_message_without_proof
-				set client_signature	[::pgwire::_hmac_sha256 $stored_key $auth_message]
+				set client_signature	[::pgwire::_hmac_sha256 $stored_key [encoding convertto utf-8 $auth_message]]
 				set client_proof		[::pgwire::_xor $client_key $client_signature]
 
 				set client_final_message	"c=[binary encode base64 $_sasl_cx(gs2header)],r=$nonce_full,p=[binary encode base64 $client_proof]"
@@ -1632,7 +1633,7 @@ oo::class create ::pgwire {
 				flush $socket
 
 				set server_key			[::pgwire::_hmac_sha256 $salted_password {Server Key}]
-				set server_signature	[::pgwire::_hmac_sha256 $server_key $auth_message]
+				set server_signature	[::pgwire::_hmac_sha256 $server_key [encoding convertto utf-8 $auth_message]]
 				set _sasl_cx(server_signature)	$server_signature
 				return -level 0
 			}
@@ -2790,7 +2791,8 @@ oo::class create ::pgwire {
 
 	#>>>
 	method gen_stmt_name compiled { #<<<
-		return "[incr name_seq] [binary encode hex [string range [::pgwire::_md5 $compiled] 0 3]]"
+		# md5 takes bytes: SQL text with characters above U+00FF throws on Tcl 9
+		return "[incr name_seq] [binary encode hex [string range [::pgwire::_md5 [encoding convertto utf-8 $compiled]] 0 3]]"
 	}
 
 	#>>>
