@@ -109,6 +109,22 @@ foreach impl {tcl c} {
 			pg onecolumn {select '{foo,bar,"baz quux","",NULL,"NULL", NuLL , "hello, \"world\"","a backslash: \\ rest" }'::varchar[]}
 		} -result [list foo bar {baz quux} {} {} NULL {} {hello, "world"} {a backslash: \ rest}]
 		#>>>
+		test array_${impl}_${transport}-10.1 "result column empty array: text\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select '{}'::text[]}
+		} -result {}
+		#>>>
+		test array_${impl}_${transport}-10.2 "result column empty array: integer\[\], [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select '{}'::integer[]}
+		} -result {}
+		#>>>
+		test array_${impl}_${transport}-10.3 "result column empty array among other rows, [subst $desc]" {*}$commonargs -body { #<<<
+			pg allrows -as lists {select a from (values (ARRAY['a','b']), ('{}'::text[]), (ARRAY['c'])) v(a)}
+		} -result {{{a b}} {{}} c}
+		#>>>
+		test array_${impl}_${transport}-10.4 "result column empty nested array (server normalizes to ndim 0), [subst $desc]" {*}$commonargs -body { #<<<
+			pg onecolumn {select ARRAY[ARRAY[]::int[], ARRAY[]::int[]]}
+		} -result {}
+		#>>>
 
 		if {[info exists saved_accelerators]} {
 			set ::pgwire::accelerators $saved_accelerators
@@ -124,6 +140,32 @@ foreach impl {tcl c} {
 }
 
 unset -nocomplain saved_accelerators saved_force_generic_array impl transport commonargs desc
+
+test array_fmt_cache-1.1 {Tcl implementation caches array unpackers by header} -setup { #<<<
+	if {[info exists ::pgwire::accelerators]} {set saved_accelerators $::pgwire::accelerators}
+	set ::pgwire::accelerators	0
+	set ::pgwire::arr_fmt_cache	{}
+	pgwire create pg [try $connect] pagila postgres insecure {application_name array_fmt_cache-1.1}
+} -body {
+	set res	{}
+	lappend res [pg onecolumn {select ARRAY[1,2,3]::integer[]}]
+	set unpacker	[lindex [dict values $::pgwire::arr_fmt_cache] 0]
+	lappend res [dict size $::pgwire::arr_fmt_cache]
+	lappend res [pg onecolumn {select ARRAY[4,5,6]::integer[]}]
+	lappend res [dict size $::pgwire::arr_fmt_cache]
+	lappend res [expr {[lindex [dict values $::pgwire::arr_fmt_cache] 0] eq $unpacker}]
+	lappend res [pg onecolumn {select ARRAY[[1,2],[3,4]]::integer[]}]
+	lappend res [dict size $::pgwire::arr_fmt_cache]
+} -cleanup {
+	if {[info object isa object pg]} {rename pg {}}
+	if {[info exists saved_accelerators]} {
+		set ::pgwire::accelerators $saved_accelerators
+	} else {
+		unset -nocomplain ::pgwire::accelerators
+	}
+	unset -nocomplain saved_accelerators res unpacker
+} -result {{1 2 3} 1 {4 5 6} 1 1 {{1 2} {3 4}} 2}
+#>>>
 
 ::tcltest::cleanupTests
 return

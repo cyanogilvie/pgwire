@@ -570,7 +570,11 @@ namespace eval ::pgwire { #<<<
 					{
 						Tcl_Obj*	val = NULL;
 
-						if (collen != -1) {
+						if (collen != -1 && bswap_32(((int32_t*)(*data))[0]) == 0) {
+							// Empty array: ndim is 0, no dims or elements follow
+							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
+							*data += collen;
+						} else if (collen != -1) {
 							const uint32_t		ndim     = bswap_32(((int32_t*)(*data))[0]);
 							//const uint32_t	hasnull  = bswap_32(((int32_t*)(*data))[1]);
 							//const uint32_t	elem_oid = bswap_32(((int32_t*)(*data))[2]);	// Unused
@@ -724,6 +728,10 @@ namespace eval ::pgwire { #<<<
 										if (level > 1) Tcl_DStringStartSublist(&res);
 										p++;
 										continue;
+
+									case '}':
+										// Only reachable directly after '{': empty array, no element to add
+										break;
 
 									case '\"':
 										{
@@ -3433,7 +3441,7 @@ oo::class create ::pgwire {
 							#binary scan $datarow @${o}III ndim hasnull elem_oid
 							binary scan $datarow @${o}I ndim
 							binary scan $datarow @${o}a[expr {12+8*$ndim}] arr_fmt_key
-							set oi		[expr {$o + 12}]
+							set oi		[expr {$o + 12 + 8*$ndim}]	;# First elem, past the dims and lbs
 							if {[dict exists $arr_fmt_cache $arr_fmt_key]} {
 								set unpack_array	[dict get $arr_fmt_cache $arr_fmt_key]
 							} else {
@@ -3441,13 +3449,16 @@ oo::class create ::pgwire {
 								binary scan $datarow @${o}x4I hasnull
 								set dims	{}
 								set lbs		{}
-								for {set i 0} {$i < $ndim} {incr i; incr oi 8} {
-									binary scan $datarow @${oi}II dim lb
+								for {set i 0; set di [expr {$o + 12}]} {$i < $ndim} {incr i; incr di 8} {
+									binary scan $datarow @${di}II dim lb
 									lappend dims	$dim
 									lappend lbs		$lb		;# TODO: something with this
 								}
 								set innerdim	[lindex $dims end]
-								if {%elem_bytelen% < 0 || $hasnull} { # Each element size is dynamic (or is possibly null), read length for each <<<
+								if {$ndim == 0} { # Empty array: no dims or elements follow <<<
+									set inner	{list}
+									#>>>
+								} elseif {%elem_bytelen% < 0 || $hasnull} { # Each element size is dynamic (or is possibly null), read length for each <<<
 									set inner	{list }
 									for {set i 0} {$i < $innerdim} {incr i} {
 										append inner {[
@@ -3486,7 +3497,9 @@ oo::class create ::pgwire {
 									set unpack_array "list [string repeat " \[$unpack_array\]" $dim]"
 								}
 								set unpack_array	[list {datarow oi tcl_encoding} $unpack_array\n]
-								dict set $arr_fmt_cache $arr_fmt_key $unpack_array
+								# Keyed on the dims, so distinct array shapes accumulate: bound it
+								if {[dict size $arr_fmt_cache] >= 256} {set arr_fmt_cache {}}
+								dict set arr_fmt_cache $arr_fmt_key $unpack_array
 							}
 							if 0 {
 							puts stderr "set unpack_array  [list $unpack_array]\nset oi [list $oi]; set datarow \[binary decode hex [binary encode hex $datarow]\]\nbytecode:\n\t[join [lmap {k v} [tcl::unsupported::getbytecode lambda $unpack_array] {
