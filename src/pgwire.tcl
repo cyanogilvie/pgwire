@@ -501,9 +501,9 @@ namespace eval ::pgwire { #<<<
 					replace_tclobj(&val, lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE]);
 				}
 				int1	{replace_tclobj(&val, Tcl_NewIntObj(*(char*)(*data)));}
-				int2	{replace_tclobj(&val, Tcl_NewIntObj(bswap_16(*(int16_t*)(*data))));}
-				int4	{replace_tclobj(&val, Tcl_NewIntObj(bswap_32(*(int32_t*)(*data))));}
-				int8	{replace_tclobj(&val, Tcl_NewIntObj(bswap_64(*(int64_t*)(*data))));}
+				int2	{replace_tclobj(&val, Tcl_NewIntObj((int16_t)bswap_16(*(uint16_t*)(*data))));}
+				int4	{replace_tclobj(&val, Tcl_NewIntObj((int32_t)bswap_32(*(uint32_t*)(*data))));}
+				int8	{replace_tclobj(&val, Tcl_NewWideIntObj((int64_t)bswap_64(*(uint64_t*)(*data))));}
 				bytea	{replace_tclobj(&val, Tcl_NewByteArrayObj(*data, collen));}
 				float4	{
 					{

@@ -1,0 +1,67 @@
+source [file join [file dirname [info script]] common.tcl]
+
+# Integer result columns: the full range of each width, for both the Tcl and C
+# implementations, in each row shape (the C decoders are generated per type)
+
+foreach impl {tcl c} {
+	unset -nocomplain saved_accelerators
+	if {[info exists ::pgwire::accelerators]} {set saved_accelerators $::pgwire::accelerators}
+	set ::pgwire::accelerators	[expr {$impl eq "c"}]
+
+	set commonargs	[list -setup {
+		pgwire create pg [try $connect] pagila postgres insecure "application_name $::testname"
+	} -cleanup {
+		if {[info object isa object pg]} {rename pg {}}
+	}]
+
+	set extremes	{
+		select
+			(-32768)::int2					as a,
+			32767::int2						as b,
+			(-2147483648)::int4				as c,
+			2147483647::int4				as d,
+			(-9223372036854775808)::int8	as e,
+			9223372036854775807::int8		as f,
+			2841622386::int8				as g,
+			(-5)::int8						as h
+	}
+	set expected	{-32768 32767 -2147483648 2147483647 -9223372036854775808 9223372036854775807 2841622386 -5}
+
+	test int_${impl}-1.1 "int8 above 2**31, onecolumn, $impl implementation" {*}$commonargs -body { #<<<
+		pg onecolumn {select 5000000000::int8}
+	} -result 5000000000
+	#>>>
+	test int_${impl}-1.2 "integer extremes, allrows -as lists, $impl implementation" {*}$commonargs -body { #<<<
+		lindex [pg allrows -as lists $extremes] 0
+	} -result $expected
+	#>>>
+	test int_${impl}-1.3 "integer extremes, allrows -as dicts, $impl implementation" {*}$commonargs -body { #<<<
+		dict values [lindex [pg allrows -as dicts $extremes] 0]
+	} -result $expected
+	#>>>
+	test int_${impl}-1.4 "integer extremes, foreach, $impl implementation" {*}$commonargs -body { #<<<
+		pg foreach row $extremes {set res [dict values $row]}
+		set res
+	} -cleanup {
+		if {[info object isa object pg]} {rename pg {}}
+		unset -nocomplain row res
+	} -result $expected
+	#>>>
+	test int_${impl}-2.1 "int8\[\] result column, $impl implementation" {*}$commonargs -body { #<<<
+		pg onecolumn {select ARRAY[5000000000, -9223372036854775808, 9223372036854775807, -5]::int8[]}
+	} -result {5000000000 -9223372036854775808 9223372036854775807 -5}
+	#>>>
+
+	if {[info exists saved_accelerators]} {
+		set ::pgwire::accelerators $saved_accelerators
+	} else {
+		unset -nocomplain ::pgwire::accelerators
+	}
+}
+
+unset -nocomplain saved_accelerators impl commonargs extremes expected
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4 noexpandtab
