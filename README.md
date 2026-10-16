@@ -77,6 +77,36 @@ pgwire create db $socket $db $user $password
 ...
 ~~~
 
+TCP Sockets: Set TCP_NODELAY and a Larger Buffer
+------------------------------------------------
+
+pgwire works with whatever channel it's given (TCP sockets, Unix domain
+sockets, TLS-wrapped or reflected channels), so it leaves the channel's
+transport options alone.  For a TCP socket, the code that creates it should
+turn off Nagle's algorithm and enlarge the channel buffer before handing it to
+pgwire:
+
+~~~tcl
+set socket		[socket $host 5432]
+chan configure $socket -buffersize 65536
+if {[catch {chan configure $socket -nodelay 1}]} {
+	# Tcl before 8.7b1 has no -nodelay socket option
+	package require sockopt
+	sockopt::setsockopt $socket IPPROTO_TCP TCP_NODELAY 1
+}
+pgwire create db $socket $db $user $password
+~~~
+
+Without these, any request larger than the channel buffer (4 KB by default),
+such as a query with a long text parameter, goes out in several writes.
+Nagle's algorithm holds the last, partly filled segment back until the server
+acknowledges the earlier ones, and the server delays its acknowledgement
+(typically by 40 ms on Linux) because it's waiting for the rest of the
+request.  Measured against Aurora PostgreSQL, a query with a 5 or 11 KB
+parameter took about 50 ms instead of about 1 ms.  The stall depends on how
+the request falls into segments, so it comes and goes with the request's
+size, and doesn't show up at all for small queries.
+
 Prepared Statements
 -------------------
 
