@@ -3944,6 +3944,7 @@ oo::class create ::pgwire {
 		set retries	1
 		while 1 {
 			try {
+				unset -nocomplain stmt_name	;# Set by a prepare that succeeds: none to close if it fails
 				set stmt_info	[my prepare_extended_query $sql]
 				dict with stmt_info {}
 				# Sets:
@@ -3976,6 +3977,10 @@ oo::class create ::pgwire {
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 				# 0A000 - happens if a schema change alters the result row format
 				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				if {![info exists stmt_name]} {
+					# It failed to prepare: the query's own error, not a stale prepared statement's
+					return -options $options $errmsg
+				}
 				my close_statement $stmt_name
 				dict unset prepared $sql
 				if {[incr retries -1] >= 0} {
@@ -4051,6 +4056,7 @@ oo::class create ::pgwire {
 			set retries	1
 			while 1 {
 				try {
+					unset -nocomplain stmt_name	;# Set by a prepare that succeeds: none to close if it fails
 					set stmt_info	[my prepare_extended_query $sql]
 					dict with stmt_info {}
 					# Sets:
@@ -4086,6 +4092,10 @@ oo::class create ::pgwire {
 				  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 					# 0A000 - happens if a schema change alters the result row format
 					# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+					if {![info exists stmt_name]} {
+						# It failed to prepare: the query's own error, not a stale prepared statement's
+						return -options $options $errmsg
+					}
 					my close_statement $stmt_name
 					dict unset prepared $sql
 					if {[incr retries -1] >= 0} {
@@ -4139,6 +4149,7 @@ oo::class create ::pgwire {
 		while 1 {
 			try {
 				set retry_armed	1
+				unset -nocomplain stmt_name	;# Set by a prepare that succeeds: none to close if it fails
 				set stmt_info	[my prepare_extended_query $sql]
 				dict with stmt_info {}
 				# Sets:
@@ -4210,6 +4221,10 @@ oo::class create ::pgwire {
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
 				# 0A000 - happens if a schema change alters the result row format
 				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
+				if {![info exists stmt_name]} {
+					# It failed to prepare: the query's own error, not a stale prepared statement's
+					return -options $options $errmsg
+				}
 				my close_statement $stmt_name
 				dict unset prepared $sql
 				if {$retry_armed && [incr retries -1] >= 0} {

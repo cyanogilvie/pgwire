@@ -1,0 +1,38 @@
+source [file join [file dirname [info script]] common.tcl]
+
+# A query that fails to prepare with an error the stale prepared statement retry traps (42883,
+# undefined function) gets that error, not one from closing a statement that was never prepared
+
+set commonargs	[list -setup {
+	pgwire create pg [try $connect] pagila postgres insecure "application_name $::testname"
+} -cleanup {
+	if {[info object isa object pg]} {rename pg {}}
+	unset -nocomplain e o x
+}]
+
+test prepare_error-1.1 {onecolumn: an undefined function's error, and the connection still works} {*}$commonargs -body {
+	list [catch {pg onecolumn {select no_such_function(1)}} e o] [lrange [dict get $o -errorcode] 0 3] $e [pg onecolumn {select 1}]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} {Postgres error: function no_such_function(integer) does not exist} 1}
+
+test prepare_error-1.2 {onecolumn with a bind parameter} {*}$commonargs -body {
+	set x	1
+	list [catch {pg onecolumn {select no_such_function(:x::int)}} e o] [lrange [dict get $o -errorcode] 0 3] [pg onecolumn {select 1}]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} 1}
+
+test prepare_error-1.3 {vars without a script} {*}$commonargs -body {
+	list [catch {pg vars {select no_such_function(1) as x}} e o] [lrange [dict get $o -errorcode] 0 3] [info exists x] [pg onecolumn {select 1}]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} 0 1}
+
+test prepare_error-1.4 {onecolumn in a transaction} {*}$commonargs -body {
+	list [catch {pg transaction {pg onecolumn {select no_such_function(1)}}} e o] [lrange [dict get $o -errorcode] 0 3] [pg onecolumn {select 1}]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} 1}
+
+test prepare_error-1.5 {The same query again: still its own error, nothing cached from the failed prepare} {*}$commonargs -body {
+	catch {pg onecolumn {select no_such_function(1)}}
+	list [catch {pg onecolumn {select no_such_function(1)}} e o] [lrange [dict get $o -errorcode] 0 3]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883}}
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4
