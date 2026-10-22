@@ -1,0 +1,61 @@
+source [file join [file dirname [info script]] common.tcl]
+package require Thread
+
+# A startup that fails in a message handler reports that failure: not "invalid command name my"
+# (a fatal error destroys the object before on_response's cleanup), and not "Server closed
+# connection" when the connection drops after it.  The server is a fake one, in a thread of its
+# own, that answers the startup message with whatever the test gives it
+
+set fake_server	[thread::create {
+	proc accept {chan addr port} {
+		chan configure $chan -translation binary -blocking 1
+		binary scan [read $chan 4] I len
+		read $chan [expr {$len - 4}]
+		puts -nonewline $chan $::reply
+		flush $chan
+		if {$::then_close} {
+			close $chan
+		} else {
+			after 2000 [list catch [list close $chan]]
+		}
+	}
+	set listen	[socket -server accept -myaddr 127.0.0.1 0]
+	set port	[lindex [chan configure $listen -sockname] 2]
+	thread::wait
+}]
+set fake_port	[thread::send $fake_server {set port}]
+
+proc fake_reply {reply then_close} {
+	thread::send $::fake_server [list set ::reply $reply]
+	thread::send $::fake_server [list set ::then_close $then_close]
+}
+proc auth_message {code {data ""}} {
+	string cat R [binary format II [expr {8 + [string length $data]}] $code] $data
+}
+
+test startup_error-1.1 {A fatal error in an auth handler (no shared SASL mechanism) is the error reported} -setup {
+	fake_reply [auth_message 10 SCRAM-SHA-256-PLUS\0\0] 0
+} -body {
+	list [catch {pgwire new [socket 127.0.0.1 $fake_port] db user password} e o] [lrange [dict get $o -errorcode] 0 1] $e
+} -cleanup {
+	unset -nocomplain e o
+} -result {1 {PGWIRE FATAL} {Action AuthenticationSASL handler error: No shared SASL mechanisms supported from list: SCRAM-SHA-256-PLUS}}
+
+test startup_error-1.2 {The server closing after asking for a password: a connection error, not a missing command} -setup {
+	fake_reply [auth_message 3] 1
+} -body {
+	catch {pgwire new [socket 127.0.0.1 $fake_port] db user password} e o
+	list [expr {[lrange [dict get $o -errorcode] 0 2] ne {TCL LOOKUP COMMAND}}] [expr {$e ne {invalid command name "my"}}]
+} -cleanup {
+	unset -nocomplain e o
+} -result {1 1}
+
+thread::release $fake_server
+unset fake_server fake_port
+rename fake_reply {}
+rename auth_message {}
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

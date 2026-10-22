@@ -2162,6 +2162,7 @@ oo::class create ::pgwire {
 	method on_response actions { #<<<
 		set compiled_actions	[my _compile_actions $actions]
 		set saw_Z				0
+		set obj					[self]
 		try {
 			while 1 {
 				set messages	[my read_one_message]
@@ -2208,9 +2209,12 @@ oo::class create ::pgwire {
 			#return -level 2 -code error -errorcode [list PGWIRE ErrorResponse $severity $code $fields] "Postgres error: [dict get $fields Message]"
 		} on error {errmsg options} {
 			::pgwire::log error "Uncaught error in on_response (or handlers) [dict get $options -errorcode]: $errmsg\n[dict get $options -errorinfo]"
+			set pending_error	[list $errmsg $options]
 			return -options $options $errmsg
 		} finally {
-			if {$sync_outstanding} {
+			# A fatal error (_error, an unexpected message) destroys this object before it throws:
+			# with no connection left to sync, let that error through
+			if {[info object isa object $obj] && $sync_outstanding} {
 				if {!$saw_Z && [dict exists $compiled_actions ReadyForQuery]} {
 					::pgwire::log warning "on_response terminating without seeing ReadyForQuery, skipping to sync"
 				}
@@ -2218,7 +2222,8 @@ oo::class create ::pgwire {
 					my skip_to_sync
 				} trap {PG CONNECTION LOST} {errmsg options} {
 					if {[info exists pending_error]} {
-						# Don't wipe out a backend error that closes the connection
+						# Don't wipe out the error (from the backend, or a handler's, like a failed
+						# write) that the connection closing follows
 						lassign $pending_error pending_errmsg pending_options
 						return -options $pending_options $pending_errmsg
 					} else {
