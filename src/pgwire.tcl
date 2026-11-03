@@ -464,6 +464,378 @@ namespace eval ::pgwire { #<<<
 		set opargs	{Tcl_Interp* interp, const int colnum, const int collen, unsigned char** data, struct column_cx* c, Tcl_Obj* rowv[], Tcl_Obj* delim}
 		append res "typedef int (col_op)($opargs);\n"
 
+		set types {
+			bool	{
+				// TODO: check that this is in fact 1 byte
+				replace_tclobj(&val, lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE]);
+			}
+			int1	{replace_tclobj(&val, Tcl_NewIntObj(*(char*)(*data)));}
+			int2	{replace_tclobj(&val, Tcl_NewIntObj((int16_t)bswap_16(*(uint16_t*)(*data))));}
+			int4	{replace_tclobj(&val, Tcl_NewIntObj((int32_t)bswap_32(*(uint32_t*)(*data))));}
+			int8	{replace_tclobj(&val, Tcl_NewWideIntObj((int64_t)bswap_64(*(uint64_t*)(*data))));}
+			bytea	{replace_tclobj(&val, Tcl_NewByteArrayObj(*data, collen));}
+			float4	{
+				{
+					char buf[4];
+
+					*(uint32_t*)buf = bswap_32(*(uint32_t*)(*data));
+					replace_tclobj(&val, Tcl_NewDoubleObj(*(float*)buf));
+				}
+			}
+			float8 {
+				{
+					char buf[8];
+
+					*(uint64_t*)buf = bswap_64(*(uint64_t*)(*data));
+					replace_tclobj(&val, Tcl_NewDoubleObj(*(double*)buf));
+				}
+			}
+			text {
+				{
+					Tcl_DString		utf8;
+
+					if (collen == 0) {
+						replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
+					} else {
+						Tcl_DStringInit(&utf8);
+						Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
+						replace_tclobj(&val, Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
+						Tcl_DStringFree(&utf8);
+					}
+				}
+			}
+		}
+
+		# Shared array decoders: one copy of each, parameterised by the per-type
+		# element decoders below, rather than a copy per (type, format) op
+		append res "typedef void (elem_fn)(Tcl_Obj** valp, const unsigned char** data, const int32_t collen, struct column_cx* c);\n"
+		foreach {type makeval} $types {
+			append res [string map [list %type% $type %makeval% $makeval] { //@begin=c@
+				#line 1 "<elem_%type%>"
+				static void elem_%type%(Tcl_Obj** valp, const unsigned char** data, const int32_t collen, struct column_cx* c) //<<<
+				{
+					Tcl_Obj*	val = NULL;
+
+					%makeval%
+					*valp = val;	// Transfer val's reference
+				}
+
+				//>>>
+			//@end=c@}]
+		}
+		append res { //@begin=c@
+		#line 1 "<decode_array>"
+		static void decode_array(unsigned char** data, const int collen, struct column_cx* c, elem_fn* elem, Tcl_Obj** valp) //<<<
+		{
+			Tcl_Obj*	val = NULL;
+
+			if (bswap_32(((int32_t*)(*data))[0]) == 0) {
+				// Empty array: ndim is 0, no dims or elements follow
+				replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
+				*data += collen;
+			} else {
+				const uint32_t		ndim     = bswap_32(((int32_t*)(*data))[0]);
+				//const uint32_t	hasnull  = bswap_32(((int32_t*)(*data))[1]);
+				//const uint32_t	elem_oid = bswap_32(((int32_t*)(*data))[2]);	// Unused
+				uint32_t			i, j;
+				uint32_t			dims[ndim];
+				//uint32_t			lbs[ndim];
+				uint32_t			di[ndim];	// iterators for each dim;
+				const unsigned char*	oi = (*data)+12 + ndim*8;
+
+				for (i=3, j=0; j<ndim; i+=2, j++) {
+					dims[j] = bswap_32(((int32_t*)(*data))[i]);
+					//lbs[j]  = bswap_32(((int32_t*)(*data))[i+1]);
+					di[j]	= dims[j];
+				}
+
+				/*
+				fprintf(stderr, "ndim: %d", ndim);
+				for (i=0; i<ndim; i++) fprintf(stderr, ", dims[%d]: %d", i, dims[i]);
+				fprintf(stderr, ", bytes:");
+				{
+					const unsigned char*	end = *data + collen;
+					const unsigned char*	p = oi;
+
+					while (p < end) fprintf(stderr, " %02x", *p++);
+				}
+				fprintf(stderr, "\n");
+				*/
+
+				{
+					const uint32_t			inner_dim = dims[ndim-1];
+					const unsigned char**	data = &oi;		// Intentionally shadows data in the outer scope
+					Tcl_Obj*				dimlists[ndim];
+
+					memset(dimlists, 0, sizeof(Tcl_Obj*)*ndim);
+
+					for (i=0; i<ndim-1; i++) {
+						replace_tclobj(&dimlists[i], Tcl_NewListObj(0, NULL));
+					}
+					while (di[0] > 0) {
+						Tcl_Obj*	inner[inner_dim];
+						int32_t		i;
+
+						//memset(inner, 0, sizeof(Tcl_Obj*)*inner_dim);
+
+						// Read inner elems
+						for (i=0; i<inner_dim; i++) {
+							const int32_t	collen	= bswap_32(*(int32_t*)(*data));	// Intentionally shadows collen in the outer scope
+							Tcl_Obj*		val = NULL;	// Intentionally shadows val in the outer scope
+
+							if (collen == -1) {
+								replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
+								*data += 4;
+							} else {
+								*data += 4;
+								elem(&val, data, collen, c);
+								*data += collen;
+							}
+							inner[i] = val;	val = NULL;		// Transfer val's reference
+						}
+						replace_tclobj(&dimlists[ndim-1], Tcl_NewListObj(inner_dim, inner));
+						for (i=0; i<inner_dim; i++)
+							replace_tclobj(inner+i, NULL);
+
+						if (ndim > 1) {
+							for (i=ndim-2; i>=0; i--) {
+								//fprintf(stderr, "adding dim %d to %d\n", i+1, i);
+								//fprintf(stderr, "dimlists[%d]: %p, dimlists[%d]: %p\n", i, dimlists[i], i+1, dimlists[i+1]);
+								if (TCL_OK != Tcl_ListObjAppendElement(NULL, dimlists[i], dimlists[i+1]))
+									Tcl_Panic("Unable to accumulate results to next-higher dimension %d", i);
+								replace_tclobj(dimlists+i+1, Tcl_NewListObj(0, NULL));
+								di[i+1] = dims[i+1];			// Reset waiting counter
+								//fprintf(stderr, "di[%d]: %d\n", i, di[i]-1);
+								if (--di[i] > 0) break;			// Still waiting for more elements in dim[i]
+							}
+						} else {
+							break;
+						}
+					}
+
+					replace_tclobj(&val, dimlists[0]);
+					for (i=0; i<ndim; i++)
+						replace_tclobj(dimlists+i, NULL);
+				}
+
+				*data += collen;
+			}
+
+			*valp = val;	// Transfer val's reference
+		}
+
+		//>>>
+		//@end=c@}
+		append res { //@begin=c@
+		#line 1 "<parse_pgarray_text>"
+		static void parse_pgarray_text(unsigned char** data, const int collen, struct column_cx* c, Tcl_Obj* delim, Tcl_Obj** valp) //<<<
+		{
+			Tcl_Obj*	val = NULL;
+
+			{
+				if (collen == 0) {
+					replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
+				} else {
+					Tcl_DString		utf8;
+					Tcl_DString		res;
+
+					Tcl_DStringInit(&res);
+					Tcl_DStringInit(&utf8);
+					Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
+
+					const char*const	str = Tcl_DStringValue(&utf8);
+					const Tcl_Size		str_len = Tcl_DStringLength(&utf8);
+					const char*const	end = str + str_len;
+					const char*			p = str;
+					int					level = 0;
+					Tcl_UniChar			delimchar;
+
+					if (0 == Tcl_UtfToUniChar(Tcl_GetString(delim), &delimchar)) {
+						fprintf(stderr, "delim is not a valid unicode character\n");
+						goto failed;
+					}
+
+#define CONSUME_WHITESPACE while ((*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') && p < end) p++	// TODO: Find out what exactly constitutes whitespace in pgarray syntax
+
+					if (str_len == 0) goto failed;
+					CONSUME_WHITESPACE;
+					if (*p != '{') goto failed;
+
+					while (p < end) {
+						// Consume leading whitespace
+						CONSUME_WHITESPACE;
+
+						// Start of element position
+						switch (*p) {
+							case '{':
+								level++;
+								if (level > 1) Tcl_DStringStartSublist(&res);
+								p++;
+								continue;
+
+							case '}':
+								// Only reachable directly after '{': empty array, no element to add
+								break;
+
+							case '\"':
+								{
+									Tcl_DString		elem;
+									const char*		from = ++p;
+
+									Tcl_DStringInit(&elem);
+									while (p < end) {
+										switch (*p) {
+											case '\\':
+												if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+												if (
+													p < end-6 &&
+													p[1] == '\\' &&
+													p[2] == 'x'
+												) {
+													p += 3;
+													while (
+														p < end-2 &&
+														((p[0] >= '0' && p[0] <= '9') || (p[0] >= 'A' && p[0] <= 'F')  || (p[0] >= 'a' && p[0] <= 'f')) &&
+														((p[1] >= '0' && p[1] <= '9') || (p[1] >= 'A' && p[1] <= 'F')  || (p[1] >= 'a' && p[1] <= 'f'))
+													) {
+														const uint8_t		h = p[0];
+														const uint8_t		l = p[1];
+														const Tcl_UniChar	byte = ((h<='9' ? h-'0' : h<='F' ? 10+h-'A' : 10+h-'a') << 4) | (l<='9' ? l-'0' : l<='F' ? 10+l-'A' : 10+l-'a');
+														Tcl_UniCharToUtfDString(&byte, 1, &elem); 
+														p += 2;
+													}
+													from = p;
+												} else {
+													const char*	next = Tcl_UtfNext(++p);
+													const int	bytes = next - p;
+													Tcl_DStringAppend(&elem, p, bytes);
+													from = p = next;
+												}
+												continue;
+
+											case '\"':
+												if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+												p++;
+												break;
+
+											default:
+												p = Tcl_UtfNext(p);
+												continue;
+										}
+										break;
+									}
+									Tcl_DStringAppendElement(&res, Tcl_DStringValue(&elem));
+									Tcl_DStringFree(&elem);
+								}
+								break;
+
+							default:
+								{
+									Tcl_DString		elem;
+									const char*		from = p;
+									int				has_escapes = 0;
+
+									Tcl_DStringInit(&elem);
+
+									while (p < end) {
+										Tcl_UniChar		c;
+										int				charlen;
+
+										if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
+										if (c == delimchar) {
+											if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+											break;
+										}
+										switch (c) {
+											case '}':
+											case ' ':
+											case '\t':
+											case '\n':
+											case '\r':
+												if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+												break;
+
+											case '\\':
+												if (p > from) Tcl_DStringAppend(&elem, from, p-from);
+												p++;
+												if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
+												Tcl_DStringAppend(&elem, p, charlen);
+												p += charlen;
+												from = p;
+												has_escapes = 1;
+												continue;
+
+											default:
+												p += charlen;
+												continue;
+										}
+										break;
+									}
+
+									{
+										const char*	elemstr = Tcl_DStringValue(&elem);
+
+										if (
+											!has_escapes &&
+											Tcl_DStringLength(&elem) == 4 &&
+											strcasecmp("NULL", elemstr) == 0
+										) {
+											Tcl_DStringAppendElement(&res, "");
+										} else {
+											Tcl_DStringAppendElement(&res, elemstr);
+										}
+										Tcl_DStringFree(&elem);
+									}
+								}
+						}
+
+						// End of elem position
+						while (p < end) {
+							Tcl_UniChar	c;
+							int			charlen;
+
+							// Consume trailing whitespace
+							CONSUME_WHITESPACE;
+							if (p >= end) goto failed;
+
+							if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
+							if (c == delimchar) {
+								p += charlen;
+								break;
+							} else if (c == '}') {
+								p++;
+								if (level > 1) Tcl_DStringEndSublist(&res);
+								level--;
+							} else {
+								fprintf(stderr, "Junk after elem: %c\n", c);
+								goto failed;
+							}
+						}
+					}
+#undef CONSUME_WHITESPACE
+
+					if (level != 0) goto failed;
+
+					//fprintf(stderr, "Saving result: (%*s)\n", Tcl_DStringLength(&res), Tcl_DStringValue(&res));
+					replace_tclobj(&val, Tcl_NewStringObj(Tcl_DStringValue(&res), Tcl_DStringLength(&res)));
+					goto done;
+failed:
+					// Couldn't parse array format, treat it as a NULL (no way to signal errors from this context)
+					fprintf(stderr, "Failed to parse postgres array format: (%*s)\n", str_len, str);
+					replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
+done:
+					Tcl_DStringFree(&utf8);
+					Tcl_DStringFree(&res);
+					*data += collen;
+				}
+			}
+
+			*valp = val;	// Transfer val's reference
+		}
+
+		//>>>
+		//@end=c@}
+
 		set opnames	{}
 		foreach {format add_column_key handle_null} {
 			lists {
@@ -495,47 +867,7 @@ namespace eval ::pgwire { #<<<
 				return TCL_OK;
 			}
 		} { 
-			foreach {type makeval} {
-				bool	{
-					// TODO: check that this is in fact 1 byte
-					replace_tclobj(&val, lit[(*(unsigned char*)(*data) == 0) ? PGWIRE_LIT_FALSE : PGWIRE_LIT_TRUE]);
-				}
-				int1	{replace_tclobj(&val, Tcl_NewIntObj(*(char*)(*data)));}
-				int2	{replace_tclobj(&val, Tcl_NewIntObj((int16_t)bswap_16(*(uint16_t*)(*data))));}
-				int4	{replace_tclobj(&val, Tcl_NewIntObj((int32_t)bswap_32(*(uint32_t*)(*data))));}
-				int8	{replace_tclobj(&val, Tcl_NewWideIntObj((int64_t)bswap_64(*(uint64_t*)(*data))));}
-				bytea	{replace_tclobj(&val, Tcl_NewByteArrayObj(*data, collen));}
-				float4	{
-					{
-						char buf[4];
-
-						*(uint32_t*)buf = bswap_32(*(uint32_t*)(*data));
-						replace_tclobj(&val, Tcl_NewDoubleObj(*(float*)buf));
-					}
-				}
-				float8 {
-					{
-						char buf[8];
-
-						*(uint64_t*)buf = bswap_64(*(uint64_t*)(*data));
-						replace_tclobj(&val, Tcl_NewDoubleObj(*(double*)buf));
-					}
-				}
-				text {
-					{
-						Tcl_DString		utf8;
-
-						if (collen == 0) {
-							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
-						} else {
-							Tcl_DStringInit(&utf8);
-							Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
-							replace_tclobj(&val, Tcl_NewStringObj(Tcl_DStringValue(&utf8), Tcl_DStringLength(&utf8)));
-							Tcl_DStringFree(&utf8);
-						}
-					}
-				}
-			} {
+			foreach {type makeval} $types {
 				set opname	op_${type}_${format}
 				lappend opnames	$opname ${opname}_array
 				append res [string map [list \
@@ -543,6 +875,7 @@ namespace eval ::pgwire { #<<<
 					%handle_null%		$handle_null \
 					%add_column_key%	$add_column_key \
 					%makeval%			$makeval \
+					%type%				$type \
 					%opname%			$opname \
 					%opargs%			$opargs \
 				] { //@begin=c@
@@ -566,100 +899,13 @@ namespace eval ::pgwire { #<<<
 
 					//>>>
 					//@end=c@@begin=c@
+					#line 1 "<%opname%_array>"
 					static int %opname%_array(%opargs%) //<<<
 					{
 						Tcl_Obj*	val = NULL;
 
-						if (collen != -1 && bswap_32(((int32_t*)(*data))[0]) == 0) {
-							// Empty array: ndim is 0, no dims or elements follow
-							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
-							*data += collen;
-						} else if (collen != -1) {
-							const uint32_t		ndim     = bswap_32(((int32_t*)(*data))[0]);
-							//const uint32_t	hasnull  = bswap_32(((int32_t*)(*data))[1]);
-							//const uint32_t	elem_oid = bswap_32(((int32_t*)(*data))[2]);	// Unused
-							uint32_t			i, j;
-							uint32_t			dims[ndim];
-							//uint32_t			lbs[ndim];
-							uint32_t			di[ndim];	// iterators for each dim;
-							const unsigned char*	oi = (*data)+12 + ndim*8;
-
-							for (i=3, j=0; j<ndim; i+=2, j++) {
-								dims[j] = bswap_32(((int32_t*)(*data))[i]);
-								//lbs[j]  = bswap_32(((int32_t*)(*data))[i+1]);
-								di[j]	= dims[j];
-							}
-
-							/*
-							fprintf(stderr, "ndim: %d", ndim);
-							for (i=0; i<ndim; i++) fprintf(stderr, ", dims[%d]: %d", i, dims[i]);
-							fprintf(stderr, ", bytes:");
-							{
-								const unsigned char*	end = *data + collen;
-								const unsigned char*	p = oi;
-
-								while (p < end) fprintf(stderr, " %02x", *p++);
-							}
-							fprintf(stderr, "\n");
-							*/
-
-							{
-								const uint32_t			inner_dim = dims[ndim-1];
-								const unsigned char**	data = &oi;		// Intentionally shadows data in the outer scope
-								Tcl_Obj*				dimlists[ndim];
-
-								memset(dimlists, 0, sizeof(Tcl_Obj*)*ndim);
-
-								for (i=0; i<ndim-1; i++) {
-									replace_tclobj(&dimlists[i], Tcl_NewListObj(0, NULL));
-								}
-								while (di[0] > 0) {
-									Tcl_Obj*	inner[inner_dim];
-									int32_t		i;
-
-									//memset(inner, 0, sizeof(Tcl_Obj*)*inner_dim);
-
-									// Read inner elems
-									for (i=0; i<inner_dim; i++) {
-										const int32_t	collen	= bswap_32(*(int32_t*)(*data));	// Intentionally shadows collen in the outer scope
-										Tcl_Obj*		val = NULL;	// Intentionally shadows val in the outer scope
-
-										if (collen == -1) {
-											replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
-											*data += 4;
-										} else {
-											*data += 4;
-											%makeval%
-											*data += collen;
-										}
-										inner[i] = val;	val = NULL;		// Transfer val's reference
-									}
-									replace_tclobj(&dimlists[ndim-1], Tcl_NewListObj(inner_dim, inner));
-									for (i=0; i<inner_dim; i++)
-										replace_tclobj(inner+i, NULL);
-
-									if (ndim > 1) {
-										for (i=ndim-2; i>=0; i--) {
-											//fprintf(stderr, "adding dim %d to %d\n", i+1, i);
-											//fprintf(stderr, "dimlists[%d]: %p, dimlists[%d]: %p\n", i, dimlists[i], i+1, dimlists[i+1]);
-											if (TCL_OK != Tcl_ListObjAppendElement(NULL, dimlists[i], dimlists[i+1]))
-												Tcl_Panic("Unable to accumulate results to next-higher dimension %d", i);
-											replace_tclobj(dimlists+i+1, Tcl_NewListObj(0, NULL));
-											di[i+1] = dims[i+1];			// Reset waiting counter
-											//fprintf(stderr, "di[%d]: %d\n", i, di[i]-1);
-											if (--di[i] > 0) break;			// Still waiting for more elements in dim[i]
-										}
-									} else {
-										break;
-									}
-								}
-
-								replace_tclobj(&val, dimlists[0]);
-								for (i=0; i<ndim; i++)
-									replace_tclobj(dimlists+i, NULL);
-							}
-
-							*data += collen;
+						if (collen != -1) {
+							decode_array(data, collen, c, elem_%type%, &val);
 						} else {
 							%handle_null%
 						}
@@ -689,201 +935,7 @@ namespace eval ::pgwire { #<<<
 					Tcl_Obj*	val = NULL;
 
 					if (collen != -1) {
-						if (collen == 0) {
-							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
-						} else {
-							Tcl_DString		utf8;
-							Tcl_DString		res;
-
-							Tcl_DStringInit(&res);
-							Tcl_DStringInit(&utf8);
-							Tcl_ExternalToUtfDString(c->encoding, (const char*)*data, collen, &utf8);
-
-							const char*const	str = Tcl_DStringValue(&utf8);
-							const Tcl_Size		str_len = Tcl_DStringLength(&utf8);
-							const char*const	end = str + str_len;
-							const char*			p = str;
-							int					level = 0;
-							Tcl_UniChar			delimchar;
-
-							if (0 == Tcl_UtfToUniChar(Tcl_GetString(delim), &delimchar)) {
-								fprintf(stderr, "delim is not a valid unicode character\n");
-								goto failed;
-							}
-
-#define CONSUME_WHITESPACE while ((*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') && p < end) p++	// TODO: Find out what exactly constitutes whitespace in pgarray syntax
-
-							if (str_len == 0) goto failed;
-							CONSUME_WHITESPACE;
-							if (*p != '{') goto failed;
-
-							while (p < end) {
-								// Consume leading whitespace
-								CONSUME_WHITESPACE;
-
-								// Start of element position
-								switch (*p) {
-									case '{':
-										level++;
-										if (level > 1) Tcl_DStringStartSublist(&res);
-										p++;
-										continue;
-
-									case '}':
-										// Only reachable directly after '{': empty array, no element to add
-										break;
-
-									case '\"':
-										{
-											Tcl_DString		elem;
-											const char*		from = ++p;
-
-											Tcl_DStringInit(&elem);
-											while (p < end) {
-												switch (*p) {
-													case '\\':
-														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
-														if (
-															p < end-6 &&
-															p[1] == '\\' &&
-															p[2] == 'x'
-														) {
-															p += 3;
-															while (
-																p < end-2 &&
-																((p[0] >= '0' && p[0] <= '9') || (p[0] >= 'A' && p[0] <= 'F')  || (p[0] >= 'a' && p[0] <= 'f')) &&
-																((p[1] >= '0' && p[1] <= '9') || (p[1] >= 'A' && p[1] <= 'F')  || (p[1] >= 'a' && p[1] <= 'f'))
-															) {
-																const uint8_t		h = p[0];
-																const uint8_t		l = p[1];
-																const Tcl_UniChar	byte = ((h<='9' ? h-'0' : h<='F' ? 10+h-'A' : 10+h-'a') << 4) | (l<='9' ? l-'0' : l<='F' ? 10+l-'A' : 10+l-'a');
-																Tcl_UniCharToUtfDString(&byte, 1, &elem); 
-																p += 2;
-															}
-															from = p;
-														} else {
-															const char*	next = Tcl_UtfNext(++p);
-															const int	bytes = next - p;
-															Tcl_DStringAppend(&elem, p, bytes);
-															from = p = next;
-														}
-														continue;
-
-													case '\"':
-														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
-														p++;
-														break;
-
-													default:
-														p = Tcl_UtfNext(p);
-														continue;
-												}
-												break;
-											}
-											Tcl_DStringAppendElement(&res, Tcl_DStringValue(&elem));
-											Tcl_DStringFree(&elem);
-										}
-										break;
-
-									default:
-										{
-											Tcl_DString		elem;
-											const char*		from = p;
-											int				has_escapes = 0;
-
-											Tcl_DStringInit(&elem);
-
-											while (p < end) {
-												Tcl_UniChar		c;
-												int				charlen;
-
-												if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
-												if (c == delimchar) {
-													if (p > from) Tcl_DStringAppend(&elem, from, p-from);
-													break;
-												}
-												switch (c) {
-													case '}':
-													case ' ':
-													case '\t':
-													case '\n':
-													case '\r':
-														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
-														break;
-
-													case '\\':
-														if (p > from) Tcl_DStringAppend(&elem, from, p-from);
-														p++;
-														if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
-														Tcl_DStringAppend(&elem, p, charlen);
-														p += charlen;
-														from = p;
-														has_escapes = 1;
-														continue;
-
-													default:
-														p += charlen;
-														continue;
-												}
-												break;
-											}
-
-											{
-												const char*	elemstr = Tcl_DStringValue(&elem);
-
-												if (
-													!has_escapes &&
-													Tcl_DStringLength(&elem) == 4 &&
-													strcasecmp("NULL", elemstr) == 0
-												) {
-													Tcl_DStringAppendElement(&res, "");
-												} else {
-													Tcl_DStringAppendElement(&res, elemstr);
-												}
-												Tcl_DStringFree(&elem);
-											}
-										}
-								}
-
-								// End of elem position
-								while (p < end) {
-									Tcl_UniChar	c;
-									int			charlen;
-
-									// Consume trailing whitespace
-									CONSUME_WHITESPACE;
-									if (p >= end) goto failed;
-
-									if (0 == (charlen = Tcl_UtfToUniChar(p, &c))) goto failed;
-									if (c == delimchar) {
-										p += charlen;
-										break;
-									} else if (c == '}') {
-										p++;
-										if (level > 1) Tcl_DStringEndSublist(&res);
-										level--;
-									} else {
-										fprintf(stderr, "Junk after elem: %c\n", c);
-										goto failed;
-									}
-								}
-							}
-#undef CONSUME_WHITESPACE
-
-							if (level != 0) goto failed;
-
-							//fprintf(stderr, "Saving result: (%*s)\n", Tcl_DStringLength(&res), Tcl_DStringValue(&res));
-							replace_tclobj(&val, Tcl_NewStringObj(Tcl_DStringValue(&res), Tcl_DStringLength(&res)));
-							goto done;
-failed:
-							// Couldn't parse array format, treat it as a NULL (no way to signal errors from this context)
-							fprintf(stderr, "Failed to parse postgres array format: (%*s)\n", str_len, str);
-							replace_tclobj(&val, lit[PGWIRE_LIT_BLANK]);
-done:
-							Tcl_DStringFree(&utf8);
-							Tcl_DStringFree(&res);
-							*data += collen;
-						}
+						parse_pgarray_text(data, collen, c, delim, &val);
 					} else {
 						%handle_null%
 					}
