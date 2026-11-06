@@ -2010,6 +2010,9 @@ oo::class create ::pgwire {
 						AuthenticationOk { # AuthenticationOk <<<
 							#>>>
 						}
+						AuthenticationCleartextPassword { # AuthenticationCleartextPassword: no parameters (RDS IAM auth asks for its token this way) <<<
+							#>>>
+						}
 						AuthenticationKerberosV5 { # AuthenticationKerberosV5 <<<
 							#>>>
 						}
