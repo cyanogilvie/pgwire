@@ -1,0 +1,111 @@
+source [file join [file dirname [info script]] common.tcl]
+
+# A schema change can make a statement prepared by an earlier call unable to run as planned: a
+# column added or dropped under select * (0A000, "cached plan must not change result type"), or a
+# column's type changed under a parameter typed for the old one (42883, "operator does not
+# exist").  pgwire prepares it again and retries it once, so schema changes can be made under a
+# running application.  But not other errors with those codes (a statement prepared in the same
+# call, or raised from a function it calls), which would run the statement twice, and not inside a
+# transaction, which the error has aborted: there the error is the statement's own.
+#
+# Temporary objects only: each test's connection is its own, and they go with it.  nextval isn't
+# rolled back, even with its transaction, so the sequence c counts how often a statement ran
+
+set commonargs	[list -setup {
+	pgwire create pg [try $connect] pagila postgres insecure "application_name $::testname"
+	pg onecolumn {create temp table t (a int, b int)}
+	pg onecolumn {insert into t values (1, 2)}
+	pg onecolumn {create temp sequence c}
+	pg onecolumn {
+		create function pg_temp.counted(code text) returns int language plpgsql as $$
+		begin
+			perform nextval('pg_temp.c');
+			if code <> '' then
+				raise exception 'raised %', code using errcode = code;
+			end if;
+			return 1;
+		end
+		$$
+	}
+} -cleanup {
+	if {[info object isa object pg]} {rename pg {}}
+	unset -nocomplain e o x rows row
+}]
+
+proc ran {} {pg onecolumn {select case when is_called then last_value else 0 end from pg_temp.c}}
+
+# Stale statements: prepared again and retried <<<
+test stale_statement-1.1 {allrows: a column added under select *} {*}$commonargs -body {
+	pg allrows -as lists {select * from t}
+	pg onecolumn {alter table t add column x int}
+	pg allrows -as lists {select * from t}
+} -result {{1 2 {}}}
+
+test stale_statement-1.2 {onecolumn: a column dropped under select *} {*}$commonargs -body {
+	pg onecolumn {select * from t}
+	pg onecolumn {alter table t drop column a}
+	pg onecolumn {select * from t}
+} -result 2
+
+test stale_statement-1.3 {vars: a column's type changed under a parameter typed for the old one (42883)} {*}$commonargs -body {
+	set x	1
+	pg vars {select b from t where a = :x}
+	pg onecolumn {alter table t alter column a type text}
+	unset b
+	pg vars {select b from t where a = :x}
+	set b
+} -result 2
+
+test stale_statement-1.4 {foreach: a column added under select *} {*}$commonargs -body {
+	pg foreach -as lists row {select * from t} {}
+	pg onecolumn {alter table t add column x int}
+	set rows	{}
+	pg foreach -as lists row {select * from t} {lappend rows $row}
+	set rows
+} -result {{1 2 {}}}
+
+test stale_statement-1.5 {In a transaction: the stale statement's own error, and the next call prepares it again} {*}$commonargs -body {
+	pg allrows -as lists {select * from t}
+	pg onecolumn {alter table t add column x int}
+	list \
+		[catch {pg transaction {pg allrows -as lists {select * from t}}} e o] \
+		[lrange [dict get $o -errorcode] 0 3] \
+		$e \
+		[pg allrows -as lists {select * from t}]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} {Postgres error: cached plan must not change result type} {{1 2 {}}}}
+# Stale statements >>>
+
+# Other errors with those codes: the statement's own, run once <<<
+test stale_statement-2.1 {onecolumn: a statement prepared in this call that fails with 0A000 runs once} {*}$commonargs -body {
+	list [catch {pg onecolumn {select pg_temp.counted('0A000')}} e o] [lrange [dict get $o -errorcode] 0 3] $e [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} {Postgres error: raised 0A000} 1}
+
+test stale_statement-2.2 {allrows: a statement prepared in this call that fails with 42883 runs once} {*}$commonargs -body {
+	list [catch {pg allrows {select pg_temp.counted('42883')}} e o] [lrange [dict get $o -errorcode] 0 3] [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} 1}
+
+test stale_statement-2.3 {onecolumn: a cached statement whose function raises 42883 isn't stale: it runs once} {*}$commonargs -body {
+	set x	{}
+	pg onecolumn {select pg_temp.counted(:x)}
+	set x	42883
+	list [catch {pg onecolumn {select pg_temp.counted(:x)}} e o] [lrange [dict get $o -errorcode] 0 3] [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} 2}
+
+test stale_statement-2.4 {vars: a cached statement whose function raises 0A000 isn't stale: it runs once} {*}$commonargs -body {
+	set x	{}
+	pg vars {select pg_temp.counted(:x) as y}
+	set x	0A000
+	list [catch {pg vars {select pg_temp.counted(:x) as y}} e o] [lrange [dict get $o -errorcode] 0 3] [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} 2}
+
+test stale_statement-2.5 {In a transaction: the statement's own error, not "current transaction is aborted"} {*}$commonargs -body {
+	list [catch {pg transaction {pg onecolumn {select pg_temp.counted('0A000')}}} e o] [lrange [dict get $o -errorcode] 0 3] $e [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} {Postgres error: raised 0A000} 1}
+# Other errors >>>
+
+rename ran {}
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

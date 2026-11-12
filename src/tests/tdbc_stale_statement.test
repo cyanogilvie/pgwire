@@ -1,0 +1,122 @@
+set here	[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
+package require tdbc::pgwire
+
+# stale_statement.test's cases for the tdbc driver's statements, which are prepared once, when made
+# ([$db prepare]), and run any number of times after: a schema change between runs leaves the
+# statement stale, to be prepared again and retried (allrows, foreach and execute alike), but
+# other errors with those codes are the statement's own, run once, and so is an error in a
+# transaction, which the error has aborted.  Any other error is the statement's own, too.
+#
+# Temporary objects only: each test's connection is its own, and they go with it.  nextval isn't
+# rolled back, even with its transaction, so the sequence c counts how often a statement ran
+
+set connargs	[list -db pagila -user postgres -password insecure -host $PGHOST -port $PGPORT]
+
+set commonargs	[list -setup {
+	tdbc::pgwire::connection create tdb {*}$connargs
+	tdb allrows {create temp table t (a int, b int)}
+	tdb allrows {insert into t values (1, 2)}
+	tdb allrows {create temp sequence c}
+	tdb allrows {
+		create function pg_temp.counted(code text) returns int language plpgsql as $$
+		begin
+			perform nextval('pg_temp.c');
+			if code <> '' then
+				raise exception 'raised %', code using errcode = code;
+			end if;
+			return 1;
+		end
+		$$
+	}
+} -cleanup {
+	if {[info object isa object tdb]} {tdb destroy}
+	unset -nocomplain st rs e o x rows row
+}]
+
+proc ran {} {tdb onecolumn {select case when is_called then last_value else 0 end from pg_temp.c}}
+
+# Stale statements: prepared again and retried <<<
+test tdbc_stale_statement-1.1 {statement allrows: a column added under select *} {*}$commonargs -body {
+	set st	[tdb prepare {select * from t}]
+	$st allrows -as lists
+	tdb allrows {alter table t add column x int}
+	$st allrows -as lists
+} -result {{1 2 {}}}
+
+test tdbc_stale_statement-1.2 {statement foreach: a column dropped under select *} {*}$commonargs -body {
+	set st	[tdb prepare {select * from t}]
+	$st foreach -as lists row {}
+	tdb allrows {alter table t drop column a}
+	set rows	{}
+	$st foreach -as lists row {lappend rows $row}
+	set rows
+} -result 2
+
+test tdbc_stale_statement-1.3 {statement execute: a column's type changed under a parameter typed for the old one (42883)} {*}$commonargs -body {
+	set st	[tdb prepare {select b from t where a = :x}]
+	set x	1
+	[$st execute] close
+	tdb allrows {alter table t alter column a type text}
+	set rs		[$st execute]
+	set rows	[$rs allrows -as lists]
+	$rs close
+	set rows
+} -result 2
+
+test tdbc_stale_statement-1.4 {statement allrows in a transaction: the stale statement's own error, and the next run prepares it again} {*}$commonargs -body {
+	set st	[tdb prepare {select * from t}]
+	$st allrows -as lists
+	tdb allrows {alter table t add column x int}
+	list \
+		[catch {tdb transaction {$st allrows -as lists}} e o] \
+		[lrange [dict get $o -errorcode] 0 3] \
+		$e \
+		[$st allrows -as lists]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} {Postgres error: cached plan must not change result type} {{1 2 {}}}}
+# Stale statements >>>
+
+# Other errors: the statement's own, run once <<<
+test tdbc_stale_statement-2.1 {statement allrows: a function's 0A000 on the first run runs once} {*}$commonargs -body {
+	set st	[tdb prepare {select pg_temp.counted('0A000')}]
+	list [catch {$st allrows} e o] [lrange [dict get $o -errorcode] 0 3] $e [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} {Postgres error: raised 0A000} 1}
+
+test tdbc_stale_statement-2.2 {statement foreach: a function's 42883 on a later run runs once} {*}$commonargs -body {
+	set st	[tdb prepare {select pg_temp.counted(:x)}]
+	set x	{}
+	$st foreach row {}
+	set x	42883
+	list [catch {$st foreach row {}} e o] [lrange [dict get $o -errorcode] 0 3] [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 42883} 2}
+
+test tdbc_stale_statement-2.3 {statement execute: a function's 0A000 on a later run runs once} {*}$commonargs -body {
+	set st	[tdb prepare {select pg_temp.counted(:x)}]
+	set x	{}
+	[$st execute] close
+	set x	0A000
+	list [catch {[$st execute] close} e o] [lrange [dict get $o -errorcode] 0 3] [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} 2}
+
+test tdbc_stale_statement-2.4 {statement allrows in a transaction: the statement's own error, not "current transaction is aborted"} {*}$commonargs -body {
+	set st	[tdb prepare {select pg_temp.counted('0A000')}]
+	list [catch {tdb transaction {$st allrows}} e o] [lrange [dict get $o -errorcode] 0 3] $e [ran]
+} -result {1 {PGWIRE ErrorResponse ERROR 0A000} {Postgres error: raised 0A000} 1}
+
+test tdbc_stale_statement-2.5 {statement allrows: any other error is the statement's own} {*}$commonargs -body {
+	set st	[tdb prepare {select 1/0}]
+	list [catch {$st allrows} e o] [lrange [dict get $o -errorcode] 0 3] $e
+} -result {1 {PGWIRE ErrorResponse ERROR 22012} {Postgres error: division by zero}}
+
+test tdbc_stale_statement-2.6 {statement foreach: any other error is the statement's own} {*}$commonargs -body {
+	set st	[tdb prepare {select 1/0}]
+	list [catch {$st foreach row {}} e o] [lrange [dict get $o -errorcode] 0 3] $e
+} -result {1 {PGWIRE ErrorResponse ERROR 22012} {Postgres error: division by zero}}
+# Other errors >>>
+
+rename ran {}
+
+::tcltest::cleanupTests
+return
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

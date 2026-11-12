@@ -288,6 +288,7 @@ oo::class create ::tdbc::pgwire::connection { #<<<
 	forward onecolumn			pg onecolumn
 	forward prepare_extended_query	pg prepare_extended_query
 	forward reprepare			pg reprepare
+	forward stale_statement		pg stale_statement
 	forward save_ops			pg save_ops
 	forward preserve			pg preserve
 	forward release				pg release
@@ -337,9 +338,27 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 
 		if {[self next] ne ""} next
 
-		set stmt_info	[$con prepare_extended_query $sql]
+		my _prepare
 		$con preserve $sql
+	}
+
+	#>>>
+	method _prepare {} { # The statement as the connection's cache has it now, prepared again if it was dropped: its stmt_info, also set as its variables <<<
+		# Each run looks it up afresh: a run that found it stale has dropped it from the cache (perhaps in a
+		# transaction, which can't prepare it again), and other statements with the same SQL share it
+		set stmt_info	[$con prepare_extended_query $sql]
 		dict with stmt_info {}
+		set stmt_info
+	}
+
+	#>>>
+	method _retry_stale options { # Whether the error in $options is the statement gone stale with a schema change, to be run again <<<
+		# Not in a transaction block, which the error has aborted: then the error is the caller's to handle,
+		# and the next run prepares the statement again
+		expr {
+			[$con stale_statement $sql $stmt_info $options] &&
+			[$con transaction_status] eq "I"
+		}
 	}
 
 	#>>>
@@ -418,28 +437,22 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		set max_rows_per_batch	0
 
 		set tcl_encoding	[$con tcl_encoding]
-		lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
 
 		try {
 			set rowbuffer	[namespace current]::portal
-			try {
-				coroutine $rowbuffer $con rowbuffer_coro \
-					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
-			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
-			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-				# 0A000 - happens if a schema change alters the result row format
-				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
-				$con close_statement $stmt_name
-				set ops_cache	{}
-				set stmt_info	[$con reprepare $sql]
-				dict with stmt_info {}
-
+			set retries		1
+			while 1 {
+				my _prepare
 				lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
-
-				coroutine $rowbuffer $con rowbuffer_coro \
-					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
-			} on error {errmsg options} {
-				::pgwire::log error "Unhandled error: $options"
+				try {
+					coroutine $rowbuffer $con rowbuffer_coro \
+						$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
+				} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+				  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+					if {[my _retry_stale $options] && [incr retries -1] >= 0} continue
+					return -options $options $errmsg
+				}
+				break
 			}
 
 			set rows	{}
@@ -493,31 +506,24 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 		set max_rows_per_batch	[$con batchsize]
 
 		set tcl_encoding	[$con tcl_encoding]
-		lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
 
-		set rowbuffer	[namespace current]::portal
 		try {
-			coroutine $rowbuffer $con rowbuffer_coro \
-				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
-		} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
-		  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-			# 0A000 - happens if a schema change alters the result row format
-			# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
-			$con close_statement $stmt_name
-			set ops_cache	{}
-			set stmt_info	[$con reprepare $sql]
-			dict with stmt_info {}
+			set rowbuffer	[namespace current]::portal
+			set retries		1
+			while 1 {
+				my _prepare
+				lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
+				try {
+					coroutine $rowbuffer $con rowbuffer_coro \
+						$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
+				} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+				  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+					if {[my _retry_stale $options] && [incr retries -1] >= 0} continue
+					return -options $options $errmsg
+				}
+				break
+			}
 
-			lassign [my _start_query $as $opts {*}$args] makerow parameters ops makerows
-
-			coroutine $rowbuffer $con rowbuffer_coro \
-				$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
-		} on error {errmsg options} {
-			puts stderr "Unhandled error: $options"
-		}
-
-		set tcl_encoding	[$con tcl_encoding]
-		try {
 			set broken	0
 			while {!$broken} {
 				lassign [$rowbuffer nextbatch] outcome details datarows
@@ -611,6 +617,7 @@ oo::class create ::tdbc::pgwire::statement { #<<<
 	method sqlcode {} { set sql }
 	method delims {} { set delims }
 	method stmt_info {} { set stmt_info }
+	method current_stmt_info {} { my _prepare }
 }
 
 #>>>
@@ -654,22 +661,44 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 		set rowcount			0
 		set datarows			{}
 		set con					[$stmt con]
-		set c_types				[$stmt c_types]
-		set columns				[$stmt columns]
-		set rformats			[$stmt rformats]
-		set stmt_name			[$stmt stmt_name]
-		set ops_cache			[$stmt ops_cache]
-		set delims				[$stmt delims]
-		set stmt_info			[$stmt stmt_info]
 		set tcl_encoding		[$con tcl_encoding]
 		set max_rows_per_batch	[$con batchsize]
-		foreach format {dicts lists} {
-			if {[dict exists $ops_cache $format]} {
-				set ops_$format	[dict get $ops_cache $format]
-			} else {
-				set ops_$format	[::pgwire::build_ops $format $c_types]
-				$con save_ops [$stmt sqlcode] $format [set ops_$format]
+
+		$con buffer_nesting
+
+		set retries	1
+		while 1 {
+			set stmt_info			[$stmt current_stmt_info]
+			set c_types				[$stmt c_types]
+			set columns				[$stmt columns]
+			set rformats			[$stmt rformats]
+			set stmt_name			[$stmt stmt_name]
+			set ops_cache			[$stmt ops_cache]
+			set delims				[$stmt delims]
+			foreach format {dicts lists} {
+				if {[dict exists $ops_cache $format]} {
+					set ops_$format	[dict get $ops_cache $format]
+				} else {
+					set ops_$format	[::pgwire::build_ops $format $c_types]
+					$con save_ops [$stmt sqlcode] $format [set ops_$format]
+				}
 			}
+
+			set parameters	[apply [$stmt build_params]]
+			try {
+				coroutine [namespace current]::portal $con rowbuffer_coro $stmt_name [self] $rformats $parameters $max_rows_per_batch $stmt_info
+			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
+			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
+				# The statement gone stale with a schema change is run again, prepared again, unless in a
+				# transaction block, which the error has aborted: the error is then the caller's to handle
+				if {
+					[$con stale_statement [$stmt sqlcode] $stmt_info $options] &&
+					[$con transaction_status] eq "I" &&
+					[incr retries -1] >= 0
+				} continue
+				return -options $options $errmsg
+			}
+			break
 		}
 
 		if {!$::pgwire::accelerators} {
@@ -684,11 +713,6 @@ oo::class create ::tdbc::pgwire::resultset { #<<<
 			# rewritten method won't see them
 			oo::objdefine [self] variable {*}[info class variables [self class]]
 		}
-
-		$con buffer_nesting
-
-		set parameters	[apply [$stmt build_params]]
-		coroutine [namespace current]::portal $con rowbuffer_coro $stmt_name [self] $rformats $parameters $max_rows_per_batch $stmt_info
 
 		set open	1
 	}

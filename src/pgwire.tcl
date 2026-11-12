@@ -3170,6 +3170,8 @@ oo::class create ::pgwire {
 						sql_compiled		$compiled \
 					] \
 				]]
+				# Not in the cache's copy: this call's alone
+				dict set stmt_info from_cache 0
 				#::pgwire::log notice "Finished preparing statement, execute:\n$execute"
 			} on error {errmsg options} { #<<<
 				#::pgwire::log error "Error preparing statement,\n$sql\n-- compiled ----------------\n$compiled\ syncing: [dict get $options -errorinfo]"
@@ -3197,6 +3199,9 @@ oo::class create ::pgwire {
 			#	- $heat: how frequently this prepared statement has been used recently, relative to others
 			#	- $ops_cache: dictionary, keyed by format, of [pgwire::build_ops $format $c_types]
 			#	- $param_types: input types
+
+			# Prepared by an earlier call, so a schema change since can have made it stale (stale_statement)
+			dict set stmt_info from_cache 1
 		}
 		#>>>
 
@@ -3207,6 +3212,29 @@ oo::class create ::pgwire {
 	method reprepare sql { # If a prepared statement becomes stale (changed schema, etc), this can be used to replace it <<<
 		dict unset prepared $sql
 		my prepare_extended_query $sql
+	}
+
+	#>>>
+	method stale_statement {sql stmt_info options} { # Whether the error in $options is a cached statement gone stale with a schema change; if so it's dropped, to be prepared again <<<
+		# A schema change can leave a statement prepared by an earlier call unable to run as planned:
+		# a column added or dropped under select * (0A000 "cached plan must not change result type",
+		# from RevalidateCachedQuery), or a column's type changed under a parameter typed for the old
+		# one (42883 "operator does not exist").  Both come from the server re-analysing the statement
+		# itself, so they carry no Where context, unlike the same codes raised in a function it calls.
+		# A statement prepared in this call can't be stale: those codes are its own error
+		if {![dict get $stmt_info from_cache]} {return 0}
+		set fields	[lindex [dict get $options -errorcode] 4]
+		if {[dict exists $fields Where]} {return 0}
+		switch -exact -- [lindex [dict get $options -errorcode] 3] {
+			0A000 {
+				if {![dict exists $fields Routine] || [dict get $fields Routine] ne "RevalidateCachedQuery"} {return 0}
+			}
+			42883 {}
+			default {return 0}
+		}
+		my close_statement [dict get $stmt_info stmt_name]
+		dict unset prepared $sql
+		return 1
 	}
 
 	#>>>
@@ -3772,11 +3800,13 @@ oo::class create ::pgwire {
 				coroutine $rowbuffer my rowbuffer_coro $stmt_name "" $rformats $parameters $max_rows_per_batch $stmt_info
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-				# 0A000 - happens if a schema change alters the result row format
-				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
-				my close_statement $stmt_name
-				dict unset prepared $sqlcode
-				if {[incr retries -1] >= 0} continue
+				# A statement a schema change has made stale is prepared again and retried, unless it ran in a
+				# transaction block, which the error has aborted: the error is then the caller's to handle
+				if {
+					[my stale_statement $sqlcode $stmt_info $options] &&
+					$transaction_status eq "I" &&
+					[incr retries -1] >= 0
+				} continue
 				return -options $options $errmsg
 			}
 			break
@@ -3933,13 +3963,13 @@ oo::class create ::pgwire {
 					$stmt_name $rowbuffer $rformats $parameters $max_rows_per_batch $stmt_info
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-				# 0A000 - happens if a schema change alters the result row format
-				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
-				my close_statement $stmt_name
-				dict unset prepared $sqlcode
-				if {[incr retries -1] >= 0} {
-					continue
-				}
+				# A statement a schema change has made stale is prepared again and retried, unless it ran in a
+				# transaction block, which the error has aborted: the error is then the caller's to handle
+				if {
+					[my stale_statement $sqlcode $stmt_info $options] &&
+					$transaction_status eq "I" &&
+					[incr retries -1] >= 0
+				} continue
 				return -options $options $errmsg
 			}
 			break
@@ -4037,17 +4067,17 @@ oo::class create ::pgwire {
 					outcome details datarows
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-				# 0A000 - happens if a schema change alters the result row format
-				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
 				if {![info exists stmt_name]} {
 					# It failed to prepare: the query's own error, not a stale prepared statement's
 					return -options $options $errmsg
 				}
-				my close_statement $stmt_name
-				dict unset prepared $sql
-				if {[incr retries -1] >= 0} {
-					continue
-				}
+				# A statement a schema change has made stale is prepared again and retried, unless it ran in a
+				# transaction block, which the error has aborted: the error is then the caller's to handle
+				if {
+					[my stale_statement $sql $stmt_info $options] &&
+					$transaction_status eq "I" &&
+					[incr retries -1] >= 0
+				} continue
 				return -options $options $errmsg
 			}
 			break
@@ -4152,17 +4182,17 @@ oo::class create ::pgwire {
 						outcome details datarows
 				} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 				  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-					# 0A000 - happens if a schema change alters the result row format
-					# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
 					if {![info exists stmt_name]} {
 						# It failed to prepare: the query's own error, not a stale prepared statement's
 						return -options $options $errmsg
 					}
-					my close_statement $stmt_name
-					dict unset prepared $sql
-					if {[incr retries -1] >= 0} {
-						continue
-					}
+					# A statement a schema change has made stale is prepared again and retried, unless it ran in a
+					# transaction block, which the error has aborted: the error is then the caller's to handle
+					if {
+						[my stale_statement $sql $stmt_info $options] &&
+						$transaction_status eq "I" &&
+						[incr retries -1] >= 0
+					} continue
 					return -options $options $errmsg
 				}
 				break
@@ -4281,17 +4311,18 @@ oo::class create ::pgwire {
 
 			} trap {PGWIRE ErrorResponse ERROR 0A000} {errmsg options} - \
 			  trap {PGWIRE ErrorResponse ERROR 42883} {errmsg options} {
-				# 0A000 - happens if a schema change alters the result row format
-				# 42883 "operator does not exist" - can occur if a schema change altered an expression using bind params
 				if {![info exists stmt_name]} {
 					# It failed to prepare: the query's own error, not a stale prepared statement's
 					return -options $options $errmsg
 				}
-				my close_statement $stmt_name
-				dict unset prepared $sql
-				if {$retry_armed && [incr retries -1] >= 0} {
-					continue
-				}
+				# A statement a schema change has made stale is prepared again and retried, unless it ran in a
+				# transaction block, which the error has aborted, or its data has started to go
+				if {
+					[my stale_statement $sql $stmt_info $options] &&
+					$retry_armed &&
+					$transaction_status eq "I" &&
+					[incr retries -1] >= 0
+				} continue
 				return -options $options $errmsg
 
 			} on error {errmsg options} {
