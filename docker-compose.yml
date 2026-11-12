@@ -1,7 +1,15 @@
+# The test rig (make test, valgrind, gdb, benchmark): db is Postgres with the pagila sample db,
+# pgwire the cftcl image the tests run in.  Both build for the host's arch (arm64 or x86_64); to
+# run another, set DOCKER_DEFAULT_PLATFORM (linux/amd64, linux/arm64).  PG_VERSION picks
+# Postgres's major version (default 18).
 services:
     db:
-        platform: linux/amd64
-        build: sampledb
+        # Tagged by version, so a run with another PG_VERSION builds its own rather than reusing this
+        image: pgwire-db:pg${PG_VERSION:-18}
+        build:
+            context: sampledb
+            args:
+                PG_VERSION: ${PG_VERSION:-18}
         volumes:
             - run:/run
             - data:/data
@@ -11,20 +19,21 @@ services:
             PGHOST: /run/postgresql
         ports:
             - "5432"
+        # Failures in start_period don't count: under emulation (another arch) Postgres takes
+        # seconds to start, and start_interval keeps a native start's wait as short as before
         healthcheck:
             test: ["CMD", "psql", "-U", "postgres", "-d", "pagila", "-c", "select count(*) from actor"]
             interval: 1s
             timeout: 1s
             retries: 1
-            start_period: 1s
+            start_period: 30s
+            start_interval: 1s
         security_opt:
           - seccomp:unconfined
         cap_add:
             - NET_ADMIN
             - CAP_SYS_NICE
     pgwire:
-        #platform: linux/arm64
-        platform: linux/amd64
         build: pgwire
         depends_on:
             db:
@@ -51,6 +60,8 @@ services:
         working_dir: /src
         entrypoint: ["make"]
 volumes:
+    # A data directory is only readable by its Postgres major version: one volume for each
     data:
+        name: pgwire_data_pg${PG_VERSION:-18}
     run:
 # vim: expandtab

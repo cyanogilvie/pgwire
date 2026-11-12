@@ -217,6 +217,27 @@ The "extended_query" method of the pgwire class (and methods derived from this)
 are fairly well covered by the tests, but test coverage of the TDBC shim is
 less complete.  Feedback and bug reports welcome!
 
+Running the Tests
+-----------------
+
+`make test` builds the module and runs the test suite in Docker (docker
+compose): a Postgres server with the pagila sample database, and the tests in
+a stock Alpine image with the [cftcl](https://cftcl.cyanogilvie.com) Tcl 9
+runtime.  Both build for the host's architecture, arm64 or x86_64.  To run
+another, set `DOCKER_DEFAULT_PLATFORM` (`linux/amd64` or `linux/arm64`; it
+runs under emulation, slowly), and `PG_VERSION` for another Postgres major
+version (the default is 18):
+
+```sh
+make test
+make test TESTFLAGS="-file stale_statement.test"
+PG_VERSION=17 make test
+```
+
+`make valgrind`, `make gdb` and `make benchmark` run in the same rig.  The
+tests create and drop tables of their own in pagila, so don't point them at
+a database you care about.
+
 License
 -------
 
