@@ -2028,13 +2028,15 @@ oo::class create ::pgwire {
 						AuthenticationSSPI { # AuthenticationSSPI <<<
 							#>>>
 						}
-						AuthenticationSASL { # AuthenticationSASL <<<
-							set i	4
+						AuthenticationSASL { # AuthenticationSASL: the mechanisms, as one parameter (the handler's list) <<<
+							set i			4
+							set mechanisms	{}
 							while 1 {
 								set mechanism	[my _get_string $data i]
 								if {$mechanism eq {}} break
-								lappend messageparams	$mechanism
+								lappend mechanisms	$mechanism
 							}
+							lappend messageparams	$mechanisms
 							#>>>
 						}
 						AuthenticationSASLContinue { # AuthenticationSASLContinue <<<

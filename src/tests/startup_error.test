@@ -41,6 +41,16 @@ test startup_error-1.1 {A fatal error in an auth handler (no shared SASL mechani
 	unset -nocomplain e o
 } -result {1 {PGWIRE FATAL} {Action AuthenticationSASL handler error: No shared SASL mechanisms supported from list: SCRAM-SHA-256-PLUS}}
 
+test startup_error-1.1.1 {SCRAM-SHA-256 is found among several mechanisms (over TLS a server lists SCRAM-SHA-256-PLUS first)} -setup {
+	fake_reply [auth_message 10 SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0] 0
+} -body {
+	# The fake server never answers the SASLInitialResponse, so the startup fails later, on the close
+	catch {pgwire new [socket 127.0.0.1 $fake_port] db user password} e
+	string match {*No shared SASL mechanisms*} $e
+} -cleanup {
+	unset -nocomplain e
+} -result 0
+
 test startup_error-1.2 {The server closing after asking for a password: a connection error, not a missing command} -setup {
 	fake_reply [auth_message 3] 1
 } -body {
